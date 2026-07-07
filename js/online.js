@@ -32,6 +32,16 @@ let current = null; // { code, lobbyRef, playerRef, disc, unsub, inGame }
 
 async function ensureFirebase() {
   if (fb) return fb;
+
+  // Catch the most common setup mistake before it turns into a silent hang.
+  const url = firebaseConfig.databaseURL || "";
+  if (!/^https:\/\/[a-z0-9-]+[^ ]*\.(firebaseio\.com|firebasedatabase\.app)\/?$/i.test(url)) {
+    throw new Error(
+      "databaseURL looks wrong in firebase-config.js — copy the exact URL " +
+      "shown at the top of the Realtime Database → Data tab.",
+    );
+  }
+
   const base = `https://www.gstatic.com/firebasejs/${FB_VERSION}`;
   const [appMod, dbMod] = await Promise.all([
     import(`${base}/firebase-app.js`),
@@ -277,15 +287,25 @@ function renderLobby(code, lobby) {
 
 /* ---------- wiring ---------- */
 
-// Wraps async actions: disables the button while pending, toasts errors.
+// Wraps async actions: disables the button while pending, times out
+// instead of hanging forever, and toasts the real error.
 function guard(btn, fn) {
   return async () => {
     if (btn.disabled) return;
     btn.disabled = true;
     try {
-      await fn();
+      await Promise.race([
+        fn(),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error(
+            "Timed out reaching Firebase. Check: (1) you created a REALTIME " +
+            "Database (not Firestore), (2) databaseURL in firebase-config.js " +
+            "matches the URL on its Data tab, (3) the rules are published.",
+          )), 10000),
+        ),
+      ]);
     } catch (err) {
-      toast(err?.message ?? "Something went wrong.");
+      toast(err?.message ?? "Something went wrong.", 6000);
     } finally {
       btn.disabled = false;
     }
