@@ -279,6 +279,35 @@ body {
 .slot.joined .tank { opacity: 1; filter: none; }
 .slot.joined .slot-status { color: var(--p); }
 
+.slot.botted {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--p) 60%, transparent);
+}
+.slot.botted .tank { opacity: .85; filter: none; }
+.slot.botted .slot-status { color: var(--p); }
+
+.bot-chip {
+  font-family: "Chakra Petch", system-ui;
+  font-weight: 700;
+  font-size: .62rem;
+  letter-spacing: .12em;
+  color: var(--smoke);
+  background: #0e1116;
+  border: 1px dashed var(--rivet);
+  border-radius: 999px;
+  padding: .32rem .65rem;
+  margin-top: 2px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.bot-chip:active { transform: translateY(1px); }
+.slot.botted .bot-chip {
+  color: var(--p);
+  border-style: solid;
+  border-color: var(--p);
+}
+
 /* ---------- settings / keybinds ---------- */
 .binds { display: grid; gap: 14px; }
 @media (min-width: 620px) { .binds { grid-template-columns: 1fr 1fr; } }
@@ -392,8 +421,14 @@ body {
 .lobby-row.empty { border-style: dashed; color: var(--smoke); font-size: .88rem; }
 .lobby-row.empty .tank { opacity: .25; filter: grayscale(1); }
 
-.chip {
+.row-end {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip {
   font-size: .66rem;
   font-weight: 700;
   letter-spacing: .16em;
@@ -401,7 +436,16 @@ body {
   border: 1px solid #7a5b1e;
   border-radius: 999px;
   padding: .2rem .55rem;
+  background: transparent;
+  white-space: nowrap;
 }
+.chip-btn {
+  font-family: "Chakra Petch", system-ui;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.chip-btn:active { transform: translateY(1px); }
 
 /* ---------- toast ---------- */
 #toast {
@@ -440,10 +484,22 @@ body {
   width: 100%;
   height: 100%;
   display: block;
-  background: #0e1116;
+  background: #ffffff;
   border: 1px solid #2a313d;
   border-radius: var(--radius);
   touch-action: none;
+}
+
+.bar .score {
+  margin-left: auto;
+  display: flex;
+  gap: 12px;
+}
+.score .sc {
+  font-family: "Black Ops One", system-ui;
+  font-size: 1.05rem;
+  color: var(--p);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, .5);
 }
 
 .touch-pad {
@@ -453,13 +509,13 @@ body {
   gap: 12px;
   padding-bottom: max(0px, env(safe-area-inset-bottom));
 }
-.tp-group { display: flex; gap: 14px; }
+.tp-group { display: flex; gap: 12px; }
 .tp-btn {
-  width: 66px;
-  height: 66px;
+  width: 60px;
+  height: 60px;
   border-radius: 50%;
   font-family: "Chakra Petch", system-ui;
-  font-size: 1.5rem;
+  font-size: 1.4rem;
   line-height: 1;
   color: var(--chalk);
   background: linear-gradient(#2a3140, #232936);
@@ -477,6 +533,17 @@ body {
   border-color: var(--blue);
   color: var(--blue);
 }
+.tp-fire {
+  width: 68px;
+  height: 68px;
+  font-family: "Black Ops One", system-ui;
+  font-size: .72rem;
+  letter-spacing: .06em;
+  color: var(--red);
+  border-color: #7a3a34;
+  background: linear-gradient(#3a2a2c, #2c2124);
+}
+.tp-fire.held { border-color: var(--red); color: var(--red); }
 
 /* ---------- motion safety ---------- */
 @media (prefers-reduced-motion: reduce) {
