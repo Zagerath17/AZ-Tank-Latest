@@ -4,8 +4,9 @@
 // on phones). Start unlocks at 2+ tanks.
 // ================================================================
 
-import { onEnter, onLeave, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { onEnter, onLeave, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
 import { getBinds, keyLabel } from "./settings.js";
+import { startLocalGame } from "./game.js";
 
 const joined = new Set();
 
@@ -78,8 +79,7 @@ export function initLocal() {
   });
 
   document.getElementById("local-start").addEventListener("click", () => {
-    // Hand-off point for the game scene (next build step).
     sessionStorage.setItem("tank.localPlayers", JSON.stringify([...joined]));
-    toast(`${joined.size} tanks locked in — the battle scene is the next build step.`);
+    startLocalGame([...joined]);
   });
 }

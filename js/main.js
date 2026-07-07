@@ -5,6 +5,7 @@
 import { initSettings } from "./settings.js";
 import { initLocal } from "./local.js";
 import { initOnline } from "./online.js";
+import { initGame } from "./game.js";
 
 export const COLORS = ["red", "green", "blue", "yellow"];
 export const COLOR_NAMES = { red: "Red", green: "Green", blue: "Blue", yellow: "Yellow" };
@@ -77,3 +78,4 @@ renderMenuTanks();
 initSettings();
 initLocal();
 initOnline();
+initGame();

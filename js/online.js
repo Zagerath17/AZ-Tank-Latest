@@ -5,7 +5,12 @@
 //     createdAt: server timestamp,
 //     hostId:    player id,
 //     state:     "waiting" | "starting",
-//     players:   { [playerId]: { joinedAt: server timestamp } }
+//     seed:      number (set by the host at start — everyone
+//                builds the identical maze from it),
+//     players:   { [playerId]: {
+//       joinedAt: server timestamp,
+//       pos: { x, y, a }   // streamed during the match
+//     } }
 //   }
 //
 // Colors are derived from join order (red, green, blue, yellow),
@@ -15,12 +20,13 @@
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
+import { startOnlineGame, onlinePlayersUpdate, stopGame } from "./game.js";
 
 const FB_VERSION = "10.12.2";
 const MAX_PLAYERS = 4;
 
 let fb = null;      // { db, ref, get, set, update, remove, onValue, onDisconnect, serverTimestamp }
-let current = null; // { code, lobbyRef, playerRef, disc, unsub }
+let current = null; // { code, lobbyRef, playerRef, disc, unsub, inGame }
 
 /* ---------- firebase (lazy) ---------- */
 
@@ -56,6 +62,13 @@ function myId() {
     sessionStorage.setItem("tank.playerId", id);
   }
   return id;
+}
+
+// Join order decides color: earliest joinedAt is red, then green…
+function sortPlayers(players) {
+  return Object.entries(players ?? {}).sort(
+    (a, b) => (a[1].joinedAt ?? 0) - (b[1].joinedAt ?? 0) || a[0].localeCompare(b[0]),
+  );
 }
 
 /* ---------- create / join ---------- */
@@ -114,11 +127,11 @@ async function enterLobby(code) {
 
   const unsub = f.onValue(
     lobbyRef,
-    (snap) => renderLobby(code, snap),
-    () => { toast("Lost connection to the lobby."); exitToOnline(); },
+    (snap) => handleSnapshot(code, snap),
+    () => { toast("Lost connection to the lobby."); stopGame(); exitToOnline(); },
   );
 
-  current = { code, lobbyRef, playerRef, disc, unsub };
+  current = { code, lobbyRef, playerRef, disc, unsub, inGame: false };
   showScreen("screen-lobby");
 }
 
@@ -132,6 +145,7 @@ function exitToOnline() {
 
 async function leaveLobby() {
   const c = current;
+  stopGame(); // no-op if we weren't mid-match
   if (!c) { showScreen("screen-online"); return; }
 
   current = null;
@@ -148,30 +162,74 @@ async function leaveLobby() {
   } catch { /* offline — onDisconnect already covered us */ }
 }
 
+// Host only: share a seed so every client builds the same maze.
 async function startMatch() {
   if (!current) return;
   const f = await ensureFirebase();
-  await f.update(current.lobbyRef, { state: "starting" });
+  await f.update(current.lobbyRef, {
+    state: "starting",
+    seed: Math.floor(Math.random() * 2147483647),
+  });
 }
 
-/* ---------- render ---------- */
+/* ---------- snapshot routing ---------- */
 
-function renderLobby(code, snap) {
+function handleSnapshot(code, snap) {
   if (!current || current.code !== code) return;
 
   if (!snap.exists()) {
+    stopGame();
     toast("Lobby closed.");
     exitToOnline();
     return;
   }
 
   const lobby = snap.val();
-  const me = myId();
 
-  // Join order decides color: earliest joinedAt is red, then green, blue, yellow.
-  const entries = Object.entries(lobby.players ?? {}).sort(
-    (a, b) => (a[1].joinedAt ?? 0) - (b[1].joinedAt ?? 0) || a[0].localeCompare(b[0]),
-  );
+  // Match running (or starting right now)?
+  if (lobby.state === "starting" && lobby.seed != null) {
+    if (!current.inGame) beginOnlineGame(code, lobby);
+    else onlinePlayersUpdate(lobby.players ?? {});
+    return;
+  }
+
+  renderLobby(code, lobby);
+}
+
+function beginOnlineGame(code, lobby) {
+  const me = myId();
+  const entries = sortPlayers(lobby.players);
+  const roster = entries
+    .slice(0, MAX_PLAYERS)
+    .map(([id], i) => ({ id, color: COLORS[i] }));
+
+  if (!roster.some((p) => p.id === me)) {
+    // Shouldn't happen (joins are blocked once started), but be safe.
+    toast("The match started without you.");
+    leaveLobby();
+    return;
+  }
+
+  current.inGame = true;
+
+  startOnlineGame({
+    seed: lobby.seed,
+    myId: me,
+    roster,
+    // Fire-and-forget position stream; throttled inside the game loop.
+    sendPos: (pos) => {
+      if (!current || !fb) return;
+      fb.set(fb.ref(fb.db, `lobbies/${code}/players/${me}/pos`), pos).catch(() => {});
+    },
+    onExit: () => leaveLobby(),
+  });
+}
+
+/* ---------- lobby screen render ---------- */
+
+function renderLobby(code, lobby) {
+  const me = myId();
+  const entries = sortPlayers(lobby.players);
 
   const myIndex = entries.findIndex(([id]) => id === me);
   if (myIndex === -1) { toast("You were removed from the lobby."); exitToOnline(); return; }
@@ -205,10 +263,7 @@ function renderLobby(code, snap) {
   const startBtn = document.getElementById("lobby-start");
   const status = document.getElementById("lobby-status");
 
-  if (lobby.state === "starting") {
-    startBtn.hidden = true;
-    status.textContent = "Match starting — the battle scene is the next build step.";
-  } else if (isHost) {
+  if (isHost) {
     startBtn.hidden = false;
     startBtn.disabled = entries.length < 2;
     status.textContent = entries.length < 2
