@@ -1,9 +1,0 @@
-# Tank Brawl — static site, no build step needed.
-[build]
-  publish = "."
-
-# Never cache HTML so deploys show up immediately.
-[[headers]]
-  for = "/index.html"
-  [headers.values]
-    Cache-Control = "no-cache"
