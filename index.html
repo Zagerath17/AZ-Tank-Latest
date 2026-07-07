@@ -27,7 +27,7 @@
         <button class="btn btn-big" data-go="screen-online">Online</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
       </nav>
-      <p class="foot">v0.2 · movement build</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -95,6 +95,7 @@
         </div>
       </div>
       <ul class="lobby-list" id="lobby-players"></ul>
+      <button class="btn" id="lobby-addbot" hidden>Add a bot tank</button>
       <p class="hint" id="lobby-status"></p>
       <button class="btn btn-big btn-go" id="lobby-start" hidden>Start battle</button>
     </section>
@@ -104,6 +105,7 @@
       <header class="bar">
         <button class="btn btn-back" id="game-exit">‹ Exit</button>
         <h2>Battle</h2>
+        <div class="score" id="game-score"></div>
       </header>
       <div class="arena-wrap">
         <canvas id="arena"></canvas>
@@ -116,6 +118,7 @@
         <div class="tp-group">
           <button class="tp-btn" data-act="down" aria-label="Reverse">▼</button>
           <button class="tp-btn" data-act="up" aria-label="Forward">▲</button>
+          <button class="tp-btn tp-fire" data-act="shoot" aria-label="Fire">FIRE</button>
         </div>
       </div>
     </section>
