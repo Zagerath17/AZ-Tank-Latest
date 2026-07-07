@@ -27,7 +27,7 @@
         <button class="btn btn-big" data-go="screen-online">Online</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
       </nav>
-      <p class="foot">v0.1 · menu build</p>
+      <p class="foot">v0.2 · movement build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -97,6 +97,27 @@
       <ul class="lobby-list" id="lobby-players"></ul>
       <p class="hint" id="lobby-status"></p>
       <button class="btn btn-big btn-go" id="lobby-start" hidden>Start battle</button>
+    </section>
+
+    <!-- ============ BATTLE ARENA ============ -->
+    <section class="screen" id="screen-game" aria-label="Battle">
+      <header class="bar">
+        <button class="btn btn-back" id="game-exit">‹ Exit</button>
+        <h2>Battle</h2>
+      </header>
+      <div class="arena-wrap">
+        <canvas id="arena"></canvas>
+      </div>
+      <div class="touch-pad" id="touch-pad" hidden>
+        <div class="tp-group">
+          <button class="tp-btn" data-act="left" aria-label="Turn left">⟲</button>
+          <button class="tp-btn" data-act="right" aria-label="Turn right">⟳</button>
+        </div>
+        <div class="tp-group">
+          <button class="tp-btn" data-act="down" aria-label="Reverse">▼</button>
+          <button class="tp-btn" data-act="up" aria-label="Forward">▲</button>
+        </div>
+      </div>
     </section>
 
   </main>
