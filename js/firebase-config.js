@@ -8,15 +8,16 @@
 // ================================================================
 
 export const firebaseConfig = {
-  apiKey: "AIzaSyCZ2e_i7gdMgkLjswaYlInCy9WfSHBxTKw",
-  authDomain: "tank-brawl-49249.firebaseapp.com",
-  databaseURL: "https://tank-brawl-49249-default-rtdb.firebaseio.com/",
-  projectId: "tank-brawl-49249",
-  storageBucket: "tank-brawl-49249.firebasestorage.app",
-  messagingSenderId: "1082574528247",
-  appId: "1:1082574528247:web:69ac1b9f88f960170c7df2"
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "your-project.firebaseapp.com",
+  databaseURL: "https://your-project-default-rtdb.firebaseio.com",
+  projectId: "your-project",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "000000000000",
+  appId: "1:000000000000:web:0000000000000000000000",
 };
 
+// True once real values are pasted in — the Online screen checks this.
 export const isConfigured =
   !firebaseConfig.apiKey.startsWith("PASTE") &&
   !firebaseConfig.databaseURL.includes("your-project");

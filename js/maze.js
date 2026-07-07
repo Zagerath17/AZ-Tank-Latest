@@ -82,3 +82,50 @@ export function wallRects(maze, cell, t) {
   }
   return rects;
 }
+
+/* ---------- segment ↔ rectangle geometry (Liang–Barsky) ---------- */
+
+// Entry parameter t (0..1) where the segment first enters the rect,
+// or null if it misses entirely.
+function segEntryT(x1, y1, x2, y2, r) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  let t0 = 0;
+  let t1 = 1;
+  const p = [-dx, dx, -dy, dy];
+  const q = [x1 - r.x, r.x + r.w - x1, y1 - r.y, r.y + r.h - y1];
+
+  for (let i = 0; i < 4; i++) {
+    if (Math.abs(p[i]) < 1e-9) {
+      if (q[i] < 0) return null; // parallel and outside
+      continue;
+    }
+    const t = q[i] / p[i];
+    if (p[i] < 0) {
+      if (t > t1) return null;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return null;
+      if (t < t1) t1 = t;
+    }
+  }
+  return t0;
+}
+
+// Does the segment touch any wall? (used for AI line-of-sight)
+export function segmentHitsAnyRect(x1, y1, x2, y2, rects) {
+  for (const r of rects) {
+    if (segEntryT(x1, y1, x2, y2, r) !== null) return true;
+  }
+  return false;
+}
+
+// Smallest entry t across all rects, or 1 if the path is clear.
+export function segmentFirstHit(x1, y1, x2, y2, rects) {
+  let best = 1;
+  for (const r of rects) {
+    const t = segEntryT(x1, y1, x2, y2, r);
+    if (t !== null && t < best) best = t;
+  }
+  return best;
+}

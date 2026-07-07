@@ -48,7 +48,7 @@ export function tankSVG(color) {
   return `<svg class="tank p-${color}" viewBox="0 0 48 48" aria-hidden="true">
     <rect class="tread"  x="5"    y="10" width="8"  height="30" rx="3"/>
     <rect class="tread"  x="35"   y="10" width="8"  height="30" rx="3"/>
-    <rect class="barrel" x="21.5" y="1"  width="5"  height="16" rx="2"/>
+    <rect class="barrel" x="20.5" y="1"  width="7"  height="16" rx="2.6"/>
     <rect class="hull"   x="11"   y="12" width="26" height="26" rx="6"/>
     <circle class="turret" cx="24" cy="27" r="7.5"/>
   </svg>`;
