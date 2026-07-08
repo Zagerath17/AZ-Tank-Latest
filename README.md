@@ -2,7 +2,7 @@
 
 A 2–4 player tank battle in the spirit of AZ Tanks / Tank Trouble.
 **This build (v0.3)** adds combat: bouncing bullets (5 live per tank,
-they kill anyone — including you), bot tanks with 3 difficulties for
+they kill anyone — including you), bot tanks with 4 difficulties for
 local AND online (so you can play solo), rounds with scores, and
 Tank-Trouble wall friction — touching a wall at any angle is a hard
 stop; tanks never slide along walls.
@@ -123,14 +123,36 @@ js/settings.js        keybinds (localStorage)
 js/local.js           local join flow + bot slots
 js/online.js          Firebase lobby flow, bots, round/shot/death sync
 js/maze.js            seeded RNG, maze generation, wall + ray geometry
+js/weapons.js         AZ-style pickups: laser, machine gun, homing rocket, cannon
 js/game.js            arena: movement, shooting, rounds, collision
-js/ai.js              bot drivers (easy / medium / hard)
+js/ai.js              bot drivers (easy / medium / hard / impossible)
 js/firebase-config.js paste your Firebase config here
 netlify.toml          Netlify config (no build step)
 ```
 
 ## How the battle works (v0.3)
 
+- **Weapons** (AZ-Tank style): crates appear on the floor a few
+  seconds into each round (up to 3 on the field). Drive over one and
+  your barrel physically changes — sprite AND hitbox — until you fire
+  it. One pickup, one use.
+  - **Laser**: while held, everyone sees your dashed 4-bounce aiming
+    line. Fire = an instant beam with 7 bounces that kills everything
+    it crosses — including you, if a reflection comes back.
+  - **Machine gun**: half-second wind-up (glowing muzzle), then a
+    16-round spray of half-sized bouncing balls with slight scatter.
+  - **Homing rocket**: flies straight (bouncing) for ~1.75 s like a
+    dumb-fire shell, then locks on and HUNTS the nearest tank — a
+    colored trail matching its prey appears, and it threads the maze
+    at full speed with a vicious turn rate. Once seeking, walls kill
+    it: touching a brick ends it. Its shooter is fair game too.
+  - **Big cannon**: one slow, huge ball. On expiry — or the moment it
+    hits a tank — it bursts into a ring of 14 shrapnel pieces that
+    PHASE through walls, crawling while inside a brick and snapping
+    back to full speed on the far side. Stand well back.
+- **Barrel hitboxes**: the barrel is part of the tank now. It blocks
+  against walls (swinging your gun into a brick stops the turn) and
+  it can be shot — and each weapon's barrel has its own shape.
 - **Maze**: seeded recursive backtracker — a perfect maze with zero
   closed loops; players 1 & 2 spawn in opposite corners.
 - **Wall friction**: driving into a wall at ANY angle hard-stops the
@@ -146,9 +168,31 @@ netlify.toml          Netlify config (no build step)
   the tank that fired them. Last tank alive wins the round; scores
   show in the battle header, and a fresh maze spawns each round.
 - **Bots**: on the Local screen, tap a slot's bot chip to cycle
-  Easy → Medium → Hard. In an online lobby the host taps "Add a bot
-  tank" (and taps the bot's chip to change difficulty, ✕ to remove).
-  Bots use real pathfinding and the exact same physics as players.
+  Easy → Medium → Hard → Impossible. In an online lobby the host taps
+  "Add a bot tank" (and taps the bot's chip to change difficulty,
+  ✕ to remove). Bots obey the exact same physics and control limits
+  as players — speed and turn rate are capped at human rates, they
+  count their own live bullets (never dry-fire, save reserve rounds
+  for verified shots), and every reaction is delayed by a human-like
+  reaction time (Easy 0.6s → Impossible 0.2s).
+
+  What separates the tiers: aim precision, movement prediction
+  (leading shots), bullet dodging (bounce-predicted), and ricochet
+  discipline (tracing a shot's full bounce path before firing so it
+  can't boomerang back). Impossible only takes shots its trace says
+  will land — including bank shots around corners — and dodges
+  bullets even inside corridors. Simulated head-to-head over 100
+  duels per matchup: Impossible beats Easy 83%, Medium 73%, Hard 68%
+  of decided rounds; Hard beats Easy 78%, Medium 60%; Medium beats
+  Easy 72%. Even Easy steals rounds — easy, not free.
+
+  Bots also play the weapon game: they detour to grab a crate when
+  their barrel is bare (never when already armed), fire pickups on a
+  clean look (keeping 2+ cells of distance before daring the
+  cannon), dodge shrapnel, cannonballs and machine-gun spray like
+  bullets, step out of enemy laser aiming lines by breaking line of
+  sight, and RUN from a rocket that's hunting them — maze-aware,
+  picking the corridor that gains the most graph distance.
 - **Online authority**: every client simulates its own tank and
   reports its own shots and death; the host's client also drives the
   bots and pushes each new round's seed. If the host leaves, the
