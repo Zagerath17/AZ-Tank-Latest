@@ -10,10 +10,11 @@
 import { onEnter, onLeave, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
 import { getBinds, keyLabel } from "./settings.js";
 import { startLocalGame } from "./game.js";
+import { AI_LEVELS } from "./ai.js";
 
 const joined = new Set(); // human colors
 const bots = { red: null, green: null, blue: null, yellow: null };
-const BOT_CYCLE = [null, "easy", "medium", "hard"];
+const BOT_CYCLE = [null, ...AI_LEVELS];
 
 /* ---------- render ---------- */
 

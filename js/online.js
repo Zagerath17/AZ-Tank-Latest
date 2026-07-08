@@ -4,13 +4,15 @@
 //   lobbies/{code}: {
 //     createdAt, hostId, state: "waiting" | "starting",
 //     round: { n, seed },     // pushed by the controller each round
+//     gear: { [key]: {x, y, type} },    // weapon pickups on the floor
 //     players: {
 //       [id]: {
 //         joinedAt: server timestamp,
-//         bot: "easy"|"medium"|"hard"   // only on host-added bots
+//         bot: "easy"|...|"impossible"  // only on host-added bots
 //         pos:   { x, y, a },           // streamed during the match
 //         dead:  true,                  // this round
-//         shots: { [key]: {x, y, a} },  // recent shots this round
+//         gun:   "laser"|"mg"|"rocket"|"cannon", // equipped pickup
+//         shots: { [key]: {x, y, a, w?} }, // shots; w = special type
 //       }
 //     }
 //   }
@@ -276,12 +278,23 @@ function beginOnlineGame(code, lobby) {
       }, SHOT_TTL);
     },
     sendDead: (id) => write(`players/${id}/dead`, true),
+    sendGear: (key, gear) => write(`gear/${key}`, gear),
+    sendPickup: (gearKey, pid, type) => {
+      if (!current || !fb) return;
+      // One atomic update: the pickup vanishes and the gun appears.
+      fb.update(current.lobbyRef, {
+        [`gear/${gearKey}`]: null,
+        [`players/${pid}/gun`]: type,
+      }).catch(() => {});
+    },
+    sendGun: (id, type) => write(`players/${id}/gun`, type),
     sendNextRound: (n, seed) => {
       if (!current || !fb) return;
-      const updates = { round: { n, seed } };
+      const updates = { round: { n, seed }, gear: null };
       for (const pid of Object.keys(current.playersCache)) {
         updates[`players/${pid}/dead`] = null;
         updates[`players/${pid}/shots`] = null;
+        updates[`players/${pid}/gun`] = null;
       }
       fb.update(current.lobbyRef, updates).catch(() => {});
     },
