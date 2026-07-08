@@ -7,7 +7,7 @@
 // done with Realtime Database security rules, not by hiding the key.
 // ================================================================
 
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyCZ2e_i7gdMgkLjswaYlInCy9WfSHBxTKw",
   authDomain: "tank-brawl-49249.firebaseapp.com",
   databaseURL: "https://tank-brawl-49249-default-rtdb.firebaseio.com",
