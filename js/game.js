@@ -47,7 +47,10 @@ const MAX_BULLETS = 5;      // live bullets per tank (Tank Trouble classic)
 
 const ROUND_PAUSE = 2600;   // ms between rounds
 const NET_SEND_MS = 90;
-const MAZE_SIZES = [[8, 6], [9, 6], [9, 7]];
+const MAZE_SIZES = [
+  [7, 5], [7, 6], [8, 5], [8, 6], [8, 7], [9, 5],
+  [9, 6], [9, 7], [10, 6], [10, 7], [11, 6], [11, 8],
+];
 
 const HULL = { red: "#ff5147", green: "#46d160", blue: "#47a3ff", yellow: "#ffc531" };
 const NO_MUL = { speed: 1, turn: 1 };
@@ -697,6 +700,7 @@ function spawnShot(byId, sh, now = performance.now()) {
 }
 
 function spawnBullet(byId, x, y, a, now = performance.now(), mini = false) {
+  if (mini) sfx.mini(); else sfx.fire();
   const speed = mini ? BULLET_SPEED * MG.speed : BULLET_SPEED;
   S.bullets.push({
     x, y,
@@ -905,13 +909,31 @@ function stepRockets(now, dt) {
     const seeking = age >= ROCKET.straightMs;
     let target = null;
     if (seeking) {
-      let best = Infinity;
+      // Limited nose: it only locks tanks within seek range. With no
+      // prey in range it coasts (straight + bouncing, grey trail)
+      // until someone wanders close.
+      let best = (ROCKET.seekRangeCells * CELL) ** 2;
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
         const d = (t.x - rk.x) ** 2 + (t.y - rk.y) ** 2;
         if (d < best) { best = d; target = t; }
       }
-      rk.tcol = target ? target.color : rk.tcol;
+      rk.tcol = target ? target.color : null;
+      rk.huntD = target ? Math.sqrt(best) : Infinity;
+
+      // Proximity beeper: ticks faster as it closes on its prey; at
+      // a tank-length the beeps fuse into one constant tone.
+      if (target && now >= (rk.beepAt ?? 0)) {
+        const tankLen = TANK_R * 1.9;
+        if (rk.huntD <= tankLen * 1.25) {
+          sfx.beep(1350, 0.1);
+          rk.beepAt = now + 78; // overlapping = continuous
+        } else {
+          sfx.beep(1150, 0.05);
+          const range = ROCKET.seekRangeCells * CELL;
+          rk.beepAt = now + 120 + 620 * Math.min(1, rk.huntD / range);
+        }
+      }
     }
 
     const speed = Math.hypot(rk.vx, rk.vy);
@@ -1346,8 +1368,8 @@ function draw(now) {
   // Rockets: a dense flare cloud — grey while dumb-firing, tinted
   // with the hunted tank's color once it locks on. Then the body.
   for (const rk of S.rockets) {
-    const seeking = now - rk.born >= ROCKET.straightMs;
-    const tc = seeking ? (HULL[rk.tcol] ?? "#9aa3b2") : "#9aa3b2";
+    const locked = now - rk.born >= ROCKET.straightMs && rk.tcol;
+    const tc = locked ? (HULL[rk.tcol] ?? "#9aa3b2") : "#9aa3b2";
     const rr0 = ROCKET.r * BULLET_R;
     // Outer soft smoke, then a brighter core = flare density.
     for (const pass of [0, 1]) {

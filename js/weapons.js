@@ -49,6 +49,7 @@ export const ROCKET = {
   seekTurn: 12.0,     // rad/s once seeking — U-turns fit inside a corridor
   r: 1.4,
   lifeMs: 6000,       // 6 s fuse, then it detonates harmlessly
+  seekRangeCells: 4.5, // it can only smell tanks this close
   ownerGraceMs: 1000, // can't collide with its shooter right away
   trailLen: 26,
 };

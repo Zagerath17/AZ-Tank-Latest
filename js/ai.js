@@ -729,7 +729,7 @@ function rocketHuntingMe(t, world, now) {
         const od = (o.x - rk.x) ** 2 + (o.y - rk.y) ** 2;
         if (od < nearestD) { nearestD = od; nearestMe = o === t; }
       }
-      if (nearestMe) return rk;
+      if (nearestMe && nearestD < (ROCKET.seekRangeCells * cell) ** 2) return rk;
     } else if (d2 < (cell * 2.5) ** 2) {
       // Dumb-fire phase: heading our way?
       const sp = Math.hypot(rk.vx, rk.vy) || 1;

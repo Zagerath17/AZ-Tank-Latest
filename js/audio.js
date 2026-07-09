@@ -22,7 +22,7 @@ function ensure() {
     if (!AC) return null;
     ctx = new AC();
     master = ctx.createGain();
-    master.gain.value = 0.6;
+    master.gain.value = 1.2; // doubled by request
     master.connect(ctx.destination);
   } catch (e) {
     ctx = null;
@@ -30,14 +30,34 @@ function ensure() {
   return ctx;
 }
 
-// Browsers keep the context suspended until a user gesture.
+// Browsers keep the context suspended until a user gesture — and
+// iOS is extra picky: it wants the resume AND a real source started
+// synchronously inside the gesture, and by default it routes
+// WebAudio through the ringer channel (silent if the mute switch is
+// on). navigator.audioSession fixes the routing on modern iOS.
 function unlock() {
   const c = ensure();
-  if (c && c.state === "suspended") c.resume().catch(() => {});
+  if (!c) return;
+  try {
+    if (navigator.audioSession && navigator.audioSession.type !== "playback") {
+      navigator.audioSession.type = "playback"; // media channel, ignores mute switch
+    }
+  } catch (e) {}
+  if (c.state === "suspended") c.resume().catch(() => {});
+  try {
+    // A one-sample silent kick, started inside the gesture handler —
+    // the classic iOS unlock.
+    const b = c.createBuffer(1, 1, 22050);
+    const s = c.createBufferSource();
+    s.buffer = b;
+    s.connect(c.destination);
+    s.start(0);
+  } catch (e) {}
 }
 window.addEventListener("pointerdown", unlock);
 window.addEventListener("keydown", unlock);
 window.addEventListener("touchstart", unlock, { passive: true });
+window.addEventListener("touchend", unlock, { passive: true });
 
 function ready() {
   return ensure() && ctx.state === "running";
@@ -152,12 +172,14 @@ export const sfx = {
     } catch (e) {}
   },
 
-  // Laser: a searing zap — saw dive with a sizzle on top.
+  // Laser: a searing zap over a deep lowpass growl — menacing.
   laser() {
     if (!ready() || limited("laser", 120)) return;
     try {
       blip("sawtooth", 2200, 160, 0.28, 0.16);
       whoosh("bandpass", 4200, 900, 0.24, 0.1, 0, 4);
+      whoosh("lowpass", 420, 55, 0.55, 0.26, 0, 0.8); // the growl
+      blip("sine", 68, 32, 0.55, 0.2);                // sub rumble
     } catch (e) {}
   },
 
@@ -194,6 +216,14 @@ export const sfx = {
     try {
       whoosh("highpass", 900, 2600, 0.34, 0.16, 0, 1.2);
       blip("square", 200, 90, 0.14, 0.1);
+    } catch (e) {}
+  },
+
+  // Rocket proximity beeper — a flat, urgent tick.
+  beep(freq = 1150, dur = 0.05) {
+    if (!ready() || limited("beep", 28)) return;
+    try {
+      blip("square", freq, freq - 2, dur, 0.075);
     } catch (e) {}
   },
 
