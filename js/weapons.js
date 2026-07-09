@@ -368,52 +368,170 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
 }
 
 // Pickup icon on the arena floor.
-export function drawGear(ctx, g, R, pulse) {
-  ctx.save();
-  ctx.translate(g.x, g.y);
+// Redesigned: a plated badge with a colored rim per weapon, a crisp
+// glyph, a springy pop-in when it lands, and a soft idle bob.
+const GEAR_RIM = {
+  laser: "#e8452e",
+  mg: "#e5a13c",
+  rocket: "#e8452e",
+  cannon: "#566072",
+};
 
-  ctx.fillStyle = "#ffffff";
-  ctx.strokeStyle = "#2a303c";
-  ctx.lineWidth = 2.2;
+function easeOutBack(t) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+export function drawGear(ctx, g, R, pulse, now = 0) {
+  const rrect = (x, y, w, h, rad) => {
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad);
+    else ctx.rect(x, y, w, h);
+    ctx.fill();
+  };
+  const age = now - (g.born ?? now - 9999);
+  const k = Math.min(1, age / 280);
+  const scale = k < 1 ? Math.max(0.01, easeOutBack(k)) : 1;
+  const bob = k >= 1 ? Math.sin(now / 420 + (g.x + g.y) * 0.05) * 1.6 : 0;
+
+  ctx.save();
+  ctx.translate(g.x, g.y + bob);
+
+  // Landing shockwave ring during the pop-in.
+  if (age < 340) {
+    const rk = age / 340;
+    ctx.strokeStyle = GEAR_RIM[g.type] ?? "#566072";
+    ctx.globalAlpha = 0.5 * (1 - rk);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, R * (0.4 + rk * 0.9), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.scale(scale, scale);
+
+  // Drop shadow.
+  ctx.fillStyle = "rgba(16, 19, 26, 0.22)";
   ctx.beginPath();
-  ctx.arc(0, 0, R * (0.62 + pulse * 0.05), 0, Math.PI * 2);
+  ctx.ellipse(0, R * 0.16, R * 0.62, R * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Plate + weapon-colored rim (with a soft breathing pulse).
+  const rim = GEAR_RIM[g.type] ?? "#566072";
+  ctx.fillStyle = "#f4f6f9";
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 2.6 + pulse * 0.8;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.6, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
+  ctx.strokeStyle = "rgba(32, 36, 44, 0.28)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.48, 0, Math.PI * 2);
+  ctx.stroke();
 
-  ctx.fillStyle = "#20242c";
-  ctx.strokeStyle = "#20242c";
   switch (g.type) {
-    case "laser":
-      ctx.strokeStyle = "#e8452e";
-      ctx.lineWidth = 3;
+    case "laser": {
+      // A beam ricocheting between two pips, with a bright core.
+      ctx.lineCap = "round";
+      ctx.strokeStyle = rim;
+      ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.moveTo(-R * 0.34, R * 0.26);
-      ctx.lineTo(R * 0.1, -R * 0.18);
-      ctx.lineTo(R * 0.34, -R * 0.3);
+      ctx.moveTo(-R * 0.32, R * 0.26);
+      ctx.lineTo(R * 0.02, -R * 0.1);
+      ctx.lineTo(R * 0.13, R * 0.06);
+      ctx.lineTo(R * 0.34, -R * 0.24);
       ctx.stroke();
-      break;
-    case "mg":
-      for (const [dx, dy] of [[-0.22, 0.1], [0, -0.14], [0.22, 0.1]]) {
+      ctx.strokeStyle = "#ffd7cf";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(-R * 0.32, R * 0.26);
+      ctx.lineTo(R * 0.02, -R * 0.1);
+      ctx.lineTo(R * 0.13, R * 0.06);
+      ctx.lineTo(R * 0.34, -R * 0.24);
+      ctx.stroke();
+      ctx.fillStyle = "#20242c";
+      for (const [px, py] of [[-0.32, 0.26], [0.34, -0.24]]) {
         ctx.beginPath();
-        ctx.arc(dx * R, dy * R, R * 0.1, 0, Math.PI * 2);
+        ctx.arc(px * R, py * R, R * 0.06, 0, Math.PI * 2);
         ctx.fill();
       }
       break;
-    case "rocket":
-      ctx.fillStyle = "#e8452e";
-      ctx.beginPath();
-      ctx.moveTo(R * 0.34, 0);
-      ctx.lineTo(-R * 0.22, -R * 0.24);
-      ctx.lineTo(-R * 0.1, 0);
-      ctx.lineTo(-R * 0.22, R * 0.24);
+    }
+    case "mg": {
+      // Three angled cartridges.
+      ctx.save();
+      ctx.rotate(-0.5);
+      for (const dx of [-0.2, 0, 0.2]) {
+        const x = dx * R;
+        ctx.fillStyle = "#e5a13c";
+        rrect(x - R * 0.055, -R * 0.22, R * 0.11, R * 0.36, R * 0.05);
+        ctx.fillStyle = "#8a5a18";
+        ctx.beginPath();
+        ctx.arc(x, -R * 0.22, R * 0.055, Math.PI, 0);
+        ctx.fill();
+      }
+      ctx.restore();
+      break;
+    }
+    case "rocket": {
+      // A proper little missile: body, nose, fins, window, flame.
+      ctx.save();
+      ctx.rotate(-0.7);
+      ctx.fillStyle = "#d7dce6";
+      rrect(-R * 0.28, -R * 0.11, R * 0.42, R * 0.22, R * 0.08);
+      ctx.fillStyle = rim;
+      ctx.beginPath(); // nose cone
+      ctx.moveTo(R * 0.14, -R * 0.11);
+      ctx.quadraticCurveTo(R * 0.4, 0, R * 0.14, R * 0.11);
       ctx.closePath();
       ctx.fill();
-      break;
-    case "cannon":
-      ctx.beginPath();
-      ctx.arc(0, 0, R * 0.26, 0, Math.PI * 2);
+      ctx.beginPath(); // fins
+      ctx.moveTo(-R * 0.28, -R * 0.1);
+      ctx.lineTo(-R * 0.42, -R * 0.22);
+      ctx.lineTo(-R * 0.34, 0);
+      ctx.lineTo(-R * 0.42, R * 0.22);
+      ctx.lineTo(-R * 0.28, R * 0.1);
+      ctx.closePath();
       ctx.fill();
+      ctx.fillStyle = "#20242c";
+      ctx.beginPath(); // window
+      ctx.arc(R * 0.02, 0, R * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffb24a";
+      ctx.beginPath(); // exhaust flame
+      ctx.moveTo(-R * 0.42, -R * 0.05);
+      ctx.lineTo(-R * 0.56, 0);
+      ctx.lineTo(-R * 0.42, R * 0.05);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
       break;
+    }
+    case "cannon": {
+      // A heavy ball mid-flight with speed arcs and a glint.
+      ctx.fillStyle = "#20242c";
+      ctx.beginPath();
+      ctx.arc(R * 0.06, 0, R * 0.24, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#4a5261";
+      ctx.beginPath();
+      ctx.arc(-R * 0.02, -R * 0.08, R * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#566072";
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      for (const [ro, a0, a1] of [[0.36, 2.5, 3.4], [0.44, 2.6, 3.2]]) {
+        ctx.beginPath();
+        ctx.arc(R * 0.06, 0, R * ro, a0, a1);
+        ctx.stroke();
+      }
+      break;
+    }
   }
+
   ctx.restore();
 }

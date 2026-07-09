@@ -12,7 +12,7 @@
 //                            client (host) also drives the bots.
 // ================================================================
 
-import { showScreen, toast, COLORS, COLOR_NAMES } from "./main.js";
+import { showScreen, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
@@ -174,9 +174,10 @@ export function onlineLobbyUpdate(lobby) {
     .map(([key, g]) => ({ key, x: g.x, y: g.y, type: g.type }));
   for (const g of S.gear) {
     if (!S.gearSeen.has(g.key)) {
-      S.gearSeen.add(g.key);
+      S.gearSeen.set(g.key, nowMs);
       sfx.gearSpawn();
     }
+    g.born = S.gearSeen.get(g.key);
   }
 
   let meIn = false;
@@ -252,7 +253,9 @@ function begin(opts) {
     bullets: [],
     gear: [],
     takenGear: new Map(),
-    gearSeen: new Set(),
+    gearSeen: new Map(), // key -> first-seen time (for pop-in + chime)
+    fades: [],    // dying projectiles, briefly ghosting out
+    dust: [],     // little clouds kicked up behind driving tanks
     gearNextAt: 0,
     gearSeq: 0,
     rockets: [],
@@ -299,6 +302,8 @@ function startRound(seed) {
   S.gear = [];
   S.takenGear.clear();
   S.gearSeen.clear();
+  S.fades = [];
+  S.dust = [];
   S.gearNextAt = performance.now() + GEAR_FIRST_MS;
   S.rockets = [];
   S.cannons = [];
@@ -493,6 +498,30 @@ function stepTanks(now, dt) {
 
       if (v !== 0 && !t.bot) S.engineMoving = true;
 
+      // Track link animation: each tread scrolls at its own ground
+      // speed. Turning makes them differ; a zero-point turn spins
+      // them in OPPOSITE directions, just like a real tank.
+      {
+        const w = turn * TURN_SPEED * mul.turn; // rad/s (commanded)
+        const half = TANK_R * 0.62;
+        t.trkL = (t.trkL ?? 0) + (v + w * half) * dt;
+        t.trkR = (t.trkR ?? 0) + (v - w * half) * dt;
+      }
+
+      // Kick up a faint dust puff behind a driving tank.
+      if (v !== 0 && now >= (t.dustAt ?? 0)) {
+        t.dustAt = now + 65 + Math.random() * 45;
+        const back = v > 0 ? -1 : 1;
+        S.dust.push({
+          x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
+          y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
+          vx: Math.cos(t.a) * back * 9 + (Math.random() - 0.5) * 8,
+          vy: Math.sin(t.a) * back * 9 + (Math.random() - 0.5) * 8,
+          born: now,
+        });
+        if (S.dust.length > 260) S.dust.shift();
+      }
+
       if (v !== 0) {
         // WALL FRICTION, Tank-Trouble style: if the move would touch
         // a wall — even at a shallow angle — the tank hard-stops.
@@ -532,10 +561,32 @@ function stepTanks(now, dt) {
       }
     } else {
       // Remote tank: glide toward its last reported transform.
+      const ox = t.x;
+      const oy = t.y;
+      const oa = t.a;
       const k = 1 - Math.exp(-12 * dt);
       t.x += (t.tx - t.x) * k;
       t.y += (t.ty - t.y) * k;
       t.a += angleDiff(t.a, t.ta) * k;
+
+      // Tracks + dust from the observed motion.
+      const fwd = (t.x - ox) * Math.cos(t.a) + (t.y - oy) * Math.sin(t.a);
+      const spin = angleDiff(oa, t.a);
+      const half = TANK_R * 0.62;
+      t.trkL = (t.trkL ?? 0) + fwd + spin * half;
+      t.trkR = (t.trkR ?? 0) + fwd - spin * half;
+      if (Math.abs(fwd) > 28 * dt && now >= (t.dustAt ?? 0)) {
+        t.dustAt = now + 70 + Math.random() * 45;
+        const back = fwd > 0 ? -1 : 1;
+        S.dust.push({
+          x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
+          y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
+          vx: Math.cos(t.a) * back * 9,
+          vy: Math.sin(t.a) * back * 9,
+          born: now,
+        });
+        if (S.dust.length > 260) S.dust.shift();
+      }
     }
   }
 
@@ -663,7 +714,10 @@ function stepBullets(now, dt) {
   const survivors = [];
 
   for (const b of S.bullets) {
-    if (now - b.born > (b.life ?? BULLET_LIFE)) continue;
+    if (now - b.born > (b.life ?? BULLET_LIFE)) {
+      addFade(b.x, b.y, b.r ?? BULLET_R, now);
+      continue;
+    }
 
     // Substeps so fast bullets can't tunnel through thin walls.
     const travel = Math.hypot(b.vx, b.vy) * dt;
@@ -681,6 +735,7 @@ function stepBullets(now, dt) {
         if (t.id === b.by && now - b.born < 150) continue;
         if (tankHitPoint(t, b.x, b.y, b.r ?? BULLET_R)) {
           alive = false;
+          addFade(b.x, b.y, b.r ?? BULLET_R, now);
           // Authority: in local mode we own everyone; online we only
           // pronounce deaths for tanks simulated on this device.
           if (S.mode === "local" || t.local) killTank(t);
@@ -716,7 +771,7 @@ function stepGear(now) {
       const type = WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)];
       const key = "g" + (S.gearSeq++) + Math.random().toString(36).slice(2, 6);
       if (S.mode === "local") {
-        S.gear.push({ key, x: spot.x, y: spot.y, type });
+        S.gear.push({ key, x: spot.x, y: spot.y, type, born: now });
         sfx.gearSpawn();
       } else S.sendGear?.(key, { x: spot.x, y: spot.y, type }); // arrives via snapshot
     }
@@ -838,7 +893,11 @@ function stepRockets(now, dt) {
 
   for (const rk of S.rockets) {
     const age = now - rk.born;
-    if (age > ROCKET.lifeMs) { S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3 }); continue; }
+    if (age > ROCKET.lifeMs) {
+      S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3 });
+      addFade(rk.x, rk.y, r * 1.4, now);
+      continue;
+    }
 
     // Phase 1 (first ~1.75 s): dumb-fire — straight, bouncing, no
     // trail, no homing. Phase 2: SEEK the nearest living tank via
@@ -863,6 +922,7 @@ function stepRockets(now, dt) {
         if (rocketSeekStep(rk, target, S.maze, S.rects, CELL, dt / steps, r)) {
           // Nose into a brick — the rocket dies there.
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 2.6 });
+          addFade(rk.x, rk.y, r * 1.4, now);
           alive = false;
           break;
         }
@@ -879,16 +939,31 @@ function stepRockets(now, dt) {
           alive = false;
           if (S.mode === "local" || t.local) killTank(t);
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3.5 });
+          addFade(rk.x, rk.y, r * 1.4, now);
           break;
         }
       }
     }
     if (!alive) continue;
 
-    // The colored trail only exists while seeking.
-    if (seeking) {
-      rk.trail.push({ x: rk.x, y: rk.y });
-      if (rk.trail.length > ROCKET.trailLen) rk.trail.shift();
+    // Flare trail: always burning. Dense points, capped at six
+    // rocket-lengths of smoke behind the nozzle.
+    {
+      const lp = rk.trail[rk.trail.length - 1];
+      const dseg = lp ? Math.hypot(rk.x - lp.x, rk.y - lp.y) : 0;
+      if (!lp || dseg > 1.6) {
+        rk.trail.push({
+          x: rk.x, y: rk.y, d: dseg,
+          jx: (Math.random() - 0.5) * 3.4,
+          jy: (Math.random() - 0.5) * 3.4,
+        });
+        rk.trailD = (rk.trailD ?? 0) + dseg;
+        const maxLen = ROCKET.r * BULLET_R * 2.5 * 6; // 6× rocket length
+        while (rk.trailD > maxLen && rk.trail.length > 1) {
+          rk.trailD -= rk.trail[1].d;
+          rk.trail.shift();
+        }
+      }
     }
     survivors.push(rk);
   }
@@ -947,6 +1022,7 @@ function stepCannons(now, dt) {
 // Shrapnel circle — it phases through walls (slowed inside them).
 function explodeCannon(c, now) {
   sfx.shrap();
+  addFade(c.x, c.y, CANNON.r * BULLET_R, now);
   S.booms.push({ x: c.x, y: c.y, born: now, r: CANNON.r * BULLET_R * 4 });
   const speed = BULLET_SPEED * CANNON.shrapSpeed;
   // Irregular burst, not a perfect ring: seeded jitter on both angle
@@ -983,6 +1059,7 @@ function stepShrapnel(now, dt) {
         if (t.dead || t.gone) continue;
         if (tankHitPoint(t, sh.x, sh.y, r)) {
           alive = false;
+          addFade(sh.x, sh.y, r * 1.2, now);
           if (S.mode === "local" || t.local) killTank(t);
           break;
         }
@@ -1025,8 +1102,14 @@ function maybeEndRound(now) {
 function updateScoreHUD() {
   if (!scoreEl || !S) return;
   scoreEl.innerHTML = S.roster
-    .map((p) => `<span class="sc p-${p.color}">${S.scores[p.color] ?? 0}</span>`)
+    .map((p) => `<div class="sc-card p-${p.color}">${tankSVG(p.color)}<span class="sc">${S.scores[p.color] ?? 0}</span></div>`)
     .join("");
+}
+
+// A projectile just died — leave a quick expanding ghost behind.
+function addFade(x, y, r, now, color = "#20242c") {
+  S.fades.push({ x, y, r, color, born: now });
+  if (S.fades.length > 240) S.fades.shift();
 }
 
 /* ---------- collision helpers (rectangular hitboxes) ---------- */
@@ -1207,7 +1290,19 @@ function draw(now) {
 
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
   const pulse = Math.sin(now / 220) * 0.5 + 0.5;
-  for (const g of S.gear) drawGear(ctx, g, TANK_R, pulse);
+  // Dust puffs drift and dissolve beneath everything that moves.
+  S.dust = S.dust.filter((d) => now - d.born < 560);
+  for (const d of S.dust) {
+    const k = (now - d.born) / 560;
+    ctx.fillStyle = "#8b93a3";
+    ctx.globalAlpha = 0.16 * (1 - k);
+    ctx.beginPath();
+    ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.22 + k * 0.4), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const g of S.gear) drawGear(ctx, g, TANK_R, pulse, now);
 
   for (const t of S.tanks) if (t.dead && !t.gone) drawWreck(t);
   for (const L of S.laserPaths ?? []) drawLaserPreview(L);
@@ -1219,6 +1314,18 @@ function draw(now) {
     ctx.arc(b.x, b.y, b.r ?? BULLET_R, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // Dying projectiles ghost out: a quick expand-and-fade.
+  S.fades = S.fades.filter((f) => now - f.born < 180);
+  for (const f of S.fades) {
+    const k = (now - f.born) / 180;
+    ctx.fillStyle = f.color;
+    ctx.globalAlpha = 0.65 * (1 - k);
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r * (1 + k * 1.1), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
 
   // Cannonballs — big, dark, slow.
   ctx.fillStyle = "#14171d";
@@ -1236,17 +1343,24 @@ function draw(now) {
     ctx.fill();
   }
 
-  // Rockets: trail tinted with the hunted tank's color, then the body.
+  // Rockets: a dense flare cloud — grey while dumb-firing, tinted
+  // with the hunted tank's color once it locks on. Then the body.
   for (const rk of S.rockets) {
-    const tc = HULL[rk.tcol] ?? "#9aa3b2";
-    for (let i = 0; i < rk.trail.length; i++) {
-      const p = rk.trail[i];
-      const f = (i + 1) / rk.trail.length;
-      ctx.fillStyle = tc;
-      ctx.globalAlpha = f * 0.45;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, ROCKET.r * BULLET_R * (0.25 + f * 0.6), 0, Math.PI * 2);
-      ctx.fill();
+    const seeking = now - rk.born >= ROCKET.straightMs;
+    const tc = seeking ? (HULL[rk.tcol] ?? "#9aa3b2") : "#9aa3b2";
+    const rr0 = ROCKET.r * BULLET_R;
+    // Outer soft smoke, then a brighter core = flare density.
+    for (const pass of [0, 1]) {
+      for (let i = 0; i < rk.trail.length; i++) {
+        const p = rk.trail[i];
+        const f = (i + 1) / rk.trail.length;
+        ctx.fillStyle = pass ? tc : "#c6ccd8";
+        ctx.globalAlpha = pass ? f * 0.5 : f * 0.22;
+        const rad = pass ? rr0 * (0.3 + f * 0.75) : rr0 * (0.55 + f * 1.05);
+        ctx.beginPath();
+        ctx.arc(p.x + p.jx, p.y + p.jy, rad, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.globalAlpha = 1;
     const ra = Math.atan2(rk.vy, rk.vx);
@@ -1265,6 +1379,13 @@ function draw(now) {
     ctx.beginPath();
     ctx.arc(rr2 * 0.6, 0, rr2 * 0.45, 0, Math.PI * 2);
     ctx.fill();
+    // Exhaust flare licking out the back.
+    ctx.fillStyle = "#ffb24a";
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    ctx.ellipse(-rr2 * 1.35, 0, rr2 * (0.55 + Math.random() * 0.25), rr2 * 0.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -1338,9 +1459,29 @@ function drawTank(t, now) {
   ctx.translate(t.x, t.y);
   ctx.rotate(t.a);
 
+  // Treads with scrolling links — the phases come from each track's
+  // actual ground speed (they counter-rotate in a zero-point turn).
   ctx.fillStyle = "#2a303c";
   rr(-R * 0.95, -R * 0.83, R * 1.9, R * 0.42, R * 0.15);
   rr(-R * 0.95, R * 0.41, R * 1.9, R * 0.42, R * 0.15);
+  ctx.strokeStyle = "#454c5c";
+  ctx.lineWidth = Math.max(1.4, R * 0.075);
+  const linkGap = R * 0.3;
+  const bands = [
+    [-R * 0.8, -R * 0.44, t.trkL ?? 0],
+    [R * 0.44, R * 0.8, t.trkR ?? 0],
+  ];
+  for (const [y0, y1, ph] of bands) {
+    // Forward motion scrolls the links toward the rear (they grip
+    // the ground while the hull moves over them).
+    let off = (-ph % linkGap + linkGap) % linkGap;
+    ctx.beginPath();
+    for (let x = -R * 0.88 + off; x <= R * 0.88; x += linkGap) {
+      ctx.moveTo(x, y0);
+      ctx.lineTo(x, y1);
+    }
+    ctx.stroke();
+  }
 
   ctx.fillStyle = hull;
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
