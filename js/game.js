@@ -20,6 +20,7 @@ import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON,
   laserPath, rocketSeekStep, stepShrap, bounceCircle, drawBarrel, drawGear,
 } from "./weapons.js";
+import { sfx, setEngine, startMusic, stopAll } from "./audio.js";
 
 /* ---------- tuning ---------- */
 
@@ -35,7 +36,7 @@ const REVERSE_SPEED = U * 1.45;
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
 
 const GEAR_R = 14;             // pickup grab radius (added to the tank's)
-const GEAR_MAX = 3;            // pickups on the field at once
+const GEAR_MAX = 15;           // pickups on the field at once
 const GEAR_FIRST_MS = 3500;    // first pickup after round start
 const GEAR_EVERY_MS = 5500;    // then every 5.5–9 s
 
@@ -125,6 +126,7 @@ function opts_toState(o) {
 
 export function stopGame() {
   if (!S) return;
+  stopAll();
   cancelAnimationFrame(S.raf);
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("keyup", onKeyup);
@@ -170,6 +172,12 @@ export function onlineLobbyUpdate(lobby) {
   S.gear = Object.entries(lobby.gear ?? {})
     .filter(([key]) => !(S.takenGear.has(key) && nowMs - S.takenGear.get(key) < 3000))
     .map(([key, g]) => ({ key, x: g.x, y: g.y, type: g.type }));
+  for (const g of S.gear) {
+    if (!S.gearSeen.has(g.key)) {
+      S.gearSeen.add(g.key);
+      sfx.gearSpawn();
+    }
+  }
 
   let meIn = false;
   for (const t of S.tanks) {
@@ -193,6 +201,7 @@ export function onlineLobbyUpdate(lobby) {
       t.weapon = gun;
     } else if (gun && gun !== t.weapon && nowMs - t.gunClearedAt > 1500) {
       t.weapon = gun;
+      if (!t.local) sfx.pickup();
     }
 
     if (!t.local) {
@@ -243,6 +252,7 @@ function begin(opts) {
     bullets: [],
     gear: [],
     takenGear: new Map(),
+    gearSeen: new Set(),
     gearNextAt: 0,
     gearSeq: 0,
     rockets: [],
@@ -274,6 +284,7 @@ function begin(opts) {
 
   updateScoreHUD();
   showScreen("screen-game");
+  startMusic();
   S.raf = requestAnimationFrame(frame);
 }
 
@@ -287,6 +298,7 @@ function startRound(seed) {
   S.bullets = [];
   S.gear = [];
   S.takenGear.clear();
+  S.gearSeen.clear();
   S.gearNextAt = performance.now() + GEAR_FIRST_MS;
   S.rockets = [];
   S.cannons = [];
@@ -398,10 +410,18 @@ function frame(now) {
     const m = muzzlePoint(t, 1);
     S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.a, S.rects, LASER.previewBounces) });
   }
-  S.aiBullets = (S.cannons.length || S.shraps.length)
-    ? S.bullets.concat(S.cannons, S.shraps)
+  // Bots treat every projectile as a bullet to dodge: minis, cannon
+  // balls, shrapnel, and rockets still in their straight dumb-fire
+  // phase (seeking rockets are handled by the flee behavior).
+  let straightRk = null;
+  for (const rk of S.rockets) {
+    if (now - rk.born < ROCKET.straightMs) (straightRk ??= []).push(rk);
+  }
+  S.aiBullets = (S.cannons.length || S.shraps.length || straightRk)
+    ? S.bullets.concat(S.cannons, S.shraps, straightRk ?? [])
     : S.bullets;
 
+  S.engineMoving = false;
   if (!S.banner) {
     stepTanks(now, dt);
     stepBullets(now, dt);
@@ -427,6 +447,7 @@ function frame(now) {
     }
   }
 
+  setEngine(!S.banner, S.engineMoving);
   draw(now);
   S.raf = requestAnimationFrame(frame);
 }
@@ -470,6 +491,8 @@ function stepTanks(now, dt) {
       if (acts.up) v += MOVE_SPEED * mul.speed;
       if (acts.down) v -= REVERSE_SPEED * mul.speed;
 
+      if (v !== 0 && !t.bot) S.engineMoving = true;
+
       if (v !== 0) {
         // WALL FRICTION, Tank-Trouble style: if the move would touch
         // a wall — even at a shallow angle — the tank hard-stops.
@@ -485,19 +508,25 @@ function stepTanks(now, dt) {
       if (acts.shoot && !t.prevShoot) tryFire(t, now);
       t.prevShoot = acts.shoot;
 
-      // Machine gun: after the wind-up, spray half-sized balls.
-      if (t.mg) {
-        if (now >= t.mg.fireAt) {
-          if (t.mg.left > 0) {
-            const m = muzzlePoint(t, MG.r * BULLET_R);
-            const a = t.a + (Math.random() * 2 - 1) * MG.spread;
-            spawnBullet(t.id, m.x, m.y, a, now, true);
-            sendTypedShot(t, { w: "mini", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +a.toFixed(3) }, now);
-            t.mg.left -= 1;
-            t.mg.fireAt = now + MG.gapMs;
-          } else {
-            t.mg = null;
-            clearWeapon(t, now);
+      // Machine gun: the FIRST trigger pull spins the barrel up
+      // (glowing muzzle, half a second). After that it's manual —
+      // hold to spray at full rate, tap for single shots. The gun
+      // stays until all its balls are spent.
+      if (t.weapon === "mg" && acts.shoot) {
+        if (!t.mgReadyAt) {
+          t.mgReadyAt = now + MG.windupMs;
+          sfx.windup();
+        } else if (now >= t.mgReadyAt && now >= (t.mgNext ?? 0)) {
+          t.mgAmmo ??= MG.shots;
+          const m = muzzlePoint(t, MG.r * BULLET_R);
+          const a = t.a + (Math.random() * 2 - 1) * MG.spread;
+          spawnBullet(t.id, m.x, m.y, a, now, true);
+          sendTypedShot(t, { w: "mini", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +a.toFixed(3) }, now);
+          t.mgNext = now + MG.gapMs;
+          t.mgAmmo -= 1;
+          if (t.mgAmmo <= 0) {
+            t.mgAmmo = null;
+            clearWeapon(t, now); // spent — barrel reverts, pickups unlock
           }
         }
       }
@@ -551,19 +580,25 @@ function muzzlePoint(t, projR) {
 
 function sendTypedShot(t, payload, now) {
   if (S.mode !== "online" || !t.local) return;
-  const key = now.toString(36) + Math.random().toString(36).slice(2, 6);
+  // Math.floor matters: float timestamps stringify with a "." which
+  // is an ILLEGAL character in Firebase paths — the write would throw
+  // and take the whole game loop down with it.
+  const key = Math.floor(now).toString(36) + Math.random().toString(36).slice(2, 8);
   (S.seenShots[t.id] ??= new Set()).add(key);
   S.sendShot?.(t.id, key, payload);
 }
 
 function clearWeapon(t, now) {
   t.weapon = null;
+  t.mgReadyAt = 0;
+  t.mgNext = 0;
+  t.mgAmmo = null;
   t.gunClearedAt = now;
   if (S.mode === "online" && t.local) S.sendGun?.(t.id, null);
 }
 
 function tryFire(t, now) {
-  if (t.mg) return; // mid-spray
+  if (t.weapon === "mg") return; // manual fire — handled in stepTanks
 
   if (t.weapon) {
     fireSpecial(t, now);
@@ -581,12 +616,6 @@ function tryFire(t, now) {
 
 function fireSpecial(t, now) {
   const w = t.weapon;
-
-  if (w === "mg") {
-    // Half-second wind-up, then the burst runs from stepTanks.
-    t.mg = { startAt: now, fireAt: now + MG.windupMs, left: MG.shots };
-    return; // weapon (and barrel) stays until the spray ends
-  }
 
   if (w === "laser") {
     const m = muzzlePoint(t, 1);
@@ -644,7 +673,7 @@ function stepBullets(now, dt) {
     for (let s = 0; s < steps && alive; s++) {
       b.x += (b.vx * dt) / steps;
       b.y += (b.vy * dt) / steps;
-      bounceCircle(b, S.rects, b.r ?? BULLET_R);
+      if (bounceCircle(b, S.rects, b.r ?? BULLET_R)) sfx.bounce();
 
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
@@ -673,7 +702,8 @@ function stepSpecials(now, dt) {
   stepRockets(now, dt);
   stepCannons(now, dt);
   stepShrapnel(now, dt);
-  S.beams = S.beams.filter((bm) => now - bm.born < LASER.flashMs);
+  stepBeams(now);
+  S.beams = S.beams.filter((bm) => !bm.doneAt || now - bm.doneAt < LASER.flashMs);
   S.booms = S.booms.filter((bo) => now - bo.born < 320);
 }
 
@@ -685,8 +715,10 @@ function stepGear(now) {
     if (spot) {
       const type = WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)];
       const key = "g" + (S.gearSeq++) + Math.random().toString(36).slice(2, 6);
-      if (S.mode === "local") S.gear.push({ key, x: spot.x, y: spot.y, type });
-      else S.sendGear?.(key, { x: spot.x, y: spot.y, type }); // arrives via snapshot
+      if (S.mode === "local") {
+        S.gear.push({ key, x: spot.x, y: spot.y, type });
+        sfx.gearSpawn();
+      } else S.sendGear?.(key, { x: spot.x, y: spot.y, type }); // arrives via snapshot
     }
   }
 
@@ -694,12 +726,15 @@ function stepGear(now) {
   for (let i = S.gear.length - 1; i >= 0; i--) {
     const g = S.gear[i];
     for (const t of S.tanks) {
-      if (!t.local || t.dead || t.gone || t.mg) continue;
+      // One gun at a time: an armed tank can't grab another crate
+      // until its current weapon has been fired off.
+      if (!t.local || t.dead || t.gone || t.weapon) continue;
       const d2 = (t.x - g.x) ** 2 + (t.y - g.y) ** 2;
       if (d2 > (TANK_RAD + GEAR_R) ** 2) continue;
       S.gear.splice(i, 1);
       S.takenGear.set(g.key, now);
       t.weapon = g.type; // barrel (sprite + hitbox) swaps immediately
+      sfx.pickup();
       if (S.mode === "online") S.sendPickup?.(g.key, t.id, g.type);
       break;
     }
@@ -728,29 +763,56 @@ function pickGearSpot() {
 function fireLaser(byId, x, y, a, now) {
   const pts = laserPath(x, y, a, S.rects, LASER.shotBounces);
   const shooter = S.tanks.find((t) => t.id === byId);
-  S.beams.push({ pts, color: HULL[shooter?.color] ?? "#e8452e", born: now });
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  }
+  // The beam is no longer instant — a head races along the reflected
+  // path at LASER.beamSpeed, killing in path order as it passes.
+  // Borderline instant, but you can watch it go.
+  S.beams.push({
+    pts, cum, total: cum[cum.length - 1],
+    color: HULL[shooter?.color] ?? "#e8452e",
+    born: now, by: byId, head: 0, doneAt: 0,
+  });
+  sfx.laser();
+}
 
-  // Kill everything the beam crosses — the shooter included, if a
-  // reflection comes back over them (but not at the muzzle itself).
+// A point at distance d along a beam's polyline.
+function beamPointAt(bm, d) {
+  for (let i = 1; i < bm.pts.length; i++) {
+    if (d <= bm.cum[i] || i === bm.pts.length - 1) {
+      const seg = bm.cum[i] - bm.cum[i - 1] || 1;
+      const k = Math.min(1, Math.max(0, (d - bm.cum[i - 1]) / seg));
+      return {
+        x: bm.pts[i - 1].x + (bm.pts[i].x - bm.pts[i - 1].x) * k,
+        y: bm.pts[i - 1].y + (bm.pts[i].y - bm.pts[i - 1].y) * k,
+      };
+    }
+  }
+  return bm.pts[bm.pts.length - 1];
+}
+
+function stepBeams(now) {
   const r = LASER.width * BULLET_R;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const ax = pts[i].x;
-    const ay = pts[i].y;
-    const dx = pts[i + 1].x - ax;
-    const dy = pts[i + 1].y - ay;
-    const len = Math.hypot(dx, dy);
-    const steps = Math.max(1, Math.ceil(len / 4));
-    for (let s = 0; s <= steps; s++) {
-      const px = ax + (dx * s) / steps;
-      const py = ay + (dy * s) / steps;
+  for (const bm of S.beams) {
+    if (bm.doneAt) continue;
+    const head = Math.min(bm.total, ((now - bm.born) / 1000) * LASER.beamSpeed);
+    // Kill along the newly swept span, sampled finely. The shooter
+    // is immune only at their own muzzle — reflections still bite.
+    for (let d = bm.head; ; d = Math.min(head, d + 4)) {
+      const p = beamPointAt(bm, d);
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
-        if (t.id === byId && i === 0 && (s * len) / steps < TANK_R * 2.6) continue;
-        if (tankHitPoint(t, px, py, r)) {
+        if (t.id === bm.by && d < TANK_R * 2.6) continue;
+        if (tankHitPoint(t, p.x, p.y, r)) {
           if (S.mode === "local" || t.local) killTank(t);
         }
       }
+      if (d >= head) break;
     }
+    bm.head = head;
+    if (head >= bm.total) bm.doneAt = now;
   }
 }
 
@@ -762,9 +824,12 @@ function spawnRocket(byId, x, y, a, now) {
     vy: Math.sin(a) * speed,
     born: now,
     by: byId,
+    r: ROCKET.r * BULLET_R, // bots dodge it like a (fat) bullet
+    mini: true,             // never counts toward anyone's ammo
     trail: [],
     tcol: null,
   });
+  sfx.rocket();
 }
 
 function stepRockets(now, dt) {
@@ -832,8 +897,14 @@ function stepRockets(now, dt) {
 }
 
 function spawnCannon(byId, x, y, a, now) {
+  sfx.cannon();
   const speed = BULLET_SPEED * CANNON.speed;
+  // Deterministic per-shot seed: built only from the (fixed-precision)
+  // shot parameters, so every online client grows the SAME shrapnel
+  // pattern from this ball.
+  const seed = (Math.abs(Math.round(x * 10 + y * 1700 + a * 99730)) % 2147483647) >>> 0;
   S.cannons.push({
+    seed,
     x, y,
     vx: Math.cos(a) * speed,
     vy: Math.sin(a) * speed,
@@ -875,11 +946,15 @@ function stepCannons(now, dt) {
 
 // Shrapnel circle — it phases through walls (slowed inside them).
 function explodeCannon(c, now) {
+  sfx.shrap();
   S.booms.push({ x: c.x, y: c.y, born: now, r: CANNON.r * BULLET_R * 4 });
   const speed = BULLET_SPEED * CANNON.shrapSpeed;
+  // Irregular burst, not a perfect ring: seeded jitter on both angle
+  // and speed (seeded so online clients all see the same pattern).
+  const rng = mulberry32(c.seed ?? 1);
   for (let i = 0; i < CANNON.shrapN; i++) {
-    const a = (i / CANNON.shrapN) * Math.PI * 2;
-    const jitter = 0.92 + Math.random() * 0.16;
+    const a = (i / CANNON.shrapN) * Math.PI * 2 + (rng() - 0.5) * 0.55;
+    const jitter = 0.7 + rng() * 0.6;
     S.shraps.push({
       x: c.x, y: c.y,
       vx: Math.cos(a) * speed * jitter,
@@ -897,8 +972,8 @@ function stepShrapnel(now, dt) {
   const survivors = [];
 
   for (const sh of S.shraps) {
-    if (now - sh.born > CANNON.shrapLifeMs) continue;
-    if (sh.x < -60 || sh.y < -60 || sh.x > S.worldW + 60 || sh.y > S.worldH + 60) continue;
+    // No timer: shrapnel travels until it leaves the arena.
+    if (sh.x < -20 || sh.y < -20 || sh.x > S.worldW + 20 || sh.y > S.worldH + 20) continue;
 
     let alive = true;
     const steps = 2;
@@ -923,6 +998,7 @@ function stepShrapnel(now, dt) {
 function killTank(t) {
   if (t.dead) return;
   t.dead = true;
+  sfx.boom();
   if (S.mode === "online" && t.local) S.sendDead?.(t.id);
 }
 
@@ -937,8 +1013,10 @@ function maybeEndRound(now) {
   if (w) {
     S.scores[w.color] = (S.scores[w.color] ?? 0) + 1;
     S.banner = { text: `${COLOR_NAMES[w.color].toUpperCase()} WINS THE ROUND`, color: HULL[w.color] };
+    sfx.roundEnd();
   } else {
     S.banner = { text: "DRAW", color: "#eef1f6" };
+    sfx.roundEnd();
   }
   S.roundOverAt = now;
   updateScoreHUD();
@@ -1190,17 +1268,32 @@ function draw(now) {
     ctx.restore();
   }
 
-  // Laser beams flash and fade.
+  // Laser beams race along their path, then flash and fade.
   for (const bm of S.beams) {
-    const f = 1 - (now - bm.born) / LASER.flashMs;
+    const f = bm.doneAt ? 1 - (now - bm.doneAt) / LASER.flashMs : 1;
     ctx.strokeStyle = bm.color;
     ctx.globalAlpha = Math.max(0, f);
     ctx.lineWidth = LASER.width * BULLET_R * 2 * (0.4 + f * 0.6);
     ctx.lineJoin = "round";
     ctx.beginPath();
     ctx.moveTo(bm.pts[0].x, bm.pts[0].y);
-    for (let i = 1; i < bm.pts.length; i++) ctx.lineTo(bm.pts[i].x, bm.pts[i].y);
+    for (let i = 1; i < bm.pts.length; i++) {
+      if (bm.cum[i] <= bm.head) {
+        ctx.lineTo(bm.pts[i].x, bm.pts[i].y);
+      } else {
+        const tip = beamPointAt(bm, bm.head);
+        ctx.lineTo(tip.x, tip.y);
+        break;
+      }
+    }
     ctx.stroke();
+    if (!bm.doneAt) {
+      const tip = beamPointAt(bm, bm.head);
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, LASER.width * BULLET_R * 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
   }
 
@@ -1257,9 +1350,9 @@ function drawTank(t, now) {
   drawBarrel(ctx, wtype, R, shade(hull, 0.35), shade(hull, 0.6));
 
   // Machine gun wind-up: the muzzle glows while it spins up.
-  if (t.mg && now < t.mg.fireAt) {
+  if (t.weapon === "mg" && t.mgReadyAt && now < t.mgReadyAt) {
     const bl = BARRELS.mg;
-    const f = (now - t.mg.startAt) / MG.windupMs;
+    const f = 1 - (t.mgReadyAt - now) / MG.windupMs;
     ctx.fillStyle = "#e8452e";
     ctx.globalAlpha = 0.35 + 0.6 * Math.abs(Math.sin(f * 14));
     ctx.beginPath();

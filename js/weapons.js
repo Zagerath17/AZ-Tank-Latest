@@ -26,16 +26,17 @@ export const BARRELS = {
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
 export const LASER = {
-  previewBounces: 4, // aiming line reflects this many times
-  shotBounces: 7,    // the fired beam reflects this many times
+  previewBounces: 6, // aiming line reflects this many times
+  shotBounces: 9,    // the fired beam reflects this many times
   width: 0.9,        // beam half-thickness, × bullet radius
+  beamSpeed: 9500,   // px/s — you can SEE it travel, but barely
   flashMs: 320,
 };
 
 export const MG = {
-  windupMs: 500,     // spin-up before the spray starts
-  shots: 16,
-  gapMs: 90,
+  windupMs: 500,     // barrel spin-up on the first trigger pull
+  shots: 16,         // total balls per pickup — hold or tap to fire
+  gapMs: 90,         // minimum gap between balls while holding
   spread: 0.07,      // radians of random scatter per ball
   r: 0.5,            // × bullet radius — "half sized balls"
   speed: 1.05,
@@ -43,24 +44,23 @@ export const MG = {
 };
 
 export const ROCKET = {
-  speed: 0.95,
+  speed: 0.72,        // ~10% faster than a driving tank — outrunnable-ish
   straightMs: 1750,   // flies straight (bouncing) this long, like AZ Tank
   seekTurn: 12.0,     // rad/s once seeking — U-turns fit inside a corridor
   r: 1.4,
-  lifeMs: 8000,
+  lifeMs: 6000,       // 6 s fuse, then it detonates harmlessly
   ownerGraceMs: 1000, // can't collide with its shooter right away
   trailLen: 26,
 };
 
 export const CANNON = {
-  speed: 0.5,        // one SLOW projectile
-  r: 2.3,
+  speed: 0.55,       // one slow-ish projectile
+  r: 1.5,            // big ball (but not comically big)
   lifeMs: 3500,
-  shrapN: 14,        // shrapnel circle on expiry / tank hit
+  shrapN: 22,        // irregular shrapnel burst on expiry / tank hit
   shrapSpeed: 1.1,
   shrapR: 0.6,
-  shrapLifeMs: 1100,
-  wallSlow: 0.35,    // shrapnel speed factor while inside a wall
+  wallSlow: 0.15,    // shrapnel crawls while phasing through a wall
 };
 
 /* ================================================================
@@ -147,6 +147,7 @@ export function insideAnyWall(x, y, r, rects) {
 
 // Reflect a circle off walls (same rule the bullets use).
 export function bounceCircle(b, rects, r) {
+  let bounced = false;
   for (const rc of rects) {
     const cx = rc.x + rc.w / 2;
     const cy = rc.y + rc.h / 2;
@@ -157,13 +158,14 @@ export function bounceCircle(b, rects, r) {
     if (ox < oy) {
       const dir = b.x < cx ? -1 : 1;
       b.x += dir * ox;
-      if ((dir < 0 && b.vx > 0) || (dir > 0 && b.vx < 0)) b.vx = -b.vx;
+      if ((dir < 0 && b.vx > 0) || (dir > 0 && b.vx < 0)) { b.vx = -b.vx; bounced = true; }
     } else {
       const dir = b.y < cy ? -1 : 1;
       b.y += dir * oy;
-      if ((dir < 0 && b.vy > 0) || (dir > 0 && b.vy < 0)) b.vy = -b.vy;
+      if ((dir < 0 && b.vy > 0) || (dir > 0 && b.vy < 0)) { b.vy = -b.vy; bounced = true; }
     }
   }
+  return bounced;
 }
 
 // Rotate a projectile's velocity toward a point, capped at maxTurn.

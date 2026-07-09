@@ -91,7 +91,14 @@ function sortPlayers(players) {
 // Fire-and-forget write helper used by the in-game streams.
 function write(path, value) {
   if (!current || !fb) return;
-  fb.set(fb.ref(fb.db, `lobbies/${current.code}/${path}`), value).catch(() => {});
+  // try/catch as well as .catch(): an invalid path makes ref() throw
+  // SYNCHRONOUSLY, and a sync throw here would kill the caller's
+  // animation loop. A dropped packet is always better than a freeze.
+  try {
+    fb.set(fb.ref(fb.db, `lobbies/${current.code}/${path}`), value).catch(() => {});
+  } catch (e) {
+    console.warn("write skipped:", path, e?.message);
+  }
 }
 
 /* ---------- create / join ---------- */
@@ -273,7 +280,9 @@ function beginOnlineGame(code, lobby) {
       // Shots are transient — clean up after the bullet is long dead.
       setTimeout(() => {
         if (current && fb) {
-          fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${id}/shots/${key}`)).catch(() => {});
+          try {
+            fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${id}/shots/${key}`)).catch(() => {});
+          } catch (e) { /* invalid key — nothing to clean */ }
         }
       }, SHOT_TTL);
     },

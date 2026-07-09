@@ -39,8 +39,8 @@ export const AI_PARAMS = {
     fireRange: 4.5,     // won't fire beyond this (cells)
     cooldown: 2.0,
     fireProb: 0.75,
-    dodgeSkill: 0,      // never dodges
-    dodgeHorizon: 0,
+    dodgeSkill: 0.25,   // dodges badly — sees threats late, reacts to few
+    dodgeHorizon: 0.45,
     lead: 0,            // no movement prediction
     selfCheckT: 0.35,   // barely checks its own ricochets — still fumbles sometimes
     verifyHit: false,
@@ -62,6 +62,7 @@ export const AI_PARAMS = {
   hard: {
     speed: 1.0, turn: 1.0, react: 0.30,
     aimErr: 0.035, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.95, fireProb: 1,
+    jinkMs: 520,        // sharp evasive weaving between shots
     dodgeSkill: 0.92, dodgeHorizon: 1.05,
     lead: 0.65,         // partial movement prediction
     selfCheckT: 1.7,
@@ -74,6 +75,7 @@ export const AI_PARAMS = {
   impossible: {
     speed: 1.0, turn: 1.0, react: 0.20,
     aimErr: 0.008, aimTol: 0.055, range: 99, fireRange: 7, cooldown: 0.5, fireProb: 1,
+    jinkMs: 430,        // relentless weaving
     dodgeSkill: 1, dodgeHorizon: 1.35,
     lead: 1,            // full intercept prediction
     selfCheckT: 1.8,
@@ -111,6 +113,8 @@ export function botActions(t, world, dt, now) {
     wobble: 0, wobbleAt: 0,
     threat: null, threatScanAt: 0, pendingAt: 0, alertUntil: 0,
     hazPt: null, hazUntil: 0,
+    jinkAt: 0, jinkSide: 1, hazDir: null,
+    laserWaryOf: null, laserWaryUntil: 0,
     prevLos: false,
     vel: {},
   });
@@ -214,6 +218,8 @@ export function botActions(t, world, dt, now) {
         const near = nearestOnPolyline(t.x, t.y, L.pts);
         if (near && near.d < (world.tankR ?? 22) + world.cell * 0.2) {
           hazardSteer = true;
+          ai.laserWaryOf = L.by;
+          ai.laserWaryUntil = now + 2200;
           sidestepLine(t, ai, L, world, rBody, acts, now);
           break;
         }
@@ -256,10 +262,13 @@ export function botActions(t, world, dt, now) {
     let aimY = target.y;
     const tvSpeed = tv ? Math.hypot(tv.vx, tv.vy) : 0;
     if (P.lead > 0 && tv && tvSpeed > 25) {
+      // Lead steady movers fully; barely lead erratic weavers — the
+      // center of their weave is the best aim point available.
+      const lead = P.lead * (0.2 + 0.8 * (tv.stab ?? 1));
       let eta = dist / world.bulletSpeed;
       for (let i = 0; i < 2; i++) { // fixed-point refine
-        aimX = target.x + tv.vx * eta * P.lead;
-        aimY = target.y + tv.vy * eta * P.lead;
+        aimX = target.x + tv.vx * eta * lead;
+        aimY = target.y + tv.vy * eta * lead;
         eta = Math.hypot(aimX - t.x, aimY - t.y) / world.bulletSpeed;
       }
     }
@@ -272,9 +281,6 @@ export function botActions(t, world, dt, now) {
     // where their reaction time can actually beat incoming shots.
     if (!dodging && !hazardSteer) {
       combatSteered = true;
-      const errW = angleDiff(t.a, wantW);
-      if (errW > 0.05) acts.right = true;
-      else if (errW < -0.05) acts.left = true;
       // Ammo read on the TARGET too: an enemy with nothing left to
       // fire is safe to rush (smart tiers only).
       let band = P.standoff * cell;
@@ -283,10 +289,56 @@ export function botActions(t, world, dt, now) {
         for (const b of world.bullets) if (b.by === target.id && !b.mini) theirs++;
         if (theirs >= (world.maxBullets ?? 5)) band = cell * 0.6;
       }
-      if (dist > band * 1.15) {
-        if (Math.abs(errW) < 0.8) acts.up = true;
-      } else if (dist < band * 0.85) {
-        if (Math.abs(errW) < 1.0) acts.down = true; // back up, keep aiming
+
+      // Two combat phases, like a decent human player:
+      //   AIM  — the gun is (almost) ready: snap onto the target,
+      //          manage range with small, verified moves.
+      //   WEAVE— between shots: forward-driving spiral that never
+      //          stops rolling. A moving tank is a hard target; the
+      //          spiral pitch manages range (in when far, orbit in
+      //          the band, out when crowded) without ever blindly
+      //          reversing.
+      const aimWindow = !P.jinkMs || (canFire && now >= ai.fireAt - 280);
+      if (aimWindow) {
+        const errW = angleDiff(t.a, wantW);
+        if (errW > 0.04) acts.right = true;
+        else if (errW < -0.04) acts.left = true;
+        if (dist > band * 1.15) {
+          if (Math.abs(errW) < 0.7) acts.up = true;
+        } else if (dist < band * 0.75) {
+          // Back off ONLY down a verified-open lane; with a wall at
+          // our back, plant and fight.
+          const bx = t.x - Math.cos(t.a) * cell * 0.6;
+          const by = t.y - Math.sin(t.a) * cell * 0.6;
+          if (Math.abs(errW) < 0.9 && corridorClear(t.x, t.y, bx, by, world.rects, rBody)) {
+            acts.down = true;
+          }
+        }
+      } else {
+        if (!(now < ai.jinkAt)) {
+          ai.jinkAt = now + P.jinkMs + Math.random() * P.jinkMs * 0.5;
+          ai.jinkSide = -(ai.jinkSide || 1);
+        }
+        const toE = Math.atan2(target.y - t.y, target.x - t.x);
+        const theta = dist > band * 1.2 ? 0.55 : dist < band * 0.8 ? 2.0 : 1.25;
+        let placed = false;
+        for (const side of [ai.jinkSide, -ai.jinkSide]) {
+          const h = toE + side * theta;
+          const px = t.x + Math.cos(h) * cell * 0.6;
+          const py = t.y + Math.sin(h) * cell * 0.6;
+          if (corridorClear(t.x, t.y, px, py, world.rects, rBody)) {
+            ai.jinkSide = side;
+            steerTo(t, px, py, acts, world, rBody, false);
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          // Boxed in — keep the gun on them at least.
+          const errW = angleDiff(t.a, wantW);
+          if (errW > 0.04) acts.right = true;
+          else if (errW < -0.04) acts.left = true;
+        }
       }
     }
 
@@ -296,7 +348,10 @@ export function botActions(t, world, dt, now) {
     const aligned = Math.abs(angleDiff(t.a, wantW)) < P.aimTol;
     const inFireRange = dist <= P.fireRange * cell;
     const mediumHold = t.bot === "medium" && dodging; // medium can't multitask
-    if (aligned && inFireRange && !mediumHold && canFire && now >= ai.fireAt) {
+    if (special === "mg") {
+      // The MG is manual now: HOLD the trigger while the sight is on.
+      if (aligned && inFireRange && !mediumHold) acts.shoot = true;
+    } else if (aligned && inFireRange && !mediumHold && canFire && now >= ai.fireAt) {
       if (special) {
         // Pickup weapons fire on a clean look — no ricochet trace
         // needed. Exception: the cannon's shrapnel comes back through
@@ -335,7 +390,27 @@ export function botActions(t, world, dt, now) {
   }
 
   /* ---- 5. navigation ---- */
-  if (!dodging && !hazardSteer && !combatSteered) {
+  // In cover from a live laser we just escaped? WAIT it out — walking
+  // back into a tracked lane is how tanks get deleted. Wariness decays
+  // quickly so rounds can't stall.
+  let laserHold = false;
+  if (!dodging && !hazardSteer && !combatSteered && ai.laserWaryOf && now < ai.laserWaryUntil) {
+    const holder = world.tanks.find(
+      (o) => o.id === ai.laserWaryOf && !o.dead && !o.gone && o.weapon === "laser",
+    );
+    if (holder) {
+      laserHold = true;
+      // Keep the hull pointed at the corner they'd come around.
+      const wantH = Math.atan2(holder.y - t.y, holder.x - t.x);
+      const errH = angleDiff(t.a, wantH);
+      if (errH > 0.06) acts.right = true;
+      else if (errH < -0.06) acts.left = true;
+    } else {
+      ai.laserWaryOf = null; // laser fired or dropped — resume
+    }
+  }
+
+  if (!dodging && !hazardSteer && !combatSteered && !laserHold) {
     // Bare barrel + a weapon crate on the floor? Worth a detour —
     // but only when we don't already carry one.
     let goal = target;
@@ -373,58 +448,75 @@ function navigate(t, ai, target, world, P, rBody, now, acts) {
   if (now > ai.repathAt || !ai.path.length || ai.tgKey !== tgKey) {
     ai.path = bfsPath(world.maze, myCell, tgCell);
     ai.tgKey = tgKey;
-    ai.repathAt = now + 600;
+    ai.repathAt = now + 500;
   }
 
-  // Consume reached waypoints — tighter before corners so the tank
-  // swings wide of wall ends instead of clipping them.
+  // Consume reached waypoints (including the cell we're standing in).
   while (ai.path.length) {
     const w = ai.path[0];
-    const next = ai.path[1];
-    let popR = cell * 0.32;
-    if (next) {
-      const dot = (w.c - myCell.c) * (next.c - w.c) + (w.r - myCell.r) * (next.r - w.r);
-      if (dot <= 0) popR = cell * 0.16;
-    }
     const wx = (w.c + 0.5) * cell;
     const wy = (w.r + 0.5) * cell;
-    if ((wx - t.x) ** 2 + (wy - t.y) ** 2 < popR * popR) ai.path.shift();
+    const same = w.c === myCell.c && w.r === myCell.r;
+    if (same || (wx - t.x) ** 2 + (wy - t.y) ** 2 < (cell * 0.34) ** 2) ai.path.shift();
     else break;
   }
 
-  let aimX;
-  let aimY;
-  const w = ai.path[0];
-  if (w) {
+  // Aim at the FARTHEST waypoint reachable in one straight drivable
+  // line (same trick as the homing rocket): corners get cut smoothly
+  // and the heading barely needs correcting in between — confident
+  // driving instead of stop-start waypoint chasing.
+  let aimX = target.x;
+  let aimY = target.y;
+  let found = !ai.path.length; // empty path → drive at the target
+  for (let i = Math.min(3, ai.path.length) - 1; i >= 0 && !found; i--) {
+    const w = ai.path[i];
     const wx = (w.c + 0.5) * cell;
     const wy = (w.r + 0.5) * cell;
     if (corridorClear(t.x, t.y, wx, wy, world.rects, rBody)) {
-      aimX = wx; aimY = wy;
-    } else {
-      aimX = (myCell.c + 0.5) * cell; // line up mid-corridor first
-      aimY = (myCell.r + 0.5) * cell;
+      aimX = wx; aimY = wy; found = true;
     }
-  } else {
-    aimX = target.x;
-    aimY = target.y;
+  }
+  if (!found) {
+    // Nothing drivable in a straight line — recenter in this cell
+    // first (unless we're already centered; then just aim the next
+    // waypoint and let the pivot handle it).
+    const cx = (myCell.c + 0.5) * cell;
+    const cy = (myCell.r + 0.5) * cell;
+    if ((cx - t.x) ** 2 + (cy - t.y) ** 2 > (cell * 0.18) ** 2) {
+      aimX = cx; aimY = cy;
+    } else {
+      const w = ai.path[0];
+      aimX = (w.c + 0.5) * cell;
+      aimY = (w.r + 0.5) * cell;
+    }
   }
 
-  steerTo(t, aimX, aimY, acts, true);
+  steerTo(t, aimX, aimY, acts, world, rBody, true);
 }
 
-// Steer toward a point; may choose to REVERSE when the point is
-// mostly behind us — no more three-point-turn stalls at junctions.
-function steerTo(t, px, py, acts, allowReverse) {
+// Steer toward a point, forward-committed: the tank pivots and
+// drives. Reversing happens ONLY when the point is almost directly
+// behind AND the lane back is verified open — blind reversing is how
+// tanks back into corners, ricochets, and each other.
+function steerTo(t, px, py, acts, world, rBody, allowReverse = true, revThresh = 2.6, revProbe = true) {
   const want = Math.atan2(py - t.y, px - t.x);
   let err = angleDiff(t.a, want);
   let rev = false;
-  if (allowReverse && Math.abs(err) > Math.PI * 0.62) {
-    err = angleDiff(t.a, want + Math.PI);
-    rev = true;
+  if (allowReverse && Math.abs(err) > revThresh) {
+    let ok = true;
+    if (revProbe) {
+      const bx = t.x - Math.cos(t.a) * world.cell * 0.55;
+      const by = t.y - Math.sin(t.a) * world.cell * 0.55;
+      ok = corridorClear(t.x, t.y, bx, by, world.rects, rBody);
+    }
+    if (ok) {
+      err = angleDiff(t.a, want + Math.PI);
+      rev = true;
+    }
   }
-  if (err > 0.05) acts.right = true;
-  else if (err < -0.05) acts.left = true;
-  if (Math.abs(err) < 0.75) {
+  if (err > 0.04) acts.right = true;
+  else if (err < -0.04) acts.left = true;
+  if (Math.abs(err) < 0.55) {
     if (rev) acts.down = true;
     else acts.up = true;
   }
@@ -508,16 +600,23 @@ function dodgeSteer(t, threat, world, rBody, acts, now) {
   const bvy = threat.vy / bs;
   const etaS = Math.max(0.12, (threat.impactAt - now) / 1000);
   const mv = world.moveSpeed ?? 134;
-  const D = Math.min(world.cell * 0.85, Math.max(world.cell * 0.35, mv * etaS));
+  const Df = Math.min(world.cell * 0.85, Math.max(world.cell * 0.35, mv * etaS));
 
-  const offs = [0.55, -0.55, 1.05, -1.05, 0, Math.PI + 0.55, Math.PI - 0.55, Math.PI];
+  // Every kinematically cheap escape is a candidate — shallow turns
+  // keep the tank driving the whole flight time, rear points use
+  // reverse gear. Dodges are the one place backing up is ALWAYS
+  // legitimate: it's brief, it's purposeful, and it saves the tank.
+  const cands = [
+    [0.55, 0], [-0.55, 0], [1.05, 0], [-1.05, 0], [0, 0], [1.5, 0], [-1.5, 0],
+    [Math.PI + 0.55, 1], [Math.PI - 0.55, 1], [Math.PI, 1],
+  ];
   let bestPt = null;
   let bestScore = -Infinity;
 
-  for (const off of offs) {
+  for (const [off, rear] of cands) {
     const h = t.a + off;
-    const ox = t.x + Math.cos(h) * D;
-    const oy = t.y + Math.sin(h) * D;
+    const ox = t.x + Math.cos(h) * Df;
+    const oy = t.y + Math.sin(h) * Df;
     if (!corridorClear(t.x, t.y, ox, oy, world.rects, rBody)) continue;
 
     // Primary: distance off THIS threat's travel line at the endpoint.
@@ -541,8 +640,8 @@ function dodgeSteer(t, threat, world, rBody, acts, now) {
     if (score > bestScore) { bestScore = score; bestPt = [ox, oy]; }
   }
 
-  if (bestPt) steerTo(t, bestPt[0], bestPt[1], acts, true);
-  else steerTo(t, t.x + bvx * D, t.y + bvy * D, acts, true);
+  if (bestPt) steerTo(t, bestPt[0], bestPt[1], acts, world, rBody, true, 1.9, false);
+  else steerTo(t, t.x + bvx * Df, t.y + bvy * Df, acts, world, rBody, false);
 }
 
 // Trace the shot we're about to take along our CURRENT heading.
@@ -590,8 +689,12 @@ function traceShot(t, world, P, ai) {
         if (hx * hx + hy * hy < hitR * hitR) { hits = true; break; }
         const tv = ai.vel[o.id];
         if (tv && P.lead > 0) {
-          hx = sim.x - (o.x + tv.vx * tau * P.lead);
-          hy = sim.y - (o.y + tv.vy * tau * P.lead);
+          // Same adaptive lead as aiming: a weaver's future is their
+          // current spot, so verify against that instead of a full
+          // extrapolation they'll never occupy.
+          const lead = P.lead * (0.2 + 0.8 * (tv.stab ?? 1));
+          hx = sim.x - (o.x + tv.vx * tau * lead);
+          hy = sim.y - (o.y + tv.vy * tau * lead);
           if (hx * hx + hy * hy < hitR * hitR) { hits = true; break; }
         }
       }
@@ -671,8 +774,8 @@ function fleeRocket(t, ai, rk, world, rBody, acts, now) {
     ai.hazUntil = now + 450;
   }
 
-  if (ai.hazPt) steerTo(t, ai.hazPt[0], ai.hazPt[1], acts, true);
-  else steerTo(t, t.x + (t.x - rk.x), t.y + (t.y - rk.y), acts, true);
+  if (ai.hazPt) steerTo(t, ai.hazPt[0], ai.hazPt[1], acts, world, rBody, true, 1.9, false);
+  else steerTo(t, t.x + (t.x - rk.x), t.y + (t.y - rk.y), acts, world, rBody, true, 1.9, true);
 }
 
 // Closest point on a polyline (the laser preview), with the segment
@@ -736,13 +839,22 @@ function sidestepLine(t, ai, L, world, rBody, acts, now) {
       const nd = nearestOnPolyline(cx, cy, L.pts);
       let score = (nd ? nd.d : cell) - Math.hypot(cx - t.x, cy - t.y) * 0.15;
       if (owner && segmentHitsAnyRect(cx, cy, owner.x, owner.y, world.rects)) score += cell * 2;
+      // COMMIT to the chosen escape side: the aim line tracks us, so
+      // flip-flopping between sides each rethink nets zero distance.
+      if (ai.hazDir && (cx - t.x) * ai.hazDir[0] + (cy - t.y) * ai.hazDir[1] > 0) {
+        score += cell * 0.55;
+      }
       if (score > bestScore) { bestScore = score; bestPt = [cx, cy]; }
     }
     ai.hazPt = bestPt;
+    if (bestPt) {
+      const dl = Math.hypot(bestPt[0] - t.x, bestPt[1] - t.y) || 1;
+      ai.hazDir = [(bestPt[0] - t.x) / dl, (bestPt[1] - t.y) / dl];
+    }
     ai.hazUntil = now + 400;
   }
 
-  if (ai.hazPt) steerTo(t, ai.hazPt[0], ai.hazPt[1], acts, true);
+  if (ai.hazPt) steerTo(t, ai.hazPt[0], ai.hazPt[1], acts, world, rBody, true, 1.9, false);
 }
 
 /* ================================================================
@@ -754,11 +866,17 @@ function mkThreat(th, now) {
 }
 
 function trackVel(ai, o, now) {
-  const h = (ai.vel[o.id] ??= { x: o.x, y: o.y, t: now, vx: 0, vy: 0 });
+  const h = (ai.vel[o.id] ??= { x: o.x, y: o.y, t: now, vx: 0, vy: 0, stab: 1 });
   const dts = (now - h.t) / 1000;
   if (dts >= 0.08) {
     const nvx = (o.x - h.x) / dts;
     const nvy = (o.y - h.y) / dts;
+    // Direction volatility: a target whose heading keeps swinging
+    // (weaving!) can't be led — extrapolating their motion aims at
+    // where they were ABOUT to flip away from.
+    const spin = Math.abs(angleDiff(Math.atan2(h.vy, h.vx), Math.atan2(nvy, nvx)));
+    const volatile = Math.hypot(nvx, nvy) > 25 && spin > 0.5;
+    h.stab = h.stab * 0.7 + (volatile ? 0 : 0.3);
     h.vx = h.vx * 0.4 + nvx * 0.6;
     h.vy = h.vy * 0.4 + nvy * 0.6;
     h.x = o.x; h.y = o.y; h.t = now;
