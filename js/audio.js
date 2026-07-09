@@ -11,19 +11,60 @@
 
 let ctx = null;
 let master = null;
+let sfxBus = null;   // all effects + engine
+let musicBus = null; // the chiptune loop
 let engine = null;   // { gain, osc1, osc2 }
 let music = null;    // { timer, step, nextAt, gain }
 const lastPlay = {}; // per-sound rate limiting
+
+// User mix levels (0..1 each), persisted per device.
+const LEVELS_KEY = "tank.audio.v1";
+const levels = { master: 1, music: 1, sfx: 1 };
+try {
+  const raw = JSON.parse(localStorage.getItem(LEVELS_KEY));
+  for (const k of ["master", "music", "sfx"]) {
+    if (typeof raw?.[k] === "number") levels[k] = Math.min(1, Math.max(0, raw[k]));
+  }
+} catch (e) { /* fresh device */ }
+
+const MASTER_BASE = 1.2;
+
+export function getAudioLevels() {
+  return { ...levels };
+}
+
+export function setAudioLevel(kind, v) {
+  if (!(kind in levels)) return;
+  levels[kind] = Math.min(1, Math.max(0, v));
+  try { localStorage.setItem(LEVELS_KEY, JSON.stringify(levels)); } catch (e) {}
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  try {
+    if (kind === "master") master.gain.setTargetAtTime(MASTER_BASE * levels.master, t, 0.03);
+    if (kind === "music") musicBus.gain.setTargetAtTime(levels.music, t, 0.03);
+    if (kind === "sfx") sfxBus.gain.setTargetAtTime(levels.sfx, t, 0.03);
+  } catch (e) {}
+}
 
 function ensure() {
   if (ctx) return ctx;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
-    ctx = new AC();
+    // latencyHint "interactive" asks the OS for its smallest output
+    // buffer — sounds land on the frame they're triggered.
+    try { ctx = new AC({ latencyHint: "interactive" }); }
+    catch (e) { ctx = new AC(); }
     master = ctx.createGain();
-    master.gain.value = 1.2; // doubled by request
+    master.gain.value = MASTER_BASE * levels.master;
     master.connect(ctx.destination);
+    sfxBus = ctx.createGain();
+    sfxBus.gain.value = levels.sfx;
+    sfxBus.connect(master);
+    musicBus = ctx.createGain();
+    musicBus.gain.value = levels.music;
+    musicBus.connect(master);
+    getNoise(); // pre-build the noise buffer — no first-shot hiccup
   } catch (e) {
     ctx = null;
   }
@@ -82,7 +123,7 @@ function blip(type, f0, f1, dur, peak, when = 0) {
   o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
   g.gain.setValueAtTime(peak, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g).connect(master);
+  o.connect(g).connect(sfxBus);
   o.start(t);
   o.stop(t + dur + 0.02);
 }
@@ -111,7 +152,7 @@ function whoosh(filterType, f0, f1, dur, peak, when = 0, q = 1) {
   const g = ctx.createGain();
   g.gain.setValueAtTime(peak, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  src.connect(f).connect(g).connect(master);
+  src.connect(f).connect(g).connect(sfxBus);
   src.start(t);
   src.stop(t + dur + 0.02);
 }
@@ -219,6 +260,14 @@ export const sfx = {
     } catch (e) {}
   },
 
+  // Machine-gun spin-DOWN: a falling whir as the barrel gives up.
+  winddown() {
+    if (!ready() || limited("winddown", 300)) return;
+    try {
+      blip("sawtooth", 380, 80, 0.4, 0.05);
+    } catch (e) {}
+  },
+
   // Rocket proximity beeper — a flat, urgent tick.
   beep(freq = 1150, dur = 0.05) {
     if (!ready() || limited("beep", 28)) return;
@@ -261,7 +310,7 @@ export function setEngine(active, moving) {
       g2.gain.value = 0.5;
       o1.connect(f);
       o2.connect(g2).connect(f);
-      f.connect(g).connect(master);
+      f.connect(g).connect(sfxBus);
       o1.start();
       o2.start();
       engine = { gain: g, o1, o2 };
@@ -337,7 +386,7 @@ export function startMusic() {
   try {
     const gain = ctx.createGain();
     gain.gain.value = 0.55;
-    gain.connect(master);
+    gain.connect(musicBus);
     music = { gain, step: 0, nextAt: 0, timer: 0 };
     music.timer = setInterval(() => {
       if (!ready()) return;

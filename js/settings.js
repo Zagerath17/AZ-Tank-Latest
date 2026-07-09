@@ -5,6 +5,7 @@
 // ================================================================
 
 import { onEnter, onLeave, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { getAudioLevels, setAudioLevel, sfx } from "./audio.js";
 
 const STORE_KEY = "tank.keybinds.v1";
 
@@ -147,7 +148,45 @@ function onKeydown(e) {
 
 /* ---------- init ---------- */
 
+function initAudioPanel() {
+  const tabC = document.getElementById("tab-controls");
+  const tabA = document.getElementById("tab-audio");
+  const panC = document.getElementById("panel-controls");
+  const panA = document.getElementById("panel-audio");
+  if (!tabA) return;
+
+  const show = (audio) => {
+    panC.hidden = audio;
+    panA.hidden = !audio;
+    tabC.classList.toggle("is-on", !audio);
+    tabA.classList.toggle("is-on", audio);
+  };
+  tabC.addEventListener("click", () => show(false));
+  tabA.addEventListener("click", () => show(true));
+
+  let previewAt = 0;
+  const wire = (kind) => {
+    const input = document.getElementById(`vol-${kind}`);
+    const val = document.getElementById(`vol-${kind}-val`);
+    input.value = Math.round(getAudioLevels()[kind] * 100);
+    val.textContent = `${input.value}%`;
+    input.addEventListener("input", () => {
+      setAudioLevel(kind, input.value / 100);
+      val.textContent = `${input.value}%`;
+      // A little test pop so the level can be judged by ear.
+      if (kind !== "music" && performance.now() > previewAt) {
+        previewAt = performance.now() + 170;
+        sfx.fire();
+      }
+    });
+  };
+  wire("master");
+  wire("music");
+  wire("sfx");
+}
+
 export function initSettings() {
+  initAudioPanel();
   onEnter("screen-settings", () => {
     render();
     // Capture phase so a rebind press never leaks to other listeners.

@@ -540,25 +540,42 @@ function stepTanks(now, dt) {
       if (acts.shoot && !t.prevShoot) tryFire(t, now);
       t.prevShoot = acts.shoot;
 
-      // Machine gun: the FIRST trigger pull spins the barrel up
-      // (glowing muzzle, half a second). After that it's manual —
-      // hold to spray at full rate, tap for single shots. The gun
-      // stays until all its balls are spent.
-      if (t.weapon === "mg" && acts.shoot) {
-        if (!t.mgReadyAt) {
-          t.mgReadyAt = now + MG.windupMs;
-          sfx.windup();
-        } else if (now >= t.mgReadyAt && now >= (t.mgNext ?? 0)) {
-          t.mgAmmo ??= MG.shots;
-          const m = muzzlePoint(t, MG.r * BULLET_R);
-          const a = t.a + (Math.random() * 2 - 1) * MG.spread;
-          spawnBullet(t.id, m.x, m.y, a, now, true);
-          sendTypedShot(t, { w: "mini", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +a.toFixed(3) }, now);
-          t.mgNext = now + MG.gapMs;
-          t.mgAmmo -= 1;
-          if (t.mgAmmo <= 0) {
-            t.mgAmmo = null;
-            clearWeapon(t, now); // spent — barrel reverts, pickups unlock
+      // Machine gun: the trigger pull spins the barrel up (glowing
+      // muzzle, half a second). Once hot it's manual — hold to spray
+      // at full rate, tap for single shots. Let go and the barrel
+      // keeps spinning for exactly half a second: press again inside
+      // that window and it fires instantly (each release restarts
+      // the window); leave it longer and it spins down, so the next
+      // pull needs a full wind-up again. The gun stays until all
+      // its balls are spent.
+      if (t.weapon === "mg") {
+        if (acts.shoot) {
+          t.mgIdleAt = 0; // trigger held — the spin-down clock is off
+          if (!t.mgReadyAt) {
+            t.mgReadyAt = now + MG.windupMs;
+            sfx.windup();
+          } else if (now >= t.mgReadyAt && now >= (t.mgNext ?? 0)) {
+            t.mgAmmo ??= MG.shots;
+            const m = muzzlePoint(t, MG.r * BULLET_R);
+            const a = t.a + (Math.random() * 2 - 1) * MG.spread;
+            spawnBullet(t.id, m.x, m.y, a, now, true);
+            sendTypedShot(t, { w: "mini", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +a.toFixed(3) }, now);
+            t.mgNext = now + MG.gapMs;
+            t.mgAmmo -= 1;
+            if (t.mgAmmo <= 0) {
+              t.mgAmmo = null;
+              clearWeapon(t, now); // spent — barrel reverts, pickups unlock
+            }
+          }
+        } else if (t.mgReadyAt) {
+          // Trigger just released (or still idle): the clock starts
+          // at the moment of release.
+          if (!t.mgIdleAt) {
+            t.mgIdleAt = now;
+          } else if (now - t.mgIdleAt >= 500) {
+            t.mgReadyAt = 0; // spun down — next pull winds up again
+            t.mgIdleAt = 0;
+            if (t.local && !t.bot) sfx.winddown();
           }
         }
       }
@@ -645,6 +662,7 @@ function sendTypedShot(t, payload, now) {
 function clearWeapon(t, now) {
   t.weapon = null;
   t.mgReadyAt = 0;
+  t.mgIdleAt = 0;
   t.mgNext = 0;
   t.mgAmmo = null;
   t.gunClearedAt = now;
