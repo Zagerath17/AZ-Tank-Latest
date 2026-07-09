@@ -490,6 +490,38 @@ body {
   touch-action: none;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.tab-btn { opacity: .55; }
+.tab-btn.is-on {
+  opacity: 1;
+  outline: 2px solid var(--red, #ff5147);
+  outline-offset: -2px;
+}
+.vol-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 52px;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+.vol-row label {
+  font-weight: 600;
+}
+.vol-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--red, #ff5147);
+  height: 6px;
+}
+.vol-row .vol-val {
+  font-family: "Black Ops One", system-ui;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .bar .score {
   margin-left: auto;
   display: flex;
