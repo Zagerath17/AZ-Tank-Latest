@@ -493,11 +493,24 @@ body {
 .bar .score {
   margin-left: auto;
   display: flex;
-  gap: 12px;
+  gap: 14px;
+  align-items: flex-end;
+}
+.score .sc-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.score .sc-card .tank {
+  width: 34px;
+  height: 34px;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, .35));
 }
 .score .sc {
   font-family: "Black Ops One", system-ui;
   font-size: 1.05rem;
+  line-height: 1;
   color: var(--p);
   text-shadow: 0 2px 0 rgba(0, 0, 0, .5);
 }
