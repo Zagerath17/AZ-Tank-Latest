@@ -1,11 +1,13 @@
 /* Long-pressing the screen must never pop the text-selection
    magnifier loupe or callout menu — this is a game, not a document.
    Inputs stay selectable so the lobby code can still be typed. */
-html, body {
+html, body, * {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
+}
+html, body {
   touch-action: manipulation;
 }
 input, textarea {
