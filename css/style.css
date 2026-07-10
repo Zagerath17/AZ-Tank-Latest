@@ -615,6 +615,16 @@ body {
   font: inherit;
 }
 .bar .bar-end { margin-left: auto; }
+.form-col { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
+.form-col input {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.2);
+  background: rgba(255,255,255,.06);
+  color: inherit;
+  font: inherit;
+}
+.form-row { display: flex; gap: 10px; margin-top: 4px; }
 .lobby-popover { margin-bottom: 10px; outline: 2px solid rgba(255,255,255,.15); border-radius: 12px; }
 .dnd-row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--red, #ff5147); justify-self: start; }
 
