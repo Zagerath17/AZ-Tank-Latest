@@ -12,7 +12,8 @@
 //                            client (host) also drives the bots.
 // ================================================================
 
-import { showScreen, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { showScreen, toast, tankSVG } from "./main.js";
+import { COLORS, COLOR_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
@@ -52,7 +53,7 @@ const MAZE_SIZES = [
   [9, 6], [9, 7], [10, 6], [10, 7], [11, 6], [11, 8],
 ];
 
-const HULL = { red: "#ff5147", green: "#46d160", blue: "#47a3ff", yellow: "#ffc531" };
+const HULL = PALETTE; // every pickable paint + the Impossible black
 const NO_MUL = { speed: 1, turn: 1 };
 
 /* ---------- module state ---------- */
@@ -98,7 +99,12 @@ export function startLocalGame(specs) {
     mode: "local",
     seed: randomSeed(),
     roundN: 1,
-    roster: specs.map((s) => ({ id: s.color, color: s.color, bot: s.bot ?? null })),
+    roster: specs.map((s) => ({
+      id: s.slot ?? s.color,
+      slot: s.slot ?? s.color,
+      color: s.color,
+      bot: s.bot ?? null,
+    })),
   });
 }
 
@@ -240,7 +246,7 @@ function begin(opts) {
     mode: opts.mode,
     myId: opts.myId ?? null,
     roster: opts.roster.slice(0, 4),
-    scores: Object.fromEntries(opts.roster.map((p) => [p.color, 0])),
+    scores: Object.fromEntries(opts.roster.map((p) => [p.id, 0])),
     present: new Set(opts.roster.map((p) => p.id)),
     isController: opts.mode === "local",
     sendPos: opts.sendPos,
@@ -384,9 +390,10 @@ function isBoundCode(code) {
 function readActions(tank, binds) {
   const acts = { up: false, down: false, left: false, right: false, shoot: false };
 
-  // Local: strictly your color's binds. Online: your (only) tank
-  // answers to any color's binds, so WASD and arrows both work.
-  const sources = S.mode === "online" ? COLORS : [tank.color];
+  // Local: strictly your SLOT's binds (colors are just paint now).
+  // Online: your (only) tank answers to any slot's binds, so WASD
+  // and arrows both work.
+  const sources = S.mode === "online" ? COLORS : [tank.slot ?? tank.color];
   for (const c of sources) {
     for (const a of ["up", "down", "left", "right", "shoot"]) {
       const code = binds[c][a];
@@ -1128,7 +1135,7 @@ function maybeEndRound(now) {
 
   const w = alive[0] ?? null;
   if (w) {
-    S.scores[w.color] = (S.scores[w.color] ?? 0) + 1;
+    S.scores[w.id] = (S.scores[w.id] ?? 0) + 1;
     S.banner = { text: `${COLOR_NAMES[w.color].toUpperCase()} WINS THE ROUND`, color: HULL[w.color] };
     sfx.roundEnd();
   } else {
@@ -1142,7 +1149,7 @@ function maybeEndRound(now) {
 function updateScoreHUD() {
   if (!scoreEl || !S) return;
   scoreEl.innerHTML = S.roster
-    .map((p) => `<div class="sc-card p-${p.color}">${tankSVG(p.color)}<span class="sc">${S.scores[p.color] ?? 0}</span></div>`)
+    .map((p) => `<div class="sc-card p-${p.color}">${tankSVG(p.color)}<span class="sc">${S.scores[p.id] ?? 0}</span></div>`)
     .join("");
 }
 

@@ -251,12 +251,19 @@ export const sfx = {
     } catch (e) {}
   },
 
-  // Shrapnel burst: a fizzing crackle.
+  // Shrapnel burst: the classic staccato crackle — a thump, then a
+  // ragged run of little pops as the fragments scatter.
   shrap() {
     if (!ready() || limited("shrap", 150)) return;
     try {
-      whoosh("highpass", 900, 2600, 0.34, 0.16, 0, 1.2);
-      blip("square", 200, 90, 0.14, 0.1);
+      blip("square", 210, 85, 0.16, 0.12); // the shell letting go
+      whoosh("highpass", 900, 2400, 0.3, 0.12, 0, 1.2);
+      const pops = 10;
+      for (let i = 0; i < pops; i++) {
+        const when = 0.03 + i * 0.045 + Math.random() * 0.03;
+        const f = 480 + Math.random() * 700;
+        blip("square", f, f * 0.55, 0.045, 0.085, when);
+      }
     } catch (e) {}
   },
 

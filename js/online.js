@@ -23,7 +23,7 @@
 // Colors come from join order. Max 4 players (bots count).
 // ================================================================
 
-import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, tankSVG } from "./main.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
@@ -81,7 +81,25 @@ function myId() {
   return id;
 }
 
-// Join order decides color: earliest joinedAt is red, then green…
+// Colors are CHOSEN now, not assigned by seat — but conflicts are
+// resolved deterministically in join order, so every client agrees:
+// earliest joinedAt keeps their pick; later duplicates get bumped to
+// the first free color. Impossible bots are always black.
+function resolveColors(entries) {
+  const used = new Set();
+  const out = {};
+  for (const [id, p] of entries) {
+    let c = null;
+    if (p.bot === "impossible") c = "black";
+    else if (p.color && PICKABLE.includes(p.color) && !used.has(p.color)) c = p.color;
+    if (!c) c = PICKABLE.find((k) => !used.has(k)) ?? "slate";
+    used.add(c);
+    out[id] = c;
+  }
+  return out;
+}
+
+// Join order for seats and conflict priority.
 function sortPlayers(players) {
   return Object.entries(players ?? {}).sort(
     (a, b) => (a[1].joinedAt ?? 0) - (b[1].joinedAt ?? 0) || a[0].localeCompare(b[0]),
@@ -207,6 +225,11 @@ async function startMatch() {
 
 /* ---------- bots (host manages them as lobby entries) ---------- */
 
+function tableColors(exceptId) {
+  const res = current?.resolvedCache ?? {};
+  return new Set(Object.entries(res).filter(([id]) => id !== exceptId).map(([, c]) => c));
+}
+
 async function addBot() {
   if (!current) return;
   const f = await ensureFirebase();
@@ -214,6 +237,7 @@ async function addBot() {
   await f.set(f.ref(f.db, `lobbies/${current.code}/players/${id}`), {
     joinedAt: f.serverTimestamp(),
     bot: "easy",
+    color: freeColor(tableColors(null)), // random paint nobody wears
   });
 }
 
@@ -221,7 +245,24 @@ async function cycleBot(id, level) {
   if (!current) return;
   const f = await ensureFirebase();
   const next = AI_LEVELS[(AI_LEVELS.indexOf(level) + 1) % AI_LEVELS.length];
-  await f.set(f.ref(f.db, `lobbies/${current.code}/players/${id}/bot`), next);
+  const updates = { [`players/${id}/bot`]: next };
+  // Impossible wears black, always. Coming back down from
+  // impossible, it needs a normal coat again.
+  if (next === "impossible") updates[`players/${id}/color`] = "black";
+  else if (level === "impossible") updates[`players/${id}/color`] = freeColor(tableColors(id));
+  await f.update(current.lobbyRef, updates);
+}
+
+async function paintBot(id) {
+  if (!current) return;
+  const f = await ensureFirebase();
+  // Cycle the bot through the free colors, one tap at a time.
+  const cur = current.resolvedCache?.[id];
+  const taken = tableColors(id);
+  const pool = PICKABLE.filter((c) => !taken.has(c));
+  if (!pool.length) return;
+  const next = pool[(pool.indexOf(cur) + 1) % pool.length];
+  await f.set(f.ref(f.db, `lobbies/${current.code}/players/${id}/color`), next);
 }
 
 async function removeBot(id) {
@@ -257,9 +298,10 @@ function handleSnapshot(code, snap) {
 function beginOnlineGame(code, lobby) {
   const me = myId();
   const entries = sortPlayers(lobby.players);
+  const resolved = resolveColors(entries);
   const roster = entries
     .slice(0, MAX_PLAYERS)
-    .map(([id, p], i) => ({ id, color: COLORS[i], bot: p.bot ?? null }));
+    .map(([id, p]) => ({ id, color: resolved[id], bot: p.bot ?? null }));
 
   if (!roster.some((p) => p.id === me && !p.bot)) {
     toast("The match started without you.");
@@ -336,22 +378,37 @@ function renderLobby(code, lobby) {
 
   document.getElementById("lobby-code").textContent = code;
 
-  document.getElementById("lobby-players").innerHTML = COLORS.map((color, i) => {
+  const resolved = resolveColors(entries);
+  current.playersCache = entries;
+  current.resolvedCache = resolved;
+
+  // My color choice lost a conflict (or was never set)? Adopt the
+  // resolved one so the database matches what everyone sees.
+  const mine = entries.find(([id]) => id === me);
+  if (mine && !mine[1].bot && mine[1].color !== resolved[me]) {
+    if (mine[1].color) toast(`That paint was taken — you're ${COLOR_NAMES[resolved[me]]} now.`);
+    write(`players/${me}/color`, resolved[me]);
+  }
+
+  document.getElementById("lobby-players").innerHTML = COLORS.map((slotColor, i) => {
     const entry = entries[i];
     if (!entry) {
-      return `<li class="lobby-row empty">${tankSVG(color)}<span>Waiting for a tank…</span></li>`;
+      return `<li class="lobby-row empty">${tankSVG(slotColor)}<span>Waiting for a tank…</span></li>`;
     }
     const [id, p] = entry;
+    const color = resolved[id];
 
     if (p.bot) {
+      const locked = p.bot === "impossible";
       const controls = isHost
-        ? `<button class="chip chip-btn" data-bot-cycle="${id}" data-level="${p.bot}">BOT · ${p.bot.toUpperCase()}</button>
+        ? `${locked ? "" : `<button class="chip chip-btn" data-bot-paint="${id}" aria-label="Change bot color">🎨</button>`}
+           <button class="chip chip-btn" data-bot-cycle="${id}" data-level="${p.bot}">BOT · ${p.bot.toUpperCase()}</button>
            <button class="chip chip-btn" data-bot-remove="${id}" aria-label="Remove bot">✕</button>`
         : `<span class="chip">BOT · ${p.bot.toUpperCase()}</span>`;
       return `
         <li class="lobby-row p-${color}">
           ${tankSVG(color)}
-          <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot</em></span>
+          <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot${locked ? " · locked" : ""}</em></span>
           <span class="row-end">${controls}</span>
         </li>`;
     }
@@ -363,6 +420,22 @@ function renderLobby(code, lobby) {
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");
+
+  // My paint strip: every color, minus what the table already wears.
+  const paintEl = document.getElementById("lobby-paint");
+  const hintEl = document.getElementById("lobby-paint-hint");
+  if (mine && !mine[1].bot) {
+    paintEl.hidden = false;
+    hintEl.hidden = false;
+    const others = new Set(entries.filter(([id]) => id !== me).map(([id]) => resolved[id]));
+    paintEl.innerHTML = PICKABLE.map((c) => `
+      <button class="swatch p-${c} ${resolved[me] === c ? "sel" : ""}"
+              data-my-paint="${c}" ${others.has(c) ? "disabled" : ""}
+              aria-label="${COLOR_NAMES[c]}"></button>`).join("");
+  } else {
+    paintEl.hidden = true;
+    hintEl.hidden = true;
+  }
 
   document.getElementById("lobby-addbot").hidden = !(isHost && entries.length < MAX_PLAYERS);
 
@@ -445,9 +518,13 @@ export function initOnline() {
   document.getElementById("lobby-players").addEventListener("click", async (e) => {
     const cyc = e.target.closest("[data-bot-cycle]");
     const rem = e.target.closest("[data-bot-remove]");
-    if (!cyc && !rem) return;
+    const pnt = e.target.closest("[data-bot-paint]");
+    const my = e.target.closest("[data-my-paint]");
+    if (!cyc && !rem && !pnt && !my) return;
     try {
-      if (cyc) await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
+      if (my) write(`players/${myId()}/color`, my.dataset.myPaint);
+      else if (pnt) await paintBot(pnt.dataset.botPaint);
+      else if (cyc) await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
       else await removeBot(rem.dataset.botRemove);
     } catch (err) {
       toast(err?.message ?? "Couldn't update the bot.");

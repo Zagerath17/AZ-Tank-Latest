@@ -37,7 +37,7 @@ export const AI_PARAMS = {
     aimTol: 0.20,       // required alignment before firing
     range: 5,           // awareness range (cells)
     fireRange: 4.5,     // won't fire beyond this (cells)
-    cooldown: 2.0,
+    cooldown: 1.75,
     fireProb: 0.75,
     dodgeSkill: 0.25,   // dodges badly — sees threats late, reacts to few
     dodgeHorizon: 0.45,
@@ -50,18 +50,20 @@ export const AI_PARAMS = {
   },
   medium: {
     speed: 0.88, turn: 0.96, react: 0.40,
-    aimErr: 0.09, aimTol: 0.12, range: 8, fireRange: 5.5, cooldown: 1.25, fireProb: 0.92,
+    aimErr: 0.09, aimTol: 0.12, range: 8, fireRange: 5.5, cooldown: 1.1, fireProb: 0.92,
+    burst: 2,           // one quick follow-up per look
     dodgeSkill: 0.55, dodgeHorizon: 0.8,
     lead: 0,
     selfCheckT: 0.9,    // won't shoot itself
     verifyHit: false,
     verifyBeyond: 4,    // long shots must trace to a hit
-    standoff: 1.5,
+    standoff: 1.35,
     reserve: 1,
   },
   hard: {
     speed: 1.0, turn: 1.0, react: 0.30,
-    aimErr: 0.035, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.95, fireProb: 1,
+    aimErr: 0.035, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.8, fireProb: 1,
+    burst: 3,           // pours it on when the lane is open
     jinkMs: 520,        // sharp evasive weaving between shots
     dodgeSkill: 0.92, dodgeHorizon: 1.05,
     lead: 0.65,         // partial movement prediction
@@ -69,20 +71,21 @@ export const AI_PARAMS = {
     verifyHit: false,
     verifyBeyond: 3.5,  // long shots must trace to a hit
     push: true,         // rushes enemies who are out of ammo
-    standoff: 2.1,
+    standoff: 1.7,
     reserve: 1,
   },
   impossible: {
     speed: 1.0, turn: 1.0, react: 0.20,
-    aimErr: 0.008, aimTol: 0.055, range: 99, fireRange: 7, cooldown: 0.5, fireProb: 1,
+    aimErr: 0.008, aimTol: 0.055, range: 99, fireRange: 7, cooldown: 0.45, fireProb: 1,
+    burst: 4,           // relentless verified volleys
     jinkMs: 430,        // relentless weaving
     dodgeSkill: 1, dodgeHorizon: 1.35,
     lead: 1,            // full intercept prediction
     selfCheckT: 1.8,
     verifyHit: true,    // only fires traced, landing shots — bank shots included
     push: true,         // rushes enemies who are out of ammo
-    standoff: 2.2,
-    reserve: 2,
+    standoff: 1.8,
+    reserve: 1,
   },
 };
 
@@ -114,6 +117,7 @@ export function botActions(t, world, dt, now) {
     threat: null, threatScanAt: 0, pendingAt: 0, alertUntil: 0,
     hazPt: null, hazUntil: 0,
     jinkAt: 0, jinkSide: 1, hazDir: null,
+    pushUntil: 0, burstLeft: 0,
     laserWaryOf: null, laserWaryUntil: 0,
     prevLos: false,
     vel: {},
@@ -246,6 +250,7 @@ export function botActions(t, world, dt, now) {
   // Reaction delay on ACQUIRING a target: when someone first comes
   // into view, the bot needs `react` seconds before it can shoot.
   if (los && !ai.prevLos) ai.fireAt = Math.max(ai.fireAt, now + P.react * 1000);
+  if (!los) { ai.burstLeft = 0; ai.pushUntil = 0; } // the look is gone
   ai.prevLos = los;
 
   /* ---- 4. shooting ---- */
@@ -303,7 +308,22 @@ export function botActions(t, world, dt, now) {
         const errW = angleDiff(t.a, wantW);
         if (errW > 0.04) acts.right = true;
         else if (errW < -0.04) acts.left = true;
-        if (dist > band * 1.15) {
+        // The shot keeps clipping a corner — don't statue. Roll
+        // FORWARD (front verified clear) to open the angle for an
+        // easier shot; if the front is blocked, fall through to the
+        // normal range game instead of freezing.
+        let pushed = false;
+        if (now < (ai.pushUntil ?? 0)) {
+          const fx = t.x + Math.cos(t.a) * cell * 0.5;
+          const fy = t.y + Math.sin(t.a) * cell * 0.5;
+          if (Math.abs(errW) < 0.85 && corridorClear(t.x, t.y, fx, fy, world.rects, rBody)) {
+            acts.up = true;
+            pushed = true;
+          }
+        }
+        if (pushed) {
+          // closing in — nothing else to do this frame
+        } else if (dist > band * 1.15) {
           if (Math.abs(errW) < 0.7) acts.up = true;
         } else if (dist < band * 0.75) {
           // Back off ONLY down a verified-open lane; with a wall at
@@ -366,10 +386,18 @@ export function botActions(t, world, dt, now) {
         const v = traceShot(t, world, P, ai);
         const needHit = P.verifyHit || sureShotsOnly || dist > (P.verifyBeyond ?? 99) * cell;
         if (v.safe && (!needHit || v.hits)) {
-          ai.fireAt = now + P.cooldown * 1000 * (0.8 + Math.random() * 0.4);
+          // Bursts: a good look deserves MORE than one bullet. Each
+          // follow-up is re-aimed and re-verified, and ammo checks
+          // (canFire) still stop a dry mag.
+          if (ai.burstLeft > 0) ai.burstLeft -= 1;
+          else ai.burstLeft = (P.burst ?? 1) - 1;
+          ai.fireAt = ai.burstLeft > 0
+            ? now + Math.max(160, P.cooldown * 1000 * 0.35)
+            : now + P.cooldown * 1000 * (0.8 + Math.random() * 0.4);
           if (Math.random() < P.fireProb) acts.shoot = true;
         } else {
-          ai.fireAt = now + 220; // bad angle — hold fire, reposition
+          ai.fireAt = now + 220; // bad angle — hold fire...
+          ai.pushUntil = now + 480; // ...and CLOSE IN to widen it
         }
       }
     }
@@ -502,7 +530,13 @@ function steerTo(t, px, py, acts, world, rBody, allowReverse = true, revThresh =
   const want = Math.atan2(py - t.y, px - t.x);
   let err = angleDiff(t.a, want);
   let rev = false;
-  if (allowReverse && Math.abs(err) > revThresh) {
+  // Reverse gear is for short scoots — for anything past ~a cell
+  // it's faster (and far less silly-looking) to spin around and
+  // DRIVE. Exception: wedged against a wall the hull can't physically
+  // pivot, so backing out along its own axis is the only move.
+  const trip = Math.hypot(px - t.x, py - t.y);
+  const canPivot = corridorClear(t.x, t.y, t.x, t.y, world.rects, rBody);
+  if (allowReverse && (trip < world.cell * 1.25 || !canPivot) && Math.abs(err) > revThresh) {
     let ok = true;
     if (revProbe) {
       const bx = t.x - Math.cos(t.a) * world.cell * 0.55;

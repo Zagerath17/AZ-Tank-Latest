@@ -7,8 +7,10 @@ import { initLocal } from "./local.js";
 import { initOnline } from "./online.js";
 import { initGame } from "./game.js";
 
-export const COLORS = ["red", "green", "blue", "yellow"];
-export const COLOR_NAMES = { red: "Red", green: "Green", blue: "Blue", yellow: "Yellow" };
+export {
+  COLORS, SLOT_NAMES, PALETTE, PICKABLE, COLOR_NAMES, freeColor,
+} from "./palette.js";
+import { COLORS } from "./palette.js"; // used below for the menu row
 
 /* ---------- screen router ---------- */
 
