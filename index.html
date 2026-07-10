@@ -25,9 +25,11 @@
       <nav class="stack">
         <button class="btn btn-big" data-go="screen-local">Local</button>
         <button class="btn btn-big" data-go="screen-online">Online</button>
+        <button class="btn btn-big" data-go="screen-social">Social</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
+        <button class="btn" id="menu-login" type="button">👤 LOG IN</button>
       </nav>
-      <p class="foot">v0.8</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -40,6 +42,30 @@
       <div class="slots" id="local-slots"></div>
       <p class="hint" id="local-hint"></p>
       <button class="btn btn-big btn-go" id="local-start" disabled>Start battle</button>
+    </section>
+
+    <!-- ============ SOCIAL ============ -->
+    <section class="screen" id="screen-social" aria-label="Social">
+      <header class="bar">
+        <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
+        <h2>Social</h2>
+      </header>
+      <div class="settings-tabs">
+        <button class="btn tab-btn is-on" id="tab-friends" type="button">Friends</button>
+        <button class="btn tab-btn" id="tab-addfriends" type="button">Add Friends</button>
+      </div>
+      <div id="panel-friends">
+        <ul class="lobby-list" id="friends-list"></ul>
+      </div>
+      <div id="panel-addfriends" hidden>
+        <p class="hint">Search a player by their exact username.</p>
+        <div class="search-row">
+          <input type="text" id="friend-search" maxlength="16" placeholder="username"
+                 autocomplete="off" autocapitalize="off">
+          <button class="btn" id="friend-search-btn" type="button">Search</button>
+        </div>
+        <ul class="lobby-list" id="friend-results"></ul>
+      </div>
     </section>
 
     <!-- ============ SETTINGS ============ -->
@@ -74,6 +100,12 @@
           <input type="range" id="vol-sfx" min="0" max="100" step="1">
           <span class="vol-val" id="vol-sfx-val">100%</span>
         </div>
+        <div class="vol-row dnd-row">
+          <label for="dnd-toggle">Do Not Disturb</label>
+          <input type="checkbox" id="dnd-toggle">
+          <span class="vol-val">🔕</span>
+        </div>
+        <p class="hint">With Do Not Disturb on, friend requests and lobby join requests won't reach you.</p>
       </div>
     </section>
 
@@ -110,14 +142,18 @@
       <header class="bar">
         <button class="btn btn-back" id="lobby-leave">‹ Leave</button>
         <h2>Lobby</h2>
+        <button class="btn btn-small bar-end" id="lobby-social" type="button" hidden>👥 Invite</button>
       </header>
       <div class="panel code-card">
         <span class="code-label">Lobby code — share it with friends</span>
         <div class="code-line">
+          <button class="btn btn-small" id="lobby-hide" type="button"
+                  aria-label="Hide lobby code">👁</button>
           <span class="code-big" id="lobby-code">····</span>
           <button class="btn btn-small" id="lobby-copy">Copy</button>
         </div>
       </div>
+      <ul class="lobby-list lobby-popover" id="lobby-social-list" hidden></ul>
       <ul class="lobby-list" id="lobby-players"></ul>
       <p class="hint" id="lobby-paint-hint">Your paint — taken colors are locked:</p>
       <div class="swatches swatches-wide" id="lobby-paint"></div>
@@ -152,6 +188,11 @@
   </main>
 
   <div id="toast" role="status" aria-live="polite"></div>
+  <div id="notice" class="notice" hidden>
+    <span id="notice-text"></span>
+    <button class="btn btn-small" id="notice-yes" type="button">OK</button>
+    <button class="btn btn-small notice-x" id="notice-no" type="button">✕</button>
+  </div>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>
