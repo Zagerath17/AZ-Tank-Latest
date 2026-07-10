@@ -148,7 +148,7 @@ async function createLobby() {
       createdAt: f.serverTimestamp(),
       hostId: myId(),
       state: "waiting",
-      players: { [myId()]: { joinedAt: f.serverTimestamp() } },
+      players: { [myId()]: { joinedAt: f.serverTimestamp(), name: social.getAccount()?.name ?? null } },
     });
     await enterLobby(code);
     return;
@@ -169,6 +169,7 @@ export async function joinLobby(code) {
     if (ids.length >= MAX_PLAYERS) throw new Error("Lobby is full — 4 tanks max.");
     await f.set(f.ref(f.db, `lobbies/${code}/players/${myId()}`), {
       joinedAt: f.serverTimestamp(),
+      name: social.getAccount()?.name ?? null,
     });
   }
   await enterLobby(code);
@@ -309,6 +310,15 @@ function handleSnapshot(code, snap) {
     write("hostId", me);
   }
 
+  if (current.inGame && lobby.state !== "starting") {
+    // The host ended the match — everyone regroups in the lobby.
+    stopGame();
+    current.inGame = false;
+    social.setStatus("lobby", code);
+    toast("Back to the lobby.");
+    showScreen("screen-lobby");
+  }
+
   if (lobby.state === "starting" && lobby.round?.seed != null) {
     if (!current.inGame) beginOnlineGame(code, lobby);
     else if (humans.length === 1 && humans[0][0] === me) {
@@ -323,6 +333,28 @@ function handleSnapshot(code, snap) {
   }
 
   renderLobby(code, lobby);
+}
+
+// Host pulled the plug: reset the lobby so every client's snapshot
+// handler walks them back to the lobby screen together.
+function endMatchForAll() {
+  if (!current) return;
+  // The host transitions instantly; everyone else follows on the
+  // snapshot that carries the state flip.
+  current.inGame = false;
+  social.setStatus("lobby", current.code);
+  showScreen("screen-lobby");
+  const entries = sortPlayers(current.playersCache ?? {});
+  const updates = { state: "waiting", round: null, gear: null };
+  for (const [id] of entries) {
+    updates[`players/${id}/dead`] = null;
+    updates[`players/${id}/gun`] = null;
+    updates[`players/${id}/shots`] = null;
+    updates[`players/${id}/pos`] = null;
+  }
+  ensureFirebase()
+    .then((f) => f.update(current.lobbyRef, updates))
+    .catch(() => toast("Couldn't end the match — connection?"));
 }
 
 function returnToLobbySolo(entries) {
@@ -400,7 +432,10 @@ function beginOnlineGame(code, lobby) {
       }
       fb.update(current.lobbyRef, updates).catch(() => {});
     },
-    onExit: () => leaveLobby(),
+    onExit: () => {
+      if (current?.isHost) endMatchForAll();
+      else leaveLobby();
+    },
   });
 
   onlineLobbyUpdate(lobby); // apply the first snapshot's positions/flags
@@ -486,7 +521,7 @@ function renderLobby(code, lobby) {
     return `
       <li class="lobby-row p-${color}">
         ${tankSVG(color)}
-        <span class="lobby-name">${COLOR_NAMES[color]}${id === me ? " <em>(you)</em>" : ""}</span>
+        <span class="lobby-name">${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");

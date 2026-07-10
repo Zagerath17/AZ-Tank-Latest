@@ -95,6 +95,16 @@ function unlock() {
     s.start(0);
   } catch (e) {}
 }
+// The game goes quiet when its tab is in the background, and picks
+// back up the moment it's visible again.
+document.addEventListener("visibilitychange", () => {
+  if (!ctx) return;
+  try {
+    if (document.hidden) ctx.suspend();
+    else ctx.resume();
+  } catch (e) {}
+});
+
 window.addEventListener("pointerdown", unlock);
 window.addEventListener("keydown", unlock);
 window.addEventListener("touchstart", unlock, { passive: true });

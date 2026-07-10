@@ -9,6 +9,12 @@ import { initGame } from "./game.js";
 import { sfx, startMusic } from "./audio.js";
 import { initSocial, setStatus, getAccount } from "./social.js";
 
+// True while a match is running — screen hops (e.g. Settings mid-game)
+// must not touch the soundtrack or presence.
+let inMatch = false;
+export function setInMatch(v) { inMatch = v; }
+let settingsReturn = "screen-menu";
+
 export {
   COLORS, SLOT_NAMES, PALETTE, PICKABLE, COLOR_NAMES, freeColor,
 } from "./palette.js";
@@ -27,6 +33,7 @@ export function showScreen(id) {
   (hooks.leave[activeScreen] ?? []).forEach((fn) => fn());
   document.getElementById(activeScreen)?.classList.remove("is-active");
 
+  const prevScreen = activeScreen;
   activeScreen = id;
   const el = document.getElementById(id);
   el.classList.add("is-active");
@@ -35,13 +42,20 @@ export function showScreen(id) {
 
   // The soundtrack follows the screen: menus get the title theme,
   // the lobby its own, and the game DJ (game.js) takes over in play.
-  if (id === "screen-lobby") startMusic("lobby");
-  else if (id !== "screen-game") startMusic("title");
+  if (id === "screen-settings") settingsReturn = prevScreen ?? "screen-menu";
+
+  if (!inMatch) {
+    if (id === "screen-lobby") startMusic("lobby");
+    else if (id !== "screen-game") startMusic("title");
+  }
 
   // Presence roughly follows the screen (online.js reports lobby and
-  // online rounds with more detail; local rounds count too).
-  if (id === "screen-game") setStatus("round");
-  else if (id !== "screen-lobby" && getAccount()) setStatus("online");
+  // online rounds with more detail; local rounds count too). A quick
+  // Settings hop mid-match doesn't change anything.
+  if (!inMatch) {
+    if (id === "screen-game") setStatus("round");
+    else if (id !== "screen-lobby" && getAccount()) setStatus("online");
+  }
 }
 
 /* ---------- toast ---------- */
@@ -76,6 +90,25 @@ function wireNavigation() {
 document.addEventListener("click", (e) => {
   if (e.target.closest("button, [role=button]")) sfx.click();
 });
+
+// Settings returns to WHEREVER it was opened from — including a game
+// in progress (which keeps running underneath, unpaused).
+document.getElementById("settings-back").addEventListener("click", () => {
+  showScreen(settingsReturn);
+});
+
+// Long-press must never open the system callout / selection loupe.
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// Go truly fullscreen where the platform allows it (Android Chrome).
+// iPhones can't fullscreen web pages — but Add to Home Screen runs
+// the game standalone without the browser chrome.
+let fsTried = false;
+window.addEventListener("pointerdown", () => {
+  if (fsTried || document.fullscreenElement) return;
+  fsTried = true;
+  document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+}, { once: false });
 
 document.querySelectorAll("[data-go]").forEach((btn) => {
     btn.addEventListener("click", () => showScreen(btn.dataset.go));

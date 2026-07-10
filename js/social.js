@@ -19,7 +19,7 @@
 // screen, including mid-game.
 // ================================================================
 
-import { toast, COLOR_NAMES, tankSVG, showScreen } from "./main.js";
+import { toast, COLOR_NAMES, tankSVG, showScreen, onEnter, onLeave } from "./main.js";
 import { PICKABLE } from "./palette.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
@@ -77,8 +77,8 @@ function authErrorText(e) {
   if (c.includes("email-already-in-use")) return "That email already has an account — sign in instead.";
   if (c.includes("invalid-email")) return "That doesn't look like an email address.";
   if (c.includes("weak-password")) return "Password needs at least 6 characters.";
-  if (c.includes("operation-not-allowed")) {
-    return "Email sign-in isn't enabled — turn it on in Firebase → Authentication (see README).";
+  if (c.includes("operation-not-allowed") || c.includes("configuration-not-found")) {
+    return "Firebase Authentication isn't set up yet — console → Build → Authentication → Get started, then enable Email/Password (see README).";
   }
   if (/permission/i.test(e?.message ?? "")) {
     return "Database rules block accounts — add the users rule in Firebase (see README).";
@@ -277,12 +277,15 @@ function startListening() {
       if (!info) return; // not in a lobby any more — nothing to offer
       fb2.get(fb2.ref(fb2.db, `users/${from}/name`)).then((s) => {
         const who = s.val() ?? from;
-        showBanner(`${who} wants to join your lobby`, "INVITE", () => {
+        // Accept walks them STRAIGHT into the lobby — no second
+        // handshake on their side.
+        showBanner(`${who} wants to join your lobby`, "ACCEPT", () => {
           if (!lobbyInfo()) { toast("You're not in a lobby any more."); return; }
           if (lobbyInfo().players >= 4) { toast("Your lobby is full."); return; }
           fb2.set(fb2.ref(fb2.db, `users/${from}/invites/${account.key}`), {
             code: lobbyInfo().code,
             at: Date.now(),
+            auto: true, // they asked — accepting means they're IN
           }).catch(() => {});
         });
       });
@@ -291,6 +294,13 @@ function startListening() {
     listen("invites", (from, data, fb2) => {
       fb2.remove(fb2.ref(fb2.db, `users/${account.key}/invites/${from}`)).catch(() => {});
       if (!data?.code) return;
+      if (data.auto) {
+        // This is the answer to OUR join request — straight in.
+        joinLobby(String(data.code))
+          .then(() => toast("They accepted — you're in!"))
+          .catch((e) => toast(e?.message ?? "Couldn't join that lobby."));
+        return;
+      }
       fb2.get(fb2.ref(fb2.db, `users/${from}/name`)).then((s) => {
         const who = s.val() ?? from;
         showBanner(`${who} invited you to lobby ${data.code}`, "JOIN", async () => {
@@ -519,7 +529,14 @@ export function initSocial() {
     if (e.key === "Enter") searchPlayer();
   });
 
-  // Entering the social screen refreshes the friends list.
-  document.querySelectorAll('[data-go="screen-social"]').forEach((b) =>
-    b.addEventListener("click", () => show(false)));
+  // Entering the social screen refreshes the friends list — and it
+  // stays LIVE, re-polling every 10 seconds while you're looking.
+  let liveTimer = 0;
+  onEnter("screen-social", () => {
+    show(false);
+    liveTimer = setInterval(() => {
+      if (!document.getElementById("panel-friends").hidden) renderFriends();
+    }, 10000);
+  });
+  onLeave("screen-social", () => clearInterval(liveTimer));
 }

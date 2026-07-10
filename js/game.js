@@ -12,7 +12,7 @@
 //                            client (host) also drives the bots.
 // ================================================================
 
-import { showScreen, toast, tankSVG } from "./main.js";
+import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
 import { COLORS, COLOR_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit } from "./maze.js";
@@ -135,6 +135,7 @@ function opts_toState(o) {
 
 export function stopGame() {
   if (!S) return;
+  setInMatch(false);
   stopAll();
   cancelAnimationFrame(S.raf);
   window.removeEventListener("keydown", onKeydown);
@@ -296,6 +297,7 @@ function begin(opts) {
 
   updateScoreHUD();
   showScreen("screen-game");
+  setInMatch(true);
   startMusic("game");
   S.raf = requestAnimationFrame(frame);
 }
