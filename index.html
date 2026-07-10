@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#14171f">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#12151b">
   <title>Tank Brawl</title>
@@ -29,7 +34,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn" id="menu-login" type="button">👤 LOG IN</button>
       </nav>
-      <p class="foot">v0.8.5</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -37,6 +42,7 @@
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>Local battle</h2>
+        <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
       </header>
       <p class="hint">Press a tank's <b>shoot</b> key to join — or tap its card.</p>
       <div class="slots" id="local-slots"></div>
@@ -92,7 +98,7 @@
     <!-- ============ SETTINGS ============ -->
     <section class="screen" id="screen-settings" aria-label="Settings">
       <header class="bar">
-        <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
+        <button class="btn btn-back" id="settings-back">‹ Back</button>
         <h2>Settings</h2>
       </header>
       <div class="settings-tabs">
@@ -163,6 +169,7 @@
       <header class="bar">
         <button class="btn btn-back" id="lobby-leave">‹ Leave</button>
         <h2>Lobby</h2>
+        <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
         <button class="btn btn-small bar-end" id="lobby-social" type="button" hidden>👥 Invite</button>
       </header>
       <div class="panel code-card">
@@ -188,6 +195,7 @@
       <header class="bar">
         <button class="btn btn-back" id="game-exit">‹ Exit</button>
         <h2>Battle</h2>
+        <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
         <div class="score" id="game-score"></div>
       </header>
       <div class="arena-wrap">
