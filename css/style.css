@@ -490,6 +490,52 @@ body {
   touch-action: none;
 }
 
+/* ---- the paint shop: every pickable color + the Impossible black ---- */
+.p-orange  { --p: #f5820b; } .p-purple  { --p: #9a5ce6; }
+.p-pink    { --p: #f26fb1; } .p-cyan    { --p: #22c3e6; }
+.p-lime    { --p: #a3d21c; } .p-teal    { --p: #16a985; }
+.p-magenta { --p: #cf3fd1; } .p-brown   { --p: #a4713a; }
+.p-slate   { --p: #7e8ba3; } .p-mint    { --p: #4fdca4; }
+.p-crimson { --p: #c2183c; } .p-navy    { --p: #3550c2; }
+.p-black   { --p: #20242e; }
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+  max-width: 190px;
+}
+.swatches-wide {
+  max-width: 100%;
+  justify-content: flex-start;
+  margin-bottom: 14px;
+}
+.swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .25);
+  background: var(--p);
+  cursor: pointer;
+  padding: 0;
+}
+.swatch.sel {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .35);
+  transform: scale(1.12);
+}
+.swatch:disabled {
+  opacity: .18;
+  cursor: not-allowed;
+}
+.swatch-lock {
+  font-size: .72rem;
+  letter-spacing: .08em;
+  opacity: .7;
+}
+
 .settings-tabs {
   display: flex;
   gap: 8px;
