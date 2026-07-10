@@ -44,6 +44,27 @@
       <button class="btn btn-big btn-go" id="local-start" disabled>Start battle</button>
     </section>
 
+    <!-- ============ LOG IN ============ -->
+    <section class="screen" id="screen-login" aria-label="Log in">
+      <header class="bar">
+        <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
+        <h2>Account</h2>
+      </header>
+      <p class="hint">Sign in — or create an account with a username. You'll stay
+        signed in on this device until you log out.</p>
+      <div class="form-col">
+        <input type="email" id="login-email" placeholder="email" autocomplete="email">
+        <input type="password" id="login-pass" placeholder="password (6+ characters)"
+               autocomplete="current-password">
+        <input type="text" id="login-name" placeholder="username (new accounts only)"
+               maxlength="16" autocomplete="off" autocapitalize="off">
+        <div class="form-row">
+          <button class="btn btn-go" id="login-signin" type="button">Sign in</button>
+          <button class="btn" id="login-create" type="button">Create account</button>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ SOCIAL ============ -->
     <section class="screen" id="screen-social" aria-label="Social">
       <header class="bar">
@@ -103,7 +124,7 @@
         <div class="vol-row dnd-row">
           <label for="dnd-toggle">Do Not Disturb</label>
           <input type="checkbox" id="dnd-toggle">
-          <span class="vol-val">🔕</span>
+          <span class="vol-val" id="dnd-bell">🔔</span>
         </div>
         <p class="hint">With Do Not Disturb on, friend requests and lobby join requests won't reach you.</p>
       </div>

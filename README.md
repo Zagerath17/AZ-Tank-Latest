@@ -35,6 +35,28 @@ Then open http://localhost:8080
 
 ## Firebase setup (~5 min, needed for Online only)
 
+> **Accounts & friends need one extra database rule.** In Firebase →
+> Realtime Database → Rules, make sure BOTH top-level paths are
+> allowed (paste this if you're unsure):
+>
+> ```json
+> {
+>   "rules": {
+>     "lobbies": { ".read": true, ".write": true },
+>     "users":   { ".read": true, ".write": true },
+>     "uids":    { ".read": true, ".write": true }
+>   }
+> }
+> ```
+>
+> Without the `users`/`uids` rules, logging in shows "Permission denied".
+>
+> **Accounts also need Email/Password sign-in enabled:** Firebase
+> console → Build → **Authentication** → Get started → Sign-in
+> method → **Email/Password** → Enable. Sessions persist on each
+> device until the player logs out; logging out wipes their data
+> from that device (the cloud copy returns on the next login).
+
 1. Go to https://console.firebase.google.com → **Add project** (Analytics optional).
 2. In the project: **Build → Realtime Database → Create database** → start in **locked mode**.
 3. In the **Rules** tab, paste this and publish:
@@ -133,23 +155,28 @@ netlify.toml          Netlify config (no build step)
 ## How the battle works (v0.3)
 
 - **Weapons** (AZ-Tank style): crates appear on the floor a few
-  seconds into each round (up to 3 on the field). Drive over one and
+  seconds into each round (up to 15 on the field). Drive over one and
   your barrel physically changes — sprite AND hitbox — until you fire
-  it. One pickup, one use.
-  - **Laser**: while held, everyone sees your dashed 4-bounce aiming
-    line. Fire = an instant beam with 7 bounces that kills everything
+  it. One gun at a time: while armed you can't pick up another crate;
+  shoot your weapon off first.
+  - **Laser**: while held, everyone sees your dashed 6-bounce aiming
+    line. Fire = an instant beam with 9 bounces that kills everything
     it crosses — including you, if a reflection comes back.
-  - **Machine gun**: half-second wind-up (glowing muzzle), then a
-    16-round spray of half-sized bouncing balls with slight scatter.
+  - **Machine gun**: 16 half-sized bouncing balls, fired MANUALLY —
+    hold the trigger to spray at full rate, or tap for single shots.
+    The gun stays on your tank until every ball is spent.
   - **Homing rocket**: flies straight (bouncing) for ~1.75 s like a
     dumb-fire shell, then locks on and HUNTS the nearest tank — a
     colored trail matching its prey appears, and it threads the maze
-    at full speed with a vicious turn rate. Once seeking, walls kill
-    it: touching a brick ends it. Its shooter is fair game too.
-  - **Big cannon**: one slow, huge ball. On expiry — or the moment it
-    hits a tank — it bursts into a ring of 14 shrapnel pieces that
-    PHASE through walls, crawling while inside a brick and snapping
-    back to full speed on the far side. Stand well back.
+    with a vicious turn rate. It's only slightly faster than a tank,
+    so you CAN run — and after 6 seconds it dies on its own. Once
+    seeking, walls kill it: touching a brick ends it. Its shooter is
+    fair game too.
+  - **Big cannon**: one slow-ish heavy ball. On expiry — or the
+    moment it hits a tank — it bursts into a ragged spray of 22
+    shrapnel pieces that PHASE through walls, crawling while inside a
+    brick, and that never expire: each piece flies until it leaves
+    the arena. Stand well back, then keep standing back.
 - **Barrel hitboxes**: the barrel is part of the tank now. It blocks
   against walls (swinging your gun into a brick stops the turn) and
   it can be shot — and each weapon's barrel has its own shape.
