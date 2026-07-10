@@ -12,6 +12,7 @@ import {
   PICKABLE, freeColor, tankSVG,
 } from "./main.js";
 import { getBinds, keyLabel } from "./settings.js";
+import { setLastColor } from "./social.js";
 import { startLocalGame } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
 
@@ -191,6 +192,9 @@ export function initLocal() {
       .filter((c) => joined.has(c) || bots[c])
       .map((c) => ({ slot: c, color: paint[c], bot: joined.has(c) ? null : bots[c] }));
     sessionStorage.setItem("tank.localPlayers", JSON.stringify(specs));
+    // Remember the first human's paint on their account.
+    const firstHuman = specs.find((s) => !s.bot);
+    if (firstHuman) setLastColor(firstHuman.color);
     startLocalGame(specs);
   });
 }

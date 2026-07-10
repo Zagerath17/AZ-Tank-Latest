@@ -4,8 +4,9 @@
 // Other modules read them with getBinds().
 // ================================================================
 
-import { onEnter, onLeave, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { onEnter, onLeave, toast, COLORS, SLOT_NAMES, tankSVG } from "./main.js";
 import { getAudioLevels, setAudioLevel, sfx } from "./audio.js";
+import { getDnd, setDnd } from "./social.js";
 
 const STORE_KEY = "tank.keybinds.v1";
 
@@ -82,7 +83,7 @@ function render() {
     <section class="panel bind-panel p-${color}">
       <header class="bind-head">
         ${tankSVG(color)}
-        <h3>${COLOR_NAMES[color]} tank</h3>
+        <h3>${SLOT_NAMES[color]}</h3>
       </header>
       <div class="bind-rows">
         ${ACTIONS.map(([action, label]) => `
@@ -135,7 +136,7 @@ function onKeydown(e) {
     for (const [a] of ACTIONS) {
       if (binds[c][a] === e.code && !(c === color && a === action)) {
         binds[c][a] = null;
-        toast(`${keyLabel(e.code)} was taken from ${COLOR_NAMES[c]} — give that slot a new key.`);
+        toast(`${keyLabel(e.code)} was taken from ${SLOT_NAMES[c]} — give that slot a new key.`);
       }
     }
   }
@@ -183,6 +184,14 @@ function initAudioPanel() {
   wire("master");
   wire("music");
   wire("sfx");
+
+  // Do Not Disturb: friend requests and lobby join requests won't
+  // come through while it's on.
+  const dnd = document.getElementById("dnd-toggle");
+  if (dnd) {
+    dnd.checked = getDnd();
+    dnd.addEventListener("change", () => setDnd(dnd.checked));
+  }
 }
 
 export function initSettings() {
