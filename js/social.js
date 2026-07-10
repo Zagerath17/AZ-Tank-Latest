@@ -19,7 +19,7 @@
 // screen, including mid-game.
 // ================================================================
 
-import { toast, COLOR_NAMES, tankSVG } from "./main.js";
+import { toast, COLOR_NAMES, tankSVG, showScreen } from "./main.js";
 import { PICKABLE } from "./palette.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
@@ -27,7 +27,8 @@ import { sfx } from "./audio.js";
 const LS_NAME = "tank.account.v1";
 const LS_DND = "tank.dnd.v1";
 
-let account = null; // { key, name }
+let account = null; // { key, name, uid }
+let auth = null;    // { auth, signIn, signUp, signOut } — lazy Firebase Auth
 let unsubs = [];
 const bannerQueue = [];
 let bannerBusy = false;
@@ -50,37 +51,103 @@ function validName(name) {
   return /^[a-z0-9_]{3,16}$/i.test(name.trim());
 }
 
-export async function promptLogin() {
-  const name = window.prompt(
-    "Pick a username (3–16 letters, numbers, _).\nNo password yet — that comes later.",
-    account?.name ?? "",
-  );
-  if (name == null) return;
-  if (!validName(name)) {
-    toast("Usernames are 3–16 letters, numbers, or _.");
-    return;
+/* ---------- Firebase Auth (email + password) ---------- */
+
+async function ensureAuth() {
+  if (auth) return auth;
+  const f = await ensureFirebase();
+  const m = await import(`${f.base}/firebase-auth.js`).catch(() => {
+    throw new Error("Couldn't load the sign-in service — check your connection.");
+  });
+  auth = {
+    auth: m.getAuth(f.app), // persists the session on this device
+    signIn: m.signInWithEmailAndPassword,
+    signUp: m.createUserWithEmailAndPassword,
+    signOut: m.signOut,
+    onAuthStateChanged: m.onAuthStateChanged,
+  };
+  return auth;
+}
+
+function authErrorText(e) {
+  const c = e?.code ?? "";
+  if (c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found")) {
+    return "Wrong email or password.";
   }
+  if (c.includes("email-already-in-use")) return "That email already has an account — sign in instead.";
+  if (c.includes("invalid-email")) return "That doesn't look like an email address.";
+  if (c.includes("weak-password")) return "Password needs at least 6 characters.";
+  if (c.includes("operation-not-allowed")) {
+    return "Email sign-in isn't enabled — turn it on in Firebase → Authentication (see README).";
+  }
+  if (/permission/i.test(e?.message ?? "")) {
+    return "Database rules block accounts — add the users rule in Firebase (see README).";
+  }
+  return e?.message ?? "Sign-in failed.";
+}
+
+// After auth succeeds, connect the uid to its username profile.
+async function adoptProfile(uid, wantName = null) {
+  const f = await ensureFirebase();
+  let key = (await f.get(f.ref(f.db, `uids/${uid}`))).val();
+
+  if (!key) {
+    // Brand-new account: claim the requested username.
+    if (!wantName) throw new Error("Pick a username for your new account.");
+    key = keyOf(wantName);
+    const owner = (await f.get(f.ref(f.db, `users/${key}/uid`))).val();
+    if (owner && owner !== uid) throw new Error("That username is taken.");
+    await f.update(f.ref(f.db), {
+      [`users/${key}/name`]: wantName.trim(),
+      [`users/${key}/uid`]: uid,
+      [`users/${key}/createdAt`]: Date.now(),
+      [`uids/${uid}`]: key,
+    });
+  }
+
+  const prof = (await f.get(f.ref(f.db, `users/${key}`))).val() ?? {};
+  account = { key, name: prof.name ?? key, uid };
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  // Their cloud-saved preferences come back with them.
+  if (typeof prof.dnd === "boolean") localStorage.setItem(LS_DND, prof.dnd ? "1" : "0");
+  await goOnline();
+  refreshLoginButton();
+  return account;
+}
+
+export async function doSignIn(email, pass) {
+  const a = await ensureAuth();
+  const cred = await a.signIn(a.auth, email.trim(), pass);
+  return adoptProfile(cred.user.uid);
+}
+
+export async function doCreate(email, pass, name) {
+  if (!validName(name)) throw new Error("Usernames are 3–16 letters, numbers, or _.");
+  const a = await ensureAuth();
+  // Check the username BEFORE creating the auth user — no orphans.
+  const f = await ensureFirebase();
+  const owner = (await f.get(f.ref(f.db, `users/${keyOf(name)}/uid`))).val();
+  if (owner) throw new Error("That username is taken.");
+  const cred = await a.signUp(a.auth, email.trim(), pass);
+  return adoptProfile(cred.user.uid, name);
+}
+
+export async function logout() {
+  // Best-effort remote sign-off; the LOCAL wipe happens regardless.
   try {
-    const f = await ensureFirebase();
-    const key = keyOf(name);
-    const snap = await f.get(f.ref(f.db, `users/${key}/name`));
-    if (!snap.exists()) {
-      await f.update(f.ref(f.db, `users/${key}`), {
-        name: name.trim(),
-        color: "red",
-        createdAt: f.serverTimestamp(),
-      });
-      toast(`Welcome, ${name.trim()}!`);
-    } else {
-      toast(`Logged in as ${snap.val()}.`);
-    }
-    account = { key, name: snap.exists() ? snap.val() : name.trim() };
-    localStorage.setItem(LS_NAME, JSON.stringify(account));
-    await goOnline();
-    refreshLoginButton();
-  } catch (e) {
-    toast(e?.message ?? "Couldn't reach the account service.");
-  }
+    setStatus("offline");
+    const a = await ensureAuth();
+    await a.signOut(a.auth);
+  } catch (e) { /* offline — the local wipe still applies */ }
+  stopListening();
+  account = null;
+  // Their data leaves the device: identity, notification prefs, and
+  // session leftovers. (Cloud copy stays — it returns on next login.)
+  localStorage.removeItem(LS_NAME);
+  localStorage.removeItem(LS_DND);
+  sessionStorage.clear();
+  refreshLoginButton();
+  toast("Logged out — this device forgot you.");
 }
 
 function refreshLoginButton() {
@@ -387,12 +454,51 @@ export async function toggleInvitePanel() {
 export function initSocial() {
   try {
     const saved = JSON.parse(localStorage.getItem(LS_NAME));
-    if (saved?.key) account = saved;
+    if (saved?.key) account = saved; // instant UI; auth confirms below
   } catch (e) { /* fresh device */ }
   refreshLoginButton();
-  if (account) goOnline();
 
-  document.getElementById("menu-login").addEventListener("click", promptLogin);
+  // Restore the persisted session (Firebase keeps it on-device until
+  // an explicit logout). Reconciles or clears the cached account.
+  if (account) {
+    ensureAuth()
+      .then((a) => a.onAuthStateChanged(a.auth, (user) => {
+        if (user) adoptProfile(user.uid).catch(() => {});
+        else { // cached name but no session — require a fresh login
+          account = null;
+          localStorage.removeItem(LS_NAME);
+          refreshLoginButton();
+        }
+      }))
+      .catch(() => { if (account) goOnline(); }); // offline: keep the cache
+  }
+
+  document.getElementById("menu-login").addEventListener("click", () => {
+    if (account) {
+      if (window.confirm(`Log out ${account.name}? This device will forget your data.`)) logout();
+    } else {
+      showScreen("screen-login");
+    }
+  });
+
+  // The login form.
+  const val = (id) => document.getElementById(id).value;
+  const busyGuard = (btn, fn) => async () => {
+    btn.disabled = true;
+    try {
+      await fn();
+      showScreen("screen-menu");
+      toast(`Signed in as ${account.name}.`);
+    } catch (e) {
+      toast(authErrorText(e), 5000);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  const siBtn = document.getElementById("login-signin");
+  const crBtn = document.getElementById("login-create");
+  siBtn.addEventListener("click", busyGuard(siBtn, () => doSignIn(val("login-email"), val("login-pass"))));
+  crBtn.addEventListener("click", busyGuard(crBtn, () => doCreate(val("login-email"), val("login-pass"), val("login-name"))));
 
   // Social screen tabs
   const tabF = document.getElementById("tab-friends");

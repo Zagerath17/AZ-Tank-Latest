@@ -50,7 +50,7 @@ export const AI_PARAMS = {
   },
   medium: {
     speed: 0.88, turn: 0.96, react: 0.40,
-    aimErr: 0.09, aimTol: 0.12, range: 8, fireRange: 5.5, cooldown: 1.1, fireProb: 0.92,
+    aimErr: 0.1, aimTol: 0.12, range: 8, fireRange: 5.5, cooldown: 1.1, fireProb: 0.92,
     dodgeSkill: 0.55, dodgeHorizon: 0.8,
     lead: 0,
     selfCheckT: 0.9,    // won't shoot itself
@@ -64,7 +64,7 @@ export const AI_PARAMS = {
     aimErr: 0.028, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.8, fireProb: 1,
     burst: 3,           // pours it on when the lane is open
     jinkMs: 520,        // sharp evasive weaving between shots
-    dodgeSkill: 0.92, dodgeHorizon: 1.05,
+    dodgeSkill: 0.92, dodgeHorizon: 1.2,
     lead: 0.65,         // partial movement prediction
     selfCheckT: 1.7,
     verifyHit: false,
@@ -117,6 +117,7 @@ export function botActions(t, world, dt, now) {
     hazPt: null, hazUntil: 0,
     jinkAt: 0, jinkSide: 1, hazDir: null,
     pushUntil: 0, burstLeft: 0,
+    dodgePt: null, dodgeHold: 0, gearKey: null,
     laserWaryOf: null, laserWaryUntil: 0,
     prevLos: false,
     vel: {},
@@ -173,8 +174,16 @@ export function botActions(t, world, dt, now) {
       if (!th) {
         ai.pendingAt = 0;
       } else if (ai.threat) {
-        // Already reacting — keep tracking the live threat.
-        ai.threat = mkThreat(th, now);
+        // Already reacting — refresh if it's the SAME ball; switch
+        // only for one that's clearly MORE urgent. Retargeting every
+        // scan in a crossfire is what overwhelms and freezes tanks.
+        const cand = mkThreat(th, now);
+        if (th.src === ai.threat.src) {
+          ai.threat = cand;
+        } else if (cand.impactAt < ai.threat.impactAt - 120) {
+          ai.threat = cand;
+          ai.dodgePt = null; // new ball, new escape plan
+        }
         ai.alertUntil = now + 500;
       } else if (now < ai.alertUntil) {
         // Just finished dodging something — still alert, no fresh delay.
@@ -194,10 +203,10 @@ export function botActions(t, world, dt, now) {
         }
       }
     }
-    if (ai.threat && now > ai.threat.until) ai.threat = null;
+    if (ai.threat && now > ai.threat.until) { ai.threat = null; ai.dodgePt = null; }
     if (ai.threat) {
       dodging = true;
-      dodgeSteer(t, ai.threat, world, rBody, acts, now);
+      dodgeSteer(t, ai.threat, world, rBody, acts, now, ai);
     }
   }
 
@@ -442,16 +451,31 @@ export function botActions(t, world, dt, now) {
 
   if (!dodging && !hazardSteer && !combatSteered && !laserHold) {
     // Bare barrel + a weapon crate on the floor? Worth a detour —
-    // but only when we don't already carry one.
+    // and once a crate is CHOSEN, commit to it. Re-deciding between
+    // "get the gun" and "get the player" every repath freezes tanks
+    // halfway between the two.
     let goal = target;
+    if (special) ai.gearKey = null;
     if (!special && world.gear && world.gear.length) {
-      let g = null;
-      let gBest = Infinity;
-      for (const it of world.gear) {
-        const d = (it.x - t.x) ** 2 + (it.y - t.y) ** 2;
-        if (d < gBest) { gBest = d; g = it; }
+      let g = ai.gearKey ? world.gear.find((it) => it.key === ai.gearKey) : null;
+      if (g && best < (cell * 1.6) ** 2) {
+        g = null; // enemy is danger-close — drop the errand and fight
+        ai.gearKey = null;
       }
-      if (g && (gBest < best || gBest < (cell * 3.5) ** 2)) goal = g;
+      if (!g) {
+        ai.gearKey = null;
+        let gBest = Infinity;
+        let cand = null;
+        for (const it of world.gear) {
+          const d = (it.x - t.x) ** 2 + (it.y - t.y) ** 2;
+          if (d < gBest) { gBest = d; cand = it; }
+        }
+        if (cand && (gBest < best * 0.85 || gBest < (cell * 3.5) ** 2)) {
+          g = cand;
+          ai.gearKey = cand.key;
+        }
+      }
+      if (g) goal = g;
     }
     navigate(t, ai, goal, world, P, rBody, now, acts);
   }
@@ -627,7 +651,7 @@ function findThreat(t, world, horizon, now) {
       }
     }
     if (hit && (!bestThreat || hit.eta < bestThreat.eta)) {
-      bestThreat = { ...hit, pts, dangerR };
+      bestThreat = { ...hit, pts, dangerR, src: b };
     }
   }
   return bestThreat;
@@ -639,7 +663,30 @@ function findThreat(t, world, horizon, now) {
 // driving the entire time; rear points use reverse) and score them
 // by how far they get off the threat's line — and every other
 // bullet's line, so we never dodge into crossfire.
-function dodgeSteer(t, threat, world, rBody, acts, now) {
+function dodgeSteer(t, threat, world, rBody, acts, now, ai) {
+  // Commit to the chosen escape point briefly — re-picking every
+  // frame under fire produces dithering, not dodging. But commitment
+  // keeps its eyes open: the moment ANY live ball's line threatens
+  // the held point, the plan is torn up and re-picked (the fresh
+  // pick scores against the whole crossfire).
+  if (ai?.dodgePt && now < ai.dodgeHold
+      && corridorClear(t.x, t.y, ai.dodgePt[0], ai.dodgePt[1], world.rects, rBody)) {
+    let unsafe = false;
+    for (const b of world.bullets) {
+      if (b.by === t.id && now - b.born < 150) continue;
+      const s2 = Math.hypot(b.vx, b.vy) || 1;
+      const qx = ai.dodgePt[0] - b.x;
+      const qy = ai.dodgePt[1] - b.y;
+      if ((qx * b.vx + qy * b.vy) / s2 < 0) continue; // already past it
+      const perp = Math.abs(qx * (-b.vy / s2) + qy * (b.vx / s2));
+      if (perp < (world.tankR ?? 22) + (b.r ?? world.bulletR) + 6) { unsafe = true; break; }
+    }
+    if (!unsafe) {
+      steerTo(t, ai.dodgePt[0], ai.dodgePt[1], acts, world, rBody, true, 1.9, false);
+      return;
+    }
+    ai.dodgePt = null;
+  }
   const bs = Math.hypot(threat.vx, threat.vy) || 1;
   const bvx = threat.vx / bs;
   const bvy = threat.vy / bs;
@@ -698,8 +745,12 @@ function dodgeSteer(t, threat, world, rBody, acts, now) {
     if (score > bestScore) { bestScore = score; bestPt = [ox, oy]; }
   }
 
-  if (bestPt) steerTo(t, bestPt[0], bestPt[1], acts, world, rBody, true, 1.9, false);
-  else steerTo(t, t.x + bvx * Df, t.y + bvy * Df, acts, world, rBody, false);
+  if (bestPt) {
+    if (ai) { ai.dodgePt = bestPt; ai.dodgeHold = now + 160; }
+    steerTo(t, bestPt[0], bestPt[1], acts, world, rBody, true, 1.9, false);
+  } else {
+    steerTo(t, t.x + bvx * Df, t.y + bvy * Df, acts, world, rBody, false);
+  }
 }
 
 // Trace the shot we're about to take along our CURRENT heading.

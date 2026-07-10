@@ -59,6 +59,8 @@ export async function ensureFirebase() {
   });
   const app = appMod.initializeApp(firebaseConfig);
   fb = {
+    app, // the auth SDK attaches to this
+    base, // CDN base, so social.js loads matching SDK versions
     db: dbMod.getDatabase(app),
     ref: dbMod.ref,
     get: dbMod.get,
@@ -265,17 +267,7 @@ async function cycleBot(id, level) {
   await f.update(current.lobbyRef, updates);
 }
 
-async function paintBot(id) {
-  if (!current) return;
-  const f = await ensureFirebase();
-  // Cycle the bot through the free colors, one tap at a time.
-  const cur = current.resolvedCache?.[id];
-  const taken = tableColors(id);
-  const pool = PICKABLE.filter((c) => !taken.has(c));
-  if (!pool.length) return;
-  const next = pool[(pool.indexOf(cur) + 1) % pool.length];
-  await f.set(f.ref(f.db, `lobbies/${current.code}/players/${id}/color`), next);
-}
+let openPaintFor = null; // which bot's swatch drawer is open
 
 async function removeBot(id) {
   if (!current) return;
@@ -290,7 +282,7 @@ function renderLobbyCode(code) {
   const el = document.getElementById("lobby-code");
   el.textContent = hidden ? "••••" : code;
   const btn = document.getElementById("lobby-hide");
-  if (btn) btn.textContent = hidden ? "🙈" : "👁";
+  if (btn) btn.textContent = hidden ? "SHOW" : "HIDE";
 }
 
 /* ---------- snapshot routing ---------- */
@@ -421,11 +413,12 @@ function renderLobby(code, lobby) {
   const entries = sortPlayers(lobby.players);
   const isHost = lobby.hostId === me;
   current.isHost = isHost;
+  current.lastLobby = lobby;
   social.setStatus("lobby", code);
 
   // Host with room (and an account) can beckon friends in.
   const socialBtn = document.getElementById("lobby-social");
-  socialBtn.hidden = !(isHost && social.getAccount() && Object.keys(lobby.players ?? {}).length < MAX_PLAYERS);
+  socialBtn.hidden = !(isHost && social.getAccount());
 
   const myIndex = entries.findIndex(([id]) => id === me);
   if (myIndex === -1) { toast("You were removed from the lobby."); exitToOnline(); return; }
@@ -466,15 +459,27 @@ function renderLobby(code, lobby) {
     if (p.bot) {
       const locked = p.bot === "impossible";
       const controls = isHost
-        ? `${locked ? "" : `<button class="chip chip-btn" data-bot-paint="${id}" aria-label="Change bot color">🎨</button>`}
+        ? `${locked ? "" : `<button class="chip chip-btn" data-bot-paint="${id}" aria-label="Change bot color">PAINT</button>`}
            <button class="chip chip-btn" data-bot-cycle="${id}" data-level="${p.bot}">BOT · ${p.bot.toUpperCase()}</button>
            <button class="chip chip-btn" data-bot-remove="${id}" aria-label="Remove bot">✕</button>`
         : `<span class="chip">BOT · ${p.bot.toUpperCase()}</span>`;
+      let strip = "";
+      if (openPaintFor === id && isHost && !locked) {
+        const used = new Set(Object.entries(resolved).filter(([k]) => k !== id).map(([, c]) => c));
+        strip = `<div class="swatches swatches-wide">` + PICKABLE.map((c) => `
+          <button class="swatch p-${c} ${resolved[id] === c ? "sel" : ""}"
+                  data-bot-paint-set="${id}" data-color="${c}"
+                  ${used.has(c) ? "disabled" : ""}
+                  aria-label="${COLOR_NAMES[c]}"></button>`).join("") + `</div>`;
+      }
       return `
-        <li class="lobby-row p-${color}">
-          ${tankSVG(color)}
-          <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot${locked ? " · locked" : ""}</em></span>
-          <span class="row-end">${controls}</span>
+        <li class="lobby-row lobby-row-wrap p-${color}">
+          <div class="lobby-row-main">
+            ${tankSVG(color)}
+            <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot${locked ? " · locked" : ""}</em></span>
+            <span class="row-end">${controls}</span>
+          </div>
+          ${strip}
         </li>`;
     }
 
@@ -591,20 +596,29 @@ export function initOnline() {
   addBotBtn.addEventListener("click", guard(addBotBtn, addBot));
 
   // Bot difficulty / removal chips (host only; delegated).
-  document.getElementById("lobby-players").addEventListener("click", async (e) => {
+  document.getElementById("screen-lobby").addEventListener("click", async (e) => {
     const cyc = e.target.closest("[data-bot-cycle]");
     const rem = e.target.closest("[data-bot-remove]");
     const pnt = e.target.closest("[data-bot-paint]");
+    const bset = e.target.closest("[data-bot-paint-set]");
     const my = e.target.closest("[data-my-paint]");
-    if (!cyc && !rem && !pnt && !my) return;
+    if (!cyc && !rem && !pnt && !my && !bset) return;
     try {
       if (my) {
         write(`players/${myId()}/color`, my.dataset.myPaint);
         social.setLastColor(my.dataset.myPaint);
+      } else if (bset) {
+        openPaintFor = null;
+        write(`players/${bset.dataset.botPaintSet}/color`, bset.dataset.color);
+      } else if (pnt) {
+        // Toggle this bot's color drawer open/closed.
+        openPaintFor = openPaintFor === pnt.dataset.botPaint ? null : pnt.dataset.botPaint;
+        if (current?.lastLobby) renderLobby(current.code, current.lastLobby);
+      } else if (cyc) {
+        await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
+      } else {
+        await removeBot(rem.dataset.botRemove);
       }
-      else if (pnt) await paintBot(pnt.dataset.botPaint);
-      else if (cyc) await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
-      else await removeBot(rem.dataset.botRemove);
     } catch (err) {
       toast(err?.message ?? "Couldn't update the bot.");
     }

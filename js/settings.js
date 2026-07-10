@@ -189,8 +189,11 @@ function initAudioPanel() {
   // come through while it's on.
   const dnd = document.getElementById("dnd-toggle");
   if (dnd) {
+    const bell = document.getElementById("dnd-bell");
+    const paint = () => { if (bell) bell.textContent = dnd.checked ? "🔕" : "🔔"; };
     dnd.checked = getDnd();
-    dnd.addEventListener("change", () => setDnd(dnd.checked));
+    paint();
+    dnd.addEventListener("change", () => { setDnd(dnd.checked); paint(); });
   }
 }
 
