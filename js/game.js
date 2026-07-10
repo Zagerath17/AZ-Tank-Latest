@@ -296,7 +296,7 @@ function begin(opts) {
 
   updateScoreHUD();
   showScreen("screen-game");
-  startMusic();
+  startMusic("game");
   S.raf = requestAnimationFrame(frame);
 }
 

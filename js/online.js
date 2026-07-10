@@ -26,6 +26,7 @@
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, tankSVG } from "./main.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame } from "./game.js";
+import * as social from "./social.js";
 import { AI_LEVELS } from "./ai.js";
 
 const FB_VERSION = "10.12.2";
@@ -37,7 +38,7 @@ let current = null; // { code, lobbyRef, playerRef, disc, unsub, inGame, players
 
 /* ---------- firebase (lazy) ---------- */
 
-async function ensureFirebase() {
+export async function ensureFirebase() {
   if (fb) return fb;
 
   // Catch the most common setup mistake before it turns into a silent hang.
@@ -106,6 +107,16 @@ function sortPlayers(players) {
   );
 }
 
+// What the social layer needs to know about my current lobby.
+export function lobbyInfo() {
+  if (!current) return null;
+  return {
+    code: current.code,
+    players: Object.keys(current.playersCache ?? {}).length,
+    isHost: !!current.isHost,
+  };
+}
+
 // Fire-and-forget write helper used by the in-game streams.
 function write(path, value) {
   if (!current || !fb) return;
@@ -143,7 +154,7 @@ async function createLobby() {
   throw new Error("Couldn't find a free code — try again.");
 }
 
-async function joinLobby(code) {
+export async function joinLobby(code) {
   const f = await ensureFirebase();
   const snap = await f.get(f.ref(f.db, `lobbies/${code}`));
 
@@ -192,6 +203,7 @@ function exitToOnline() {
 }
 
 async function leaveLobby() {
+  social.setStatus("online");
   const c = current;
   stopGame(); // no-op if we weren't mid-match
   if (!c) { showScreen("screen-online"); return; }
@@ -271,6 +283,16 @@ async function removeBot(id) {
   await f.remove(f.ref(f.db, `lobbies/${current.code}/players/${id}`));
 }
 
+// The code display honors this device's hide toggle — keep the room
+// number off-screen while streaming. Copy still copies the real code.
+function renderLobbyCode(code) {
+  const hidden = localStorage.getItem("tank.hideCode.v1") === "1";
+  const el = document.getElementById("lobby-code");
+  el.textContent = hidden ? "••••" : code;
+  const btn = document.getElementById("lobby-hide");
+  if (btn) btn.textContent = hidden ? "🙈" : "👁";
+}
+
 /* ---------- snapshot routing ---------- */
 
 function handleSnapshot(code, snap) {
@@ -286,13 +308,49 @@ function handleSnapshot(code, snap) {
   const lobby = snap.val();
   current.playersCache = lobby.players ?? {};
 
+  // Host rights follow the players: if the host's seat is empty, the
+  // earliest-joined human claims the crown — in the lobby AND mid-game.
+  const me = myId();
+  const entries = sortPlayers(lobby.players);
+  const humans = entries.filter(([, p]) => !p.bot);
+  if (lobby.hostId && !lobby.players?.[lobby.hostId] && humans[0]?.[0] === me) {
+    write("hostId", me);
+  }
+
   if (lobby.state === "starting" && lobby.round?.seed != null) {
     if (!current.inGame) beginOnlineGame(code, lobby);
-    else onlineLobbyUpdate(lobby);
+    else if (humans.length === 1 && humans[0][0] === me) {
+      // Everyone else walked out mid-match. No point circling an
+      // empty arena — take the survivor (now the host) back to the
+      // lobby, bots and all, ready to restart.
+      returnToLobbySolo(entries);
+    } else {
+      onlineLobbyUpdate(lobby);
+    }
     return;
   }
 
   renderLobby(code, lobby);
+}
+
+function returnToLobbySolo(entries) {
+  stopGame();
+  current.inGame = false;
+  social.setStatus("lobby", current.code);
+  toast("Everyone left — back to the lobby.");
+  showScreen("screen-lobby");
+  // Reset the lobby to waiting and scrub per-round leftovers so the
+  // next START is clean.
+  const updates = { state: "waiting", round: null, gear: null };
+  for (const [id] of entries) {
+    updates[`players/${id}/dead`] = null;
+    updates[`players/${id}/gun`] = null;
+    updates[`players/${id}/shots`] = null;
+    updates[`players/${id}/pos`] = null;
+  }
+  ensureFirebase()
+    .then((f) => f.update(current.lobbyRef, updates))
+    .catch(() => { /* the next snapshot retries via state check */ });
 }
 
 function beginOnlineGame(code, lobby) {
@@ -310,6 +368,7 @@ function beginOnlineGame(code, lobby) {
   }
 
   current.inGame = true;
+  social.setStatus("round");
 
   startOnlineGame({
     roundN: lobby.round.n,
@@ -361,6 +420,12 @@ function renderLobby(code, lobby) {
   const me = myId();
   const entries = sortPlayers(lobby.players);
   const isHost = lobby.hostId === me;
+  current.isHost = isHost;
+  social.setStatus("lobby", code);
+
+  // Host with room (and an account) can beckon friends in.
+  const socialBtn = document.getElementById("lobby-social");
+  socialBtn.hidden = !(isHost && social.getAccount() && Object.keys(lobby.players ?? {}).length < MAX_PLAYERS);
 
   const myIndex = entries.findIndex(([id]) => id === me);
   if (myIndex === -1) { toast("You were removed from the lobby."); exitToOnline(); return; }
@@ -376,7 +441,7 @@ function renderLobby(code, lobby) {
       .catch(() => { /* retried on next snapshot */ });
   }
 
-  document.getElementById("lobby-code").textContent = code;
+  renderLobbyCode(code);
 
   const resolved = resolveColors(entries);
   current.playersCache = entries;
@@ -486,6 +551,17 @@ export function initOnline() {
   const createBtn = document.getElementById("btn-create");
   const joinBtn = document.getElementById("btn-join");
   const startBtn = document.getElementById("lobby-start");
+  const hideBtn = document.getElementById("lobby-hide");
+  hideBtn.addEventListener("click", () => {
+    const k = "tank.hideCode.v1";
+    localStorage.setItem(k, localStorage.getItem(k) === "1" ? "0" : "1");
+    if (current) renderLobbyCode(current.code);
+  });
+
+  document.getElementById("lobby-social").addEventListener("click", () => {
+    social.toggleInvitePanel();
+  });
+
   const copyBtn = document.getElementById("lobby-copy");
   const addBotBtn = document.getElementById("lobby-addbot");
 
@@ -522,7 +598,10 @@ export function initOnline() {
     const my = e.target.closest("[data-my-paint]");
     if (!cyc && !rem && !pnt && !my) return;
     try {
-      if (my) write(`players/${myId()}/color`, my.dataset.myPaint);
+      if (my) {
+        write(`players/${myId()}/color`, my.dataset.myPaint);
+        social.setLastColor(my.dataset.myPaint);
+      }
       else if (pnt) await paintBot(pnt.dataset.botPaint);
       else if (cyc) await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
       else await removeBot(rem.dataset.botRemove);

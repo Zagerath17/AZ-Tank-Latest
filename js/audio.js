@@ -267,6 +267,14 @@ export const sfx = {
     } catch (e) {}
   },
 
+  // Menu button press: a soft, satisfying tick.
+  click() {
+    if (!ready() || limited("click", 60)) return;
+    try {
+      blip("triangle", 700, 520, 0.05, 0.07);
+    } catch (e) {}
+  },
+
   // Machine-gun spin-DOWN: a falling whir as the barrel gives up.
   winddown() {
     if (!ready() || limited("winddown", 300)) return;
@@ -331,20 +339,48 @@ export function setEngine(active, moving) {
   } catch (e) {}
 }
 
-/* ---------- music: a quiet 8-bar chiptune loop ---------- */
+/* ---------- music: chiptune tracks per situation ---------- */
+// Each track: 32 eighth-note steps of bass + sparse lead. Game mode
+// shuffles its six tracks; title and lobby each keep their theme.
 
-const STEP = 60 / 105 / 2; // eighth notes at 105 BPM
-// A minor groove: 32 eighth-note steps of bass, sparse lead on top.
-const BASS = [
-  55, 0, 55, 0, 65.4, 0, 49, 0, 55, 0, 55, 0, 41.2, 0, 49, 0,
-  55, 0, 55, 0, 65.4, 0, 73.4, 0, 82.4, 0, 73.4, 0, 65.4, 0, 49, 0,
-];
-const LEAD = [
-  0, 0, 0, 0, 440, 0, 0, 392, 0, 0, 330, 0, 0, 0, 0, 0,
-  0, 0, 523, 0, 0, 440, 0, 0, 392, 0, 330, 0, 392, 0, 0, 0,
-];
+const TRACKS = {
+  title: [
+    { bpm: 88,
+      bass: [55,0,0,0, 65.4,0,0,0, 49,0,0,0, 55,0,0,0, 43.7,0,0,0, 49,0,0,0, 55,0,0,0, 55,0,0,0],
+      lead: [220,0,0,262, 0,0,330,0, 0,294,0,0, 262,0,0,0, 0,0,220,0, 0,196,0,220, 0,0,0,0, 0,0,0,0] },
+  ],
+  lobby: [
+    { bpm: 100,
+      bass: [65.4,0,65.4,0, 98,0,65.4,0, 87.3,0,87.3,0, 65.4,0,49,0, 65.4,0,65.4,0, 98,0,110,0, 87.3,0,98,0, 65.4,0,0,0],
+      lead: [0,0,262,0, 0,330,0,0, 349,0,0,330, 0,0,262,0, 0,0,392,0, 0,330,0,262, 0,0,330,0, 0,0,0,0] },
+  ],
+  game: [
+    { bpm: 105, // the original A-minor groove
+      bass: [55,0,55,0, 65.4,0,49,0, 55,0,55,0, 41.2,0,49,0, 55,0,55,0, 65.4,0,73.4,0, 82.4,0,73.4,0, 65.4,0,49,0],
+      lead: [0,0,0,0, 440,0,0,392, 0,0,330,0, 0,0,0,0, 0,0,523,0, 0,440,0,0, 392,0,330,0, 392,0,0,0] },
+    { bpm: 112, // dorian runner
+      bass: [73.4,0,73.4,73.4, 0,87.3,0,73.4, 98,0,98,0, 87.3,0,73.4,0, 73.4,0,73.4,73.4, 0,87.3,0,110, 0,98,0,87.3, 0,73.4,0,0],
+      lead: [294,0,0,349, 0,0,440,0, 0,392,0,349, 0,294,0,0, 0,0,294,0, 349,0,440,0, 494,0,440,0, 392,0,0,0] },
+    { bpm: 118, // driving minor
+      bass: [82.4,82.4,0,82.4, 0,82.4,0,98, 0,82.4,82.4,0, 73.4,0,65.4,0, 82.4,82.4,0,82.4, 0,82.4,0,110, 0,98,0,82.4, 0,65.4,0,73.4],
+      lead: [0,0,330,0, 0,0,0,392, 0,0,330,0, 294,0,0,0, 0,0,330,0, 415,0,392,0, 330,0,0,294, 0,330,0,0] },
+    { bpm: 108, // syncopated strut
+      bass: [49,0,0,49, 0,0,58.3,0, 0,49,0,0, 65.4,0,58.3,0, 49,0,0,49, 0,0,58.3,0, 0,73.4,0,0, 65.4,0,58.3,0],
+      lead: [0,262,0,0, 294,0,0,233, 0,0,262,0, 0,0,0,0, 0,349,0,0, 330,0,294,0, 0,262,0,233, 0,0,262,0] },
+    { bpm: 115, // tense creeper
+      bass: [61.7,0,61.7,0, 61.7,0,65.4,0, 61.7,0,61.7,0, 58.3,0,55,0, 61.7,0,61.7,0, 61.7,0,65.4,0, 69.3,0,65.4,0, 61.7,0,0,0],
+      lead: [0,0,0,247, 0,0,262,0, 0,0,0,0, 233,0,0,220, 0,0,0,247, 0,277,0,262, 0,0,247,0, 0,0,0,0] },
+    { bpm: 110, // brighter romp
+      bass: [65.4,0,65.4,0, 82.4,0,65.4,0, 87.3,0,87.3,0, 98,0,82.4,0, 65.4,0,65.4,0, 82.4,0,110,0, 98,0,87.3,0, 82.4,0,65.4,0],
+      lead: [330,0,0,392, 0,0,523,0, 0,440,0,392, 0,330,0,0, 0,0,330,0, 392,0,440,0, 523,0,587,0, 523,0,0,0] },
+  ],
+};
 
 function scheduleStep(step, when) {
+  const tr = TRACKS[music.mode][music.trackIdx];
+  const BASS = tr.bass;
+  const LEAD = tr.lead;
+  const STEP = 60 / tr.bpm / 2;
   const b = BASS[step % BASS.length];
   if (b) {
     const t = when;
@@ -387,22 +423,46 @@ function scheduleStep(step, when) {
   }
 }
 
-export function startMusic() {
+export function startMusic(mode = "game") {
   if (!ensure()) return;
-  if (music) return;
+  if (!TRACKS[mode]) mode = "game";
+  if (music) {
+    if (music.mode === mode) return;
+    // Swap themes in place: new pattern from the top of the bar.
+    music.mode = mode;
+    music.trackIdx = Math.floor(Math.random() * TRACKS[mode].length);
+    music.step = 0;
+    music.loops = 0;
+    return;
+  }
   try {
     const gain = ctx.createGain();
     gain.gain.value = 0.55;
     gain.connect(musicBus);
-    music = { gain, step: 0, nextAt: 0, timer: 0 };
+    music = {
+      gain, timer: 0, nextAt: 0, step: 0, loops: 0,
+      mode, trackIdx: Math.floor(Math.random() * TRACKS[mode].length),
+    };
     music.timer = setInterval(() => {
-      if (!ready()) return;
+      if (!ready() || !music) return;
       if (!music.nextAt) music.nextAt = ctx.currentTime + 0.1;
-      // Schedule everything due in the next 0.35 s.
       while (music.nextAt < ctx.currentTime + 0.35) {
+        const tr = TRACKS[music.mode][music.trackIdx];
         scheduleStep(music.step, music.nextAt);
-        music.step = (music.step + 1) % BASS.length;
-        music.nextAt += STEP;
+        music.nextAt += 60 / tr.bpm / 2;
+        music.step += 1;
+        if (music.step >= tr.bass.length) {
+          music.step = 0;
+          music.loops += 1;
+          // In-game: shuffle to a DIFFERENT track every few loops.
+          const pool = TRACKS[music.mode];
+          if (pool.length > 1 && music.loops >= 3) {
+            music.loops = 0;
+            let next = music.trackIdx;
+            while (next === music.trackIdx) next = Math.floor(Math.random() * pool.length);
+            music.trackIdx = next;
+          }
+        }
       }
     }, 110);
   } catch (e) {

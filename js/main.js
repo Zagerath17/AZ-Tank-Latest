@@ -6,6 +6,8 @@ import { initSettings } from "./settings.js";
 import { initLocal } from "./local.js";
 import { initOnline } from "./online.js";
 import { initGame } from "./game.js";
+import { sfx, startMusic } from "./audio.js";
+import { initSocial, setStatus, getAccount } from "./social.js";
 
 export {
   COLORS, SLOT_NAMES, PALETTE, PICKABLE, COLOR_NAMES, freeColor,
@@ -30,6 +32,16 @@ export function showScreen(id) {
   el.classList.add("is-active");
   (hooks.enter[id] ?? []).forEach((fn) => fn());
   el.querySelector("[data-autofocus]")?.focus();
+
+  // The soundtrack follows the screen: menus get the title theme,
+  // the lobby its own, and the game DJ (game.js) takes over in play.
+  if (id === "screen-lobby") startMusic("lobby");
+  else if (id !== "screen-game") startMusic("title");
+
+  // Presence roughly follows the screen (online.js reports lobby and
+  // online rounds with more detail; local rounds count too).
+  if (id === "screen-game") setStatus("round");
+  else if (id !== "screen-lobby" && getAccount()) setStatus("online");
 }
 
 /* ---------- toast ---------- */
@@ -60,7 +72,12 @@ export function tankSVG(color) {
 
 function wireNavigation() {
   // Any element with data-go="screen-id" navigates there.
-  document.querySelectorAll("[data-go]").forEach((btn) => {
+  // Every button press ticks.
+document.addEventListener("click", (e) => {
+  if (e.target.closest("button, [role=button]")) sfx.click();
+});
+
+document.querySelectorAll("[data-go]").forEach((btn) => {
     btn.addEventListener("click", () => showScreen(btn.dataset.go));
   });
 
@@ -81,3 +98,4 @@ initSettings();
 initLocal();
 initOnline();
 initGame();
+initSocial();

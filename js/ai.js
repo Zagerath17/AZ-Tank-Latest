@@ -51,7 +51,6 @@ export const AI_PARAMS = {
   medium: {
     speed: 0.88, turn: 0.96, react: 0.40,
     aimErr: 0.09, aimTol: 0.12, range: 8, fireRange: 5.5, cooldown: 1.1, fireProb: 0.92,
-    burst: 2,           // one quick follow-up per look
     dodgeSkill: 0.55, dodgeHorizon: 0.8,
     lead: 0,
     selfCheckT: 0.9,    // won't shoot itself
@@ -62,7 +61,7 @@ export const AI_PARAMS = {
   },
   hard: {
     speed: 1.0, turn: 1.0, react: 0.30,
-    aimErr: 0.035, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.8, fireProb: 1,
+    aimErr: 0.028, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.8, fireProb: 1,
     burst: 3,           // pours it on when the lane is open
     jinkMs: 520,        // sharp evasive weaving between shots
     dodgeSkill: 0.92, dodgeHorizon: 1.05,
@@ -71,7 +70,7 @@ export const AI_PARAMS = {
     verifyHit: false,
     verifyBeyond: 3.5,  // long shots must trace to a hit
     push: true,         // rushes enemies who are out of ammo
-    standoff: 1.7,
+    standoff: 1.95,
     reserve: 1,
   },
   impossible: {
@@ -289,6 +288,9 @@ export function botActions(t, world, dt, now) {
       // Ammo read on the TARGET too: an enemy with nothing left to
       // fire is safe to rush (smart tiers only).
       let band = P.standoff * cell;
+      // Holding the big cannon? Make room to use it — back the band
+      // off so even close-range tiers create a safe firing distance.
+      if (special === "cannon") band = Math.max(band, cell * 1.8);
       if (P.push && world.bullets) {
         let theirs = 0;
         for (const b of world.bullets) if (b.by === target.id && !b.mini) theirs++;
@@ -376,7 +378,7 @@ export function botActions(t, world, dt, now) {
         // Pickup weapons fire on a clean look — no ricochet trace
         // needed. Exception: the cannon's shrapnel comes back through
         // walls, so it wants room.
-        if (special !== "cannon" || dist > cell * 2.2) {
+        if (special !== "cannon" || dist > cell * 1.3) {
           ai.fireAt = now + 650;
           acts.shoot = true;
         } else {
@@ -607,16 +609,25 @@ function findThreat(t, world, horizon, now) {
     const dangerR = baseR + (b.r ?? world.bulletR);
     const sim = { x: b.x, y: b.y, vx: b.vx, vy: b.vy };
     const step = 0.02;
+    const pts = [{ x: b.x, y: b.y }];
+    let hit = null;
     for (let tau = step; tau <= horizon; tau += step) {
       stepSim(sim, world.rects, step, b.r ?? world.bulletR);
-      const ox = sim.x - t.x;
-      const oy = sim.y - t.y;
-      if (ox * ox + oy * oy < dangerR * dangerR) {
-        if (!bestThreat || tau < bestThreat.eta) {
-          bestThreat = { eta: tau, vx: sim.vx, vy: sim.vy, x: sim.x, y: sim.y };
+      pts.push({ x: sim.x, y: sim.y });
+      if (!hit) {
+        const ox = sim.x - t.x;
+        const oy = sim.y - t.y;
+        if (ox * ox + oy * oy < dangerR * dangerR) {
+          hit = { eta: tau, vx: sim.vx, vy: sim.vy, x: sim.x, y: sim.y };
+          // Keep simulating a little PAST the intercept: the dodge
+          // needs to know where the ball goes next (bounces
+          // included), or it can step out of the pan into the fire.
+          horizon = Math.min(horizon, tau + 0.5);
         }
-        break;
       }
+    }
+    if (hit && (!bestThreat || hit.eta < bestThreat.eta)) {
+      bestThreat = { ...hit, pts, dangerR };
     }
   }
   return bestThreat;
@@ -653,10 +664,23 @@ function dodgeSteer(t, threat, world, rBody, acts, now) {
     const oy = t.y + Math.sin(h) * Df;
     if (!corridorClear(t.x, t.y, ox, oy, world.rects, rBody)) continue;
 
-    // Primary: distance off THIS threat's travel line at the endpoint.
-    const rx = ox - threat.x;
-    const ry = oy - threat.y;
-    let score = Math.abs(rx * -bvy + ry * bvx) * 2;
+    // Primary: clearance from the ball's PREDICTED path — bounces
+    // and all — capped just past "safe". A dodge only needs to clear
+    // the trajectory by a margin; running any farther is wasted
+    // motion (and looks like fleeing). Beyond the cap, the other
+    // terms decide, so the tank stays composed and aggressive.
+    const need = (threat.dangerR ?? (world.tankR ?? 22) + 10) + world.cell * 0.14;
+    let clear;
+    if (threat.pts) {
+      const nd = nearestOnPolyline(ox, oy, threat.pts);
+      clear = nd ? nd.d : world.cell;
+    } else {
+      const rx = ox - threat.x;
+      const ry = oy - threat.y;
+      clear = Math.abs(rx * -bvy + ry * bvx);
+    }
+    let score = Math.min(clear, need + world.cell * 0.45) * 2;
+    if (!rear) score += world.cell * 0.08; // composed > backpedal, all else equal
 
     // Secondary: clearance from every other live bullet's line.
     let minD = Infinity;
