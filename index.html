@@ -30,11 +30,12 @@
       <nav class="stack">
         <button class="btn btn-big" data-go="screen-local">Local</button>
         <button class="btn btn-big" data-go="screen-online">Online</button>
+        <button class="btn btn-big" data-go="screen-ranked">Ranked</button>
         <button class="btn btn-big" data-go="screen-social">Social</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn" id="menu-login" type="button">👤 LOG IN</button>
       </nav>
-      <p class="foot">v0.8.7</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -71,6 +72,20 @@
       </div>
     </section>
 
+    <!-- ============ RANKED ============ -->
+    <section class="screen" id="screen-ranked" aria-label="Ranked">
+      <header class="bar">
+        <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
+        <h2>Ranked</h2>
+      </header>
+      <p class="rank-mybadge" id="ranked-mybadge">Loading…</p>
+      <button class="btn btn-big btn-go" id="ranked-queue" type="button">FIND MATCH</button>
+      <p class="hint" id="ranked-status">4-player matches. First to 5 round wins takes it.</p>
+      <h3 class="board-title">Top 50 worldwide</h3>
+      <ol class="lobby-list" id="ranked-board"><li class="hint">Loading…</li></ol>
+      <li class="board-row board-me" id="ranked-me" hidden></li>
+    </section>
+
     <!-- ============ SOCIAL ============ -->
     <section class="screen" id="screen-social" aria-label="Social">
       <header class="bar">
@@ -79,10 +94,15 @@
       </header>
       <div class="settings-tabs">
         <button class="btn tab-btn is-on" id="tab-friends" type="button">Friends</button>
+        <button class="btn tab-btn" id="tab-requests" type="button">Requests</button>
         <button class="btn tab-btn" id="tab-addfriends" type="button">Add Friends</button>
       </div>
       <div id="panel-friends">
         <ul class="lobby-list" id="friends-list"></ul>
+      </div>
+      <div id="panel-requests" hidden>
+        <p class="hint">Friend requests that arrived while you were away.</p>
+        <ul class="lobby-list" id="requests-list"></ul>
       </div>
       <div id="panel-addfriends" hidden>
         <p class="hint">Search a player by their exact username.</p>
@@ -133,6 +153,12 @@
           <span class="vol-val" id="dnd-bell">🔔</span>
         </div>
         <p class="hint">With Do Not Disturb on, friend requests and lobby join requests won't reach you.</p>
+        <div class="vol-row dnd-row">
+          <label for="noreq-toggle">Block friend requests</label>
+          <input type="checkbox" id="noreq-toggle">
+          <span class="vol-val">🚫</span>
+        </div>
+        <p class="hint">Stops new friend requests entirely — people see your Add button disabled.</p>
       </div>
     </section>
 
