@@ -36,7 +36,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.1</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -255,31 +255,35 @@
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
         <button class="btn btn-small bar-end" id="lobby-social" type="button" hidden>👥 Invite</button>
       </header>
-      <div class="panel code-card">
-        <span class="code-label">Lobby code — share it with friends</span>
-        <div class="code-line">
-          <button class="btn btn-small" id="lobby-hide" type="button"
-                  aria-label="Hide lobby code">👁</button>
-          <span class="code-big" id="lobby-code">····</span>
-          <button class="btn btn-small" id="lobby-copy">Copy</button>
+      <div class="lobby-grid">
+        <div class="lobby-main">
+          <div class="panel code-card">
+            <span class="code-label">Lobby code — share it with friends</span>
+            <div class="code-line">
+              <button class="btn btn-small" id="lobby-hide" type="button"
+                      aria-label="Hide lobby code">👁</button>
+              <span class="code-big" id="lobby-code">····</span>
+              <button class="btn btn-small" id="lobby-copy">Copy</button>
+            </div>
+          </div>
+          <ul class="lobby-list lobby-popover" id="lobby-social-list" hidden></ul>
+          <ul class="lobby-list" id="lobby-players"></ul>
+          <p class="hint" id="lobby-paint-hint">Your paint — taken colors are locked:</p>
+          <div class="swatches swatches-wide" id="lobby-paint"></div>
+          <button class="btn" id="lobby-addbot" hidden>Add a bot tank</button>
+          <p class="hint" id="lobby-status"></p>
+          <button class="btn btn-big btn-go" id="lobby-start" hidden>Start battle</button>
+        </div>
+        <div class="chat-box" id="lobby-chat">
+          <div class="chat-log" id="chat-log"></div>
+          <div class="chat-row">
+            <span class="ptt-dot" id="ptt-indicator" title="Voice"></span>
+            <input type="text" id="chat-input" maxlength="240" placeholder="Message…"
+                   autocomplete="off">
+            <button class="btn btn-small" id="chat-send" type="button">Send</button>
+          </div>
         </div>
       </div>
-      <ul class="lobby-list lobby-popover" id="lobby-social-list" hidden></ul>
-      <ul class="lobby-list" id="lobby-players"></ul>
-      <div class="chat-box" id="lobby-chat">
-        <div class="chat-log" id="chat-log"></div>
-        <div class="chat-row">
-          <span class="ptt-dot" id="ptt-indicator" title="Voice"></span>
-          <input type="text" id="chat-input" maxlength="240" placeholder="Message… (foul language filtered)"
-                 autocomplete="off">
-          <button class="btn btn-small" id="chat-send" type="button">Send</button>
-        </div>
-      </div>
-      <p class="hint" id="lobby-paint-hint">Your paint — taken colors are locked:</p>
-      <div class="swatches swatches-wide" id="lobby-paint"></div>
-      <button class="btn" id="lobby-addbot" hidden>Add a bot tank</button>
-      <p class="hint" id="lobby-status"></p>
-      <button class="btn btn-big btn-go" id="lobby-start" hidden>Start battle</button>
     </section>
 
     <!-- ============ BATTLE ARENA ============ -->
@@ -293,6 +297,7 @@
       </header>
       <div class="arena-wrap">
         <canvas id="arena"></canvas>
+        <span class="weapon-hud" id="weapon-hud" hidden></span>
       </div>
       <div class="touch-pad" id="touch-pad" hidden>
         <div class="tp-group">
