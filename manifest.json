@@ -2,7 +2,7 @@
   "name": "Tank Brawl",
   "short_name": "Tank Brawl",
   "display": "fullscreen",
-  "orientation": "any",
+  "orientation": "landscape",
   "background_color": "#14171f",
   "theme_color": "#14171f",
   "start_url": ".",

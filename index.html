@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <link rel="manifest" href="manifest.json">
+  <meta name="screen-orientation" content="landscape">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -35,14 +36,14 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn" id="menu-login" type="button">👤 LOG IN</button>
       </nav>
-      <p class="foot">v0.8.8</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
     <section class="screen" id="screen-local" aria-label="Local battle setup">
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
-        <h2>Local</h2>
+        <h2>Local battle</h2>
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
       </header>
       <p class="hint">Press a tank's <b>shoot</b> key to join — or tap its card.</p>
@@ -57,7 +58,8 @@
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>Account</h2>
       </header>
-      <p class="hint">Sign in — or create an account with a username.</p>
+      <p class="hint">Sign in — or create an account with a username. You'll stay
+        signed in on this device until you log out.</p>
       <div class="form-col">
         <input type="email" id="login-email" placeholder="email" autocomplete="email">
         <input type="password" id="login-pass" placeholder="password (6+ characters)"
@@ -69,6 +71,13 @@
           <button class="btn" id="login-create" type="button">Create account</button>
         </div>
       </div>
+    </section>
+
+    <!-- ============ VERSUS (loading / sync) ============ -->
+    <section class="screen screen-center" id="screen-versus" aria-label="Match starting">
+      <h2 class="vs-title">Match Starting…</h2>
+      <div class="versus-body" id="versus-body"></div>
+      <p class="hint vs-wait">Syncing players…</p>
     </section>
 
     <!-- ============ RANKED ============ -->
@@ -127,13 +136,58 @@
       <div class="settings-tabs">
         <button class="btn tab-btn is-on" id="tab-controls" type="button">Controls</button>
         <button class="btn tab-btn" id="tab-audio" type="button">Audio</button>
+        <button class="btn tab-btn" id="tab-voice" type="button">Voice</button>
       </div>
       <div id="panel-controls">
         <p class="hint">Tap a key to rebind it, then press the new key. Esc cancels. These apply to local battles.</p>
         <div class="binds" id="binds"></div>
         <button class="btn" id="binds-reset">Reset to defaults</button>
+        <div class="online-binds">
+          <h3>Online keybinds</h3>
+          <div class="bind-row">
+            <span>Push to talk</span>
+            <button class="btn btn-small key-btn" id="bind-ptt" data-bind="ptt">V</button>
+          </div>
+        </div>
       </div>
+      <div id="panel-voice" hidden>
+        <p class="hint">Voice chat is push-to-talk by default. These settings are saved to your account.</p>
+        <div class="vol-row">
+          <label for="voice-mode">Voice chat</label>
+          <select id="voice-mode" class="select">
+            <option value="ptt">Push to talk</option>
+            <option value="on">Always on</option>
+            <option value="off">Off</option>
+          </select>
+          <span class="vol-val"></span>
+        </div>
+        <div class="vol-row">
+          <label for="voice-input">Input device</label>
+          <select id="voice-input" class="select"><option value="">Default</option></select>
+          <span class="vol-val"></span>
+        </div>
+        <div class="vol-row">
+          <label for="voice-output">Output device</label>
+          <select id="voice-output" class="select"><option value="">Default</option></select>
+          <span class="vol-val"></span>
+        </div>
+        <div class="vol-row">
+          <label for="voice-ingain">Input gain</label>
+          <input type="range" id="voice-ingain" min="0" max="200" step="1">
+          <span class="vol-val" id="voice-ingain-val">100%</span>
+        </div>
+        <div class="vol-row">
+          <label for="voice-outgain">Output gain</label>
+          <input type="range" id="voice-outgain" min="0" max="200" step="1">
+          <span class="vol-val" id="voice-outgain-val">100%</span>
+        </div>
+      </div>
+
       <div id="panel-audio" hidden>
+        <div class="player-mixer" id="player-mixer" hidden>
+          <h3>Players in your lobby</h3>
+          <ul id="player-mixer-list"></ul>
+        </div>
         <p class="hint">Levels apply instantly and are remembered on this device.</p>
         <div class="vol-row">
           <label for="vol-master">Master volume</label>
@@ -212,6 +266,15 @@
       </div>
       <ul class="lobby-list lobby-popover" id="lobby-social-list" hidden></ul>
       <ul class="lobby-list" id="lobby-players"></ul>
+      <div class="chat-box" id="lobby-chat">
+        <div class="chat-log" id="chat-log"></div>
+        <div class="chat-row">
+          <span class="ptt-dot" id="ptt-indicator" title="Voice"></span>
+          <input type="text" id="chat-input" maxlength="240" placeholder="Message… (foul language filtered)"
+                 autocomplete="off">
+          <button class="btn btn-small" id="chat-send" type="button">Send</button>
+        </div>
+      </div>
       <p class="hint" id="lobby-paint-hint">Your paint — taken colors are locked:</p>
       <div class="swatches swatches-wide" id="lobby-paint"></div>
       <button class="btn" id="lobby-addbot" hidden>Add a bot tank</button>
@@ -225,6 +288,7 @@
         <button class="btn btn-back" id="game-exit">‹ Exit</button>
         <h2>Battle</h2>
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
+        <span class="shrink-timer" id="game-shrink" hidden>SHRINK 1:00</span>
         <div class="score" id="game-score"></div>
       </header>
       <div class="arena-wrap">
@@ -246,6 +310,13 @@
   </main>
 
   <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Portrait phones get a polite "please rotate" gate. -->
+  <div id="rotate-notice">
+    <div class="rot-icon">📱</div>
+    <h2>Rotate your device</h2>
+    <p class="hint">Tank Brawl plays in landscape. Turn your phone sideways to battle.</p>
+  </div>
   <div id="notice" class="notice" hidden>
     <span id="notice-text"></span>
     <button class="btn btn-small" id="notice-yes" type="button">OK</button>
