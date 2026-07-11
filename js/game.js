@@ -13,13 +13,14 @@
 // ================================================================
 
 import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
-import { COLORS, COLOR_NAMES, PALETTE } from "./palette.js";
+import { COLORS, COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON,
   laserPath, rocketSeekStep, stepShrap, bounceCircle, drawBarrel, drawGear,
+  GEAR_RIM, WEAPON_NAMES,
 } from "./weapons.js";
 import { sfx, setEngine, startMusic, stopAll } from "./audio.js";
 
@@ -43,9 +44,25 @@ const GEAR_EVERY_MS = 5500;    // then every 5.5–9 s
 
 const BULLET_SPEED = U * 3.2;
 const BULLET_R = U * 0.085;
-const BULLET_LIFE = 12000;  // ms a bullet keeps bouncing (doubled)
-const MAX_BULLETS = 3;      // live bullets per tank
-const BASIC_CD = 3500;      // ms between basic shots
+const BULLET_LIFE = 6000;   // ms a bullet keeps bouncing
+// The basic gun is a 3-round magazine: consecutive shots come 0.5 s
+// apart, and each spent round takes 3.5 s to regenerate.
+const MAG_SIZE = 3;
+const MAG_GAP = 500;        // ms between consecutive shots
+const MAG_REGEN = 3500;     // ms for one spent round to come back
+
+function magAvailable(t, now) {
+  t.basicMag = (t.basicMag ?? []).filter((ts) => now - ts < MAG_REGEN);
+  return MAG_SIZE - t.basicMag.length;
+}
+
+// A special projectile still flying blocks the basic trigger — no
+// rocket-then-instantly-bullet exploits.
+function specialInPlay(t) {
+  return S.rockets.some((r) => r.by === t.id)
+    || S.cannons.some((c) => c.by === t.id)
+    || S.beams.some((bm) => bm.by === t.id && !bm.doneAt);
+}
 
 const ROUND_PAUSE = 2600;   // ms between rounds
 const NET_SEND_MS = 90;
@@ -63,7 +80,7 @@ const NO_MUL = { speed: 1, turn: 1 };
 /* ---------- module state ---------- */
 
 let S = null;
-let canvas, ctx, exitBtn, touchPad, scoreEl;
+let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl;
 const held = new Set();
 const touchHeld = new Set();
 
@@ -75,6 +92,7 @@ export function initGame() {
   canvas = document.getElementById("arena");
   ctx = canvas.getContext("2d");
   exitBtn = document.getElementById("game-exit");
+  shrinkEl = document.getElementById("game-shrink");
   touchPad = document.getElementById("touch-pad");
   scoreEl = document.getElementById("game-score");
 
@@ -134,6 +152,10 @@ function opts_toState(o) {
     sendPickup: o.sendPickup,
     sendGun: o.sendGun,
     onExit: o.onExit,
+    ranked: o.ranked,
+    winTarget: o.winTarget,
+    onRankedEnd: o.onRankedEnd,
+    casualPlayers: o.casualPlayers,
   };
 }
 
@@ -324,7 +346,19 @@ function startRound(seed) {
   S.gearSeen.clear();
   S.fades = [];
   S.dust = [];
-  S.gearNextAt = performance.now() + GEAR_FIRST_MS;
+  // 3-2-1 countdown: everyone frozen, arena blurred, then GO.
+  S.freezeUntil = performance.now() + 3000;
+  S.cdLast = 4; // last number we ticked for (4 = none yet)
+  S.gearNextAt = S.freezeUntil + GEAR_FIRST_MS;
+  // Ranked sudden-shrink: every minute the doomed outer ring flashes
+  // red for 5 s (killing anyone who touches it), then drops away
+  // behind a fresh border. After the arena hits minimum size, one
+  // more minute and the ENTIRE floor flashes and collapses — a draw.
+  S.shrinkLevel = 0;
+  S.shrinkWarnAt = S.ranked ? S.freezeUntil + 55000 : Infinity; // flash starts
+  S.shrinkCutAt = S.ranked ? S.freezeUntil + 60000 : Infinity;  // ring drops
+  S.shrinkFlashTick = -1; // last second we played a flash tick for
+  S.finalCollapse = false;
   S.rockets = [];
   S.cannons = [];
   S.shraps = [];
@@ -448,7 +482,17 @@ function frame(now) {
     : S.bullets;
 
   S.engineMoving = false;
-  if (!S.banner) {
+  const frozen = now < (S.freezeUntil ?? 0);
+  if (frozen) {
+    // Countdown: nobody moves, nothing flies. Tick the numbers.
+    const n = Math.ceil((S.freezeUntil - now) / 1000);
+    if (n !== S.cdLast) {
+      S.cdLast = n;
+      sfx.count(n);
+    }
+  } else if (!S.banner) {
+    if (S.cdLast !== 0) { S.cdLast = 0; sfx.count(0); } // GO!
+    stepShrink(now);
     stepTanks(now, dt);
     stepBullets(now, dt);
     stepSpecials(now, dt);
@@ -509,9 +553,9 @@ function stepTanks(now, dt) {
             bulletSpeed: BULLET_SPEED,
             bulletR: BULLET_R,
             muzzle: BARRELS.normal.len * TANK_R + BULLET_R + 2,
-            maxBullets: MAX_BULLETS,
-            basicCd: BASIC_CD,
-            cannonCd: CANNON.gapMs,
+            magSize: MAG_SIZE,
+            magGap: MAG_GAP,
+            magRegen: MAG_REGEN,
             moveSpeed: MOVE_SPEED,
           }, dt, now)
         : readActions(t, binds);
@@ -695,8 +739,6 @@ function clearWeapon(t, now) {
   t.mgIdleAt = 0;
   t.mgNext = 0;
   t.mgAmmo = null;
-  t.cnAmmo = null;
-  t.cnNext = 0;
   t.gunClearedAt = now;
   if (S.mode === "online" && t.local) S.sendGun?.(t.id, null);
 }
@@ -709,13 +751,12 @@ function tryFire(t, now) {
     return;
   }
 
-  if (now < (t.basicNext ?? 0)) return; // the barrel takes its time now
+  if (specialInPlay(t)) return;                 // your rocket flies alone
+  if (now < (t.basicNext ?? 0)) return;         // 0.5 s between shots
+  if (magAvailable(t, now) <= 0) return;        // magazine empty — regenerating
 
-  let live = 0;
-  for (const b of S.bullets) if (b.by === t.id && !b.mini) live++;
-  if (live >= MAX_BULLETS) return;
-
-  t.basicNext = now + BASIC_CD;
+  t.basicNext = now + MAG_GAP;
+  (t.basicMag ??= []).push(now);
   const m = muzzlePoint(t, BULLET_R);
   spawnBullet(t.id, m.x, m.y, t.a, now);
   sendTypedShot(t, { x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
@@ -733,16 +774,9 @@ function fireSpecial(t, now) {
     spawnRocket(t.id, m.x, m.y, t.a, now);
     sendTypedShot(t, { w: "rocket", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
   } else if (w === "cannon") {
-    // Three shells per crate, with a slow reload between them.
-    if (now < (t.cnNext ?? 0)) return;
-    t.cnAmmo ??= CANNON.shots;
     const m = muzzlePoint(t, CANNON.r * BULLET_R);
     spawnCannon(t.id, m.x, m.y, t.a, now);
     sendTypedShot(t, { w: "cannon", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
-    t.cnAmmo -= 1;
-    t.cnNext = now + CANNON.gapMs;
-    if (t.cnAmmo > 0) return; // keep the gun until the shells are spent
-    t.cnAmmo = null;
   }
 
   clearWeapon(t, now);
@@ -860,12 +894,110 @@ function stepGear(now) {
   }
 }
 
+// The safe box under the current shrink level: [c0..c1] × [r0..r1].
+function safeBox() {
+  const L = S.shrinkLevel ?? 0;
+  return { c0: L, r0: L, c1: S.maze.cols - 1 - L, r1: S.maze.rows - 1 - L };
+}
+
+function canShrinkMore() {
+  const L = (S.shrinkLevel ?? 0) + 1;
+  return Math.min(S.maze.cols, S.maze.rows) - 2 * L >= 3;
+}
+
+// The rectangle (world units) of the ring currently doomed — the
+// band between the current edge and the next one in.
+function doomedRing() {
+  const L0 = (S.shrinkLevel ?? 0) * CELL;
+  if (S.finalCollapse) return { x0: L0, y0: L0, x1: S.worldW - L0, y1: S.worldH - L0, whole: true };
+  return { x0: L0, y0: L0, x1: S.worldW - L0, y1: S.worldH - L0, inset: CELL };
+}
+
+// Is (x,y) inside the doomed band (the red zone) right now?
+function inDoomBand(x, y) {
+  const L0 = (S.shrinkLevel ?? 0) * CELL;
+  if (S.finalCollapse) return true; // the whole floor is doomed
+  const L1 = L0 + CELL;
+  const outer = x >= L0 && x <= S.worldW - L0 && y >= L0 && y <= S.worldH - L0;
+  const inner = x >= L1 && x <= S.worldW - L1 && y >= L1 && y <= S.worldH - L1;
+  return outer && !inner;
+}
+
+function flashActive(now) {
+  return S.ranked && S.shrinkCutAt !== Infinity
+    && now >= S.shrinkWarnAt && now < S.shrinkCutAt;
+}
+
+function stepShrink(now) {
+  if (!S.ranked || S.shrinkCutAt === Infinity) return;
+
+  // During the 5 s warning: tick once per second (synced to the
+  // pulse), and vaporize any tank that dares touch the red.
+  if (now >= S.shrinkWarnAt && now < S.shrinkCutAt) {
+    const sec = Math.ceil((S.shrinkCutAt - now) / 1000);
+    if (sec !== S.shrinkFlashTick) {
+      S.shrinkFlashTick = sec;
+      sfx.count(sec); // the flash tick — same voice as the countdown
+    }
+    for (const t of S.tanks) {
+      if (t.dead || t.gone) continue;
+      if (inDoomBand(t.x, t.y)) killTank(t);
+    }
+    return;
+  }
+
+  if (now < S.shrinkCutAt) return;
+
+  // ---- the cut fires ----
+  if (S.finalCollapse) {
+    // Whole arena just collapsed: everyone still alive dies → draw.
+    for (const t of S.tanks) {
+      if (!t.dead && !t.gone) killTank(t);
+    }
+    S.shrinkCutAt = Infinity;
+    sfx.boom(0.6);
+    return;
+  }
+
+  S.shrinkLevel += 1;
+  const { c0, r0, c1, r1 } = safeBox();
+  for (let r = r0; r <= r1; r++) { S.maze.V[r][c0] = true; S.maze.V[r][c1 + 1] = true; }
+  for (let c = c0; c <= c1; c++) { S.maze.H[r0][c] = true; S.maze.H[r1 + 1][c] = true; }
+  S.rects = wallRects(S.maze, CELL, WALL_T);
+
+  const inSafe = (x, y) =>
+    x > c0 * CELL && x < (c1 + 1) * CELL && y > r0 * CELL && y < (r1 + 1) * CELL;
+  for (const t of S.tanks) {
+    if (t.dead || t.gone) continue;
+    if (!inSafe(t.x, t.y)) { killTank(t); continue; } // caught in the ring
+  }
+  S.bullets = S.bullets.filter((b) => inSafe(b.x, b.y));
+  S.rockets = S.rockets.filter((k) => inSafe(k.x, k.y));
+  S.cannons = S.cannons.filter((k) => inSafe(k.x, k.y));
+  S.shraps = S.shraps.filter((k) => inSafe(k.x, k.y));
+  S.gear = S.gear.filter((g) => inSafe(g.x, g.y));
+  sfx.boom(0.5);
+
+  // Schedule the next event: another shrink, or — if we've bottomed
+  // out — the one-minute fuse to the final all-map collapse.
+  if (canShrinkMore()) {
+    S.shrinkWarnAt = now + 55000;
+    S.shrinkCutAt = now + 60000;
+  } else {
+    S.finalCollapse = true;
+    S.shrinkWarnAt = now + 55000;
+    S.shrinkCutAt = now + 60000;
+  }
+  S.shrinkFlashTick = -1;
+}
+
 function pickGearSpot() {
+  const { c0, r0, c1, r1 } = safeBox();
   const cols = S.maze.cols;
   const rows = S.maze.rows;
   for (let tries = 0; tries < 25; tries++) {
-    const x = (Math.floor(Math.random() * cols) + 0.5) * CELL;
-    const y = (Math.floor(Math.random() * rows) + 0.5) * CELL;
+    const x = (c0 + Math.floor(Math.random() * (c1 - c0 + 1)) + 0.5) * CELL;
+    const y = (r0 + Math.floor(Math.random() * (r1 - r0 + 1)) + 0.5) * CELL;
     let clear = true;
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
@@ -1194,7 +1326,14 @@ function maybeEndRound(now) {
 function updateScoreHUD() {
   if (!scoreEl || !S) return;
   scoreEl.innerHTML = S.roster
-    .map((p) => `<div class="sc-card p-${p.color}">${tankSVG(p.color)}<span class="sc">${S.scores[p.id] ?? 0}</span></div>`)
+    .map((p) => {
+      const label = p.name ?? (S.mode === "local" ? SLOT_NAMES[p.slot ?? p.color] : null) ?? COLOR_NAMES[p.color];
+      return `<div class="sc-card p-${p.color}">
+        <span class="sc-name">${label}</span>
+        ${tankSVG(p.color)}
+        <span class="sc">${S.scores[p.id] ?? 0}</span>
+      </div>`;
+    })
     .join("");
 }
 
@@ -1374,11 +1513,43 @@ function draw(now) {
   ctx.translate((cw - S.worldW * s) / 2, (ch - S.worldH * s) / 2);
   ctx.scale(s, s);
 
+  // During the 3-2-1 the whole arena sits behind frosted glass.
+  const counting = now < (S.freezeUntil ?? 0);
+  if (counting && "filter" in ctx) ctx.filter = "blur(5px)";
+
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, S.worldW, S.worldH);
 
+  // Ranked shrink: the dead ring is a void behind the fresh border.
+  if (S.ranked && S.shrinkLevel > 0) {
+    const L = S.shrinkLevel * CELL;
+    ctx.fillStyle = "#181c25";
+    ctx.fillRect(0, 0, S.worldW, L);
+    ctx.fillRect(0, S.worldH - L, S.worldW, L);
+    ctx.fillRect(0, 0, L, S.worldH);
+    ctx.fillRect(S.worldW - L, 0, L, S.worldH);
+  }
+
   ctx.fillStyle = "#808896";
   for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
+
+  // The doomed zone pulses red through its final five seconds — the
+  // outer ring normally, or the WHOLE floor on the last collapse.
+  // Touch it and you're gone, so it reads at a hard 50% red.
+  if (flashActive(now)) {
+    const blink = Math.sin(now / 130) * 0.5 + 0.5; // fast strobe
+    ctx.fillStyle = `rgba(255, 45, 40, ${0.32 + 0.25 * blink})`;
+    const L0 = S.shrinkLevel * CELL;
+    if (S.finalCollapse) {
+      ctx.fillRect(L0, L0, S.worldW - 2 * L0, S.worldH - 2 * L0);
+    } else {
+      const L1 = L0 + CELL;
+      ctx.fillRect(L0, L0, S.worldW - 2 * L0, CELL);                   // top
+      ctx.fillRect(L0, S.worldH - L1, S.worldW - 2 * L0, CELL);        // bottom
+      ctx.fillRect(L0, L1, CELL, S.worldH - 2 * L1);                   // left
+      ctx.fillRect(S.worldW - L1, L1, CELL, S.worldH - 2 * L1);        // right
+    }
+  }
 
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
   const pulse = Math.sin(now / 220) * 0.5 + 0.5;
@@ -1522,8 +1693,79 @@ function draw(now) {
     ctx.globalAlpha = 1;
   }
 
+  // Held-weapon readout, lower-right of the arena, in the weapon's
+  // own accent color — so you always know what you're packing.
+  const mine = S.tanks.find((t) => t.local && !t.dead && !t.gone && t.weapon);
+  if (mine) {
+    const label = WEAPON_NAMES[mine.weapon] ?? mine.weapon;
+    const col = GEAR_RIM[mine.weapon] ?? "#eef1f6";
+    ctx.save();
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    const pad = CELL * 0.25;
+    const fs = Math.max(18, S.worldH * 0.04);
+    ctx.font = `800 ${fs}px "Black Ops One", system-ui`;
+    ctx.lineWidth = fs * 0.16;
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "rgba(10,12,16,.85)";
+    ctx.strokeText(label, S.worldW - pad, S.worldH - pad);
+    ctx.fillStyle = col;
+    ctx.fillText(label, S.worldW - pad, S.worldH - pad);
+    // little ammo pip for MG / cannon count if relevant
+    ctx.restore();
+  }
+
   if (S.banner) drawBanner();
 
+  if (counting) {
+    if ("filter" in ctx) ctx.filter = "none";
+    drawCountdown(now);
+  }
+
+  ctx.restore();
+
+  // The ranked shrink timer lives in the top bar, ticking down.
+  if (shrinkEl) {
+    if (S.ranked && !counting) {
+      shrinkEl.hidden = false;
+      if (S.shrinkCutAt === Infinity) {
+        shrinkEl.textContent = "";
+        shrinkEl.hidden = true;
+      } else {
+        const left = Math.max(0, Math.ceil((S.shrinkCutAt - now) / 1000));
+        const mm = Math.floor(left / 60);
+        const ss = String(left % 60).padStart(2, "0");
+        shrinkEl.textContent = S.finalCollapse
+          ? `⚠ COLLAPSE ${mm}:${ss}`
+          : `SHRINK ${mm}:${ss}`;
+        shrinkEl.classList.toggle("warn", flashActive(now));
+      }
+    } else if (!S.ranked) {
+      shrinkEl.hidden = true;
+    }
+  }
+}
+
+// Giant blue 3-2-1 with a black border, fading in and out per second.
+function drawCountdown(now) {
+  const remain = S.freezeUntil - now;
+  const n = Math.ceil(remain / 1000);
+  if (n < 1) return;
+  const frac = 1 - ((remain / 1000) % 1 || 1); // 0→1 inside this second
+  const alpha = Math.sin(Math.PI * Math.min(1, frac * 1.15)); // fade in, fade out
+  const size = S.worldH * (0.34 + 0.06 * frac); // gentle grow
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, alpha);
+  ctx.font = `900 ${size}px "Black Ops One", system-ui`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = size * 0.09;
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#0a0c10";
+  ctx.strokeText(String(n), S.worldW / 2, S.worldH / 2);
+  ctx.fillStyle = "#47a3ff";
+  ctx.fillText(String(n), S.worldW / 2, S.worldH / 2);
   ctx.restore();
 }
 

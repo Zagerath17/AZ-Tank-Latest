@@ -9,6 +9,8 @@ import { initGame } from "./game.js";
 import { sfx, startMusic } from "./audio.js";
 import { initSocial, setStatus, getAccount } from "./social.js";
 import { initRanked } from "./ranked.js";
+import { initChat, setPtt } from "./chat.js";
+import { getPttKey } from "./settings.js";
 
 // True while a match is running — screen hops (e.g. Settings mid-game)
 // must not touch the soundtrack or presence.
@@ -108,7 +110,9 @@ let fsTried = false;
 window.addEventListener("pointerdown", () => {
   if (fsTried || document.fullscreenElement) return;
   fsTried = true;
-  document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+  document.documentElement.requestFullscreen?.({ navigationUI: "hide" })
+    .then(() => screen.orientation?.lock?.("landscape").catch(() => {}))
+    .catch(() => { screen.orientation?.lock?.("landscape").catch(() => {}); });
 }, { once: false });
 
 document.querySelectorAll("[data-go]").forEach((btn) => {
@@ -134,3 +138,17 @@ initOnline();
 initGame();
 initSocial();
 initRanked();
+initChat();
+
+// Push-to-talk: hold the bound key to open the mic (ignored when
+// typing in a text field). Works on any screen during a lobby.
+window.addEventListener("keydown", (e) => {
+  if (e.code === getPttKey() && !e.repeat) {
+    const el = document.activeElement;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+    setPtt(true);
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === getPttKey()) setPtt(false);
+});

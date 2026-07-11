@@ -7,8 +7,19 @@
 import { onEnter, onLeave, toast, COLORS, SLOT_NAMES, tankSVG } from "./main.js";
 import { getAudioLevels, setAudioLevel, sfx } from "./audio.js";
 import { getDnd, setDnd, getNoRequests, setNoRequests } from "./social.js";
+import { getVoiceSettings, setVoiceSetting, listDevices, setPeerGain, setPeerMuted } from "./chat.js";
+import { lobbyPeers } from "./online.js";
+import { isBlocked, setBlocked } from "./social.js";
 
 const STORE_KEY = "tank.keybinds.v1";
+const PTT_KEY = "tank.ptt.v1";
+
+export function getPttKey() {
+  return localStorage.getItem(PTT_KEY) || "KeyV";
+}
+function setPttKey(code) {
+  localStorage.setItem(PTT_KEY, code);
+}
 
 const ACTIONS = [
   ["up", "Forward"],
@@ -150,20 +161,23 @@ function onKeydown(e) {
 /* ---------- init ---------- */
 
 function initAudioPanel() {
-  const tabC = document.getElementById("tab-controls");
-  const tabA = document.getElementById("tab-audio");
-  const panC = document.getElementById("panel-controls");
-  const panA = document.getElementById("panel-audio");
-  if (!tabA) return;
-
-  const show = (audio) => {
-    panC.hidden = audio;
-    panA.hidden = !audio;
-    tabC.classList.toggle("is-on", !audio);
-    tabA.classList.toggle("is-on", audio);
+  const tabs = {
+    controls: [document.getElementById("tab-controls"), document.getElementById("panel-controls")],
+    audio: [document.getElementById("tab-audio"), document.getElementById("panel-audio")],
+    voice: [document.getElementById("tab-voice"), document.getElementById("panel-voice")],
   };
-  tabC.addEventListener("click", () => show(false));
-  tabA.addEventListener("click", () => show(true));
+  if (!tabs.audio[0]) return;
+  const show = (which) => {
+    for (const [name, [tab, panel]] of Object.entries(tabs)) {
+      const on = name === which;
+      panel.hidden = !on;
+      tab.classList.toggle("is-on", on);
+    }
+    if (which === "voice") populateVoiceDevices();
+  };
+  tabs.controls[0].addEventListener("click", () => show("controls"));
+  tabs.audio[0].addEventListener("click", () => show("audio"));
+  tabs.voice[0].addEventListener("click", () => show("voice"));
 
   let previewAt = 0;
   const wire = (kind) => {
@@ -202,12 +216,116 @@ function initAudioPanel() {
     noreq.checked = getNoRequests();
     noreq.addEventListener("change", () => setNoRequests(noreq.checked));
   }
+
+  // ---- Voice settings ----
+  const vs = getVoiceSettings();
+  const mode = document.getElementById("voice-mode");
+  if (mode) {
+    mode.value = vs.mode;
+    mode.addEventListener("change", () => setVoiceSetting("mode", mode.value));
+  }
+  const wireGain = (id, key) => {
+    const input = document.getElementById(id);
+    const val = document.getElementById(`${id}-val`);
+    if (!input) return;
+    input.value = Math.round((getVoiceSettings()[key] ?? 1) * 100);
+    if (val) val.textContent = `${input.value}%`;
+    input.addEventListener("input", () => {
+      setVoiceSetting(key, input.value / 100);
+      if (val) val.textContent = `${input.value}%`;
+    });
+  };
+  wireGain("voice-ingain", "inGain");
+  wireGain("voice-outgain", "outGain");
+
+  const inSel = document.getElementById("voice-input");
+  const outSel = document.getElementById("voice-output");
+  if (inSel) inSel.addEventListener("change", () => setVoiceSetting("inputId", inSel.value));
+  if (outSel) outSel.addEventListener("change", () => setVoiceSetting("outputId", outSel.value));
+
+  // Push-to-talk keybind (lives with the Online keybinds).
+  const pttBtn = document.getElementById("bind-ptt");
+  if (pttBtn) {
+    pttBtn.textContent = keyLabel(getPttKey());
+    pttBtn.addEventListener("click", () => {
+      pttBtn.textContent = "…";
+      const grab = (e) => {
+        e.preventDefault();
+        if (e.code !== "Escape") setPttKey(e.code);
+        pttBtn.textContent = keyLabel(getPttKey());
+        window.removeEventListener("keydown", grab, true);
+      };
+      window.addEventListener("keydown", grab, true);
+    });
+  }
+}
+
+let devicesLoaded = false;
+async function populateVoiceDevices() {
+  if (devicesLoaded) return;
+  devicesLoaded = true;
+  const { inputs, outputs } = await listDevices();
+  const vs = getVoiceSettings();
+  const fill = (sel, devs, cur) => {
+    if (!sel) return;
+    for (const d of devs) {
+      const opt = document.createElement("option");
+      opt.value = d.deviceId;
+      opt.textContent = d.label || "Microphone/Speaker";
+      if (d.deviceId === cur) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  };
+  fill(document.getElementById("voice-input"), inputs, vs.inputId);
+  fill(document.getElementById("voice-output"), outputs, vs.outputId);
+}
+
+function renderPlayerMixer() {
+  const wrap = document.getElementById("player-mixer");
+  const list = document.getElementById("player-mixer-list");
+  if (!wrap || !list) return;
+  const peers = lobbyPeers();
+  if (!peers.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  list.innerHTML = peers.map((p) => `
+    <li class="mixer-row p-${p.color}">
+      <span class="mixer-name">${p.name}</span>
+      <input type="range" class="mixer-gain" data-peer="${p.id}" min="0" max="200" step="1" value="100"
+             aria-label="${p.name} volume">
+      <button class="btn btn-small mixer-mute" data-peer="${p.id}">Mute</button>
+      <button class="btn btn-small mixer-block" data-key="${p.ukey ?? ""}" data-peer="${p.id}"
+              ${p.ukey ? "" : "disabled"}>${p.ukey && isBlocked(p.ukey) ? "Blocked" : "Block"}</button>
+    </li>`).join("");
+
+  list.querySelectorAll(".mixer-gain").forEach((r) => {
+    r.addEventListener("input", () => setPeerGain(r.dataset.peer, r.value / 100));
+  });
+  list.querySelectorAll(".mixer-mute").forEach((b) => {
+    b.addEventListener("click", () => {
+      const on = b.textContent === "Mute";
+      b.textContent = on ? "Unmute" : "Mute";
+      b.classList.toggle("is-on", on);
+      setPeerMuted(b.dataset.peer, on);
+    });
+  });
+  list.querySelectorAll(".mixer-block").forEach((b) => {
+    b.addEventListener("click", () => {
+      const key = b.dataset.key;
+      if (!key) return;
+      const now = !isBlocked(key);
+      setBlocked(key, now);
+      b.textContent = now ? "Blocked" : "Block";
+      b.classList.toggle("is-on", now);
+      if (now) setPeerMuted(b.dataset.peer, true);
+    });
+  });
 }
 
 export function initSettings() {
   initAudioPanel();
   onEnter("screen-settings", () => {
     render();
+    renderPlayerMixer();
     // Capture phase so a rebind press never leaks to other listeners.
     window.addEventListener("keydown", onKeydown, true);
   });

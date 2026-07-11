@@ -277,6 +277,18 @@ export const sfx = {
     } catch (e) {}
   },
 
+  // Round countdown: three low ticks, then a bright GO.
+  count(n) {
+    if (!ready()) return;
+    try {
+      if (n > 0) blip("square", 392, 392, 0.14, 0.16);
+      else {
+        blip("square", 784, 784, 0.2, 0.22);
+        blip("square", 988, 988, 0.14, 0.3, 0.05);
+      }
+    } catch (e) {}
+  },
+
   // Menu button press: a soft, satisfying tick.
   click() {
     if (!ready() || limited("click", 60)) return;

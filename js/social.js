@@ -27,6 +27,11 @@ import { sfx } from "./audio.js";
 const LS_NAME = "tank.account.v1";
 const LS_DND = "tank.dnd.v1";
 const LS_NOREQ = "tank.noreq.v1";
+const LS_BLOCKS = "tank.blocks.v1";
+const LS_VOICE = "tank.voice.v1";
+
+let blocks = {}; // key → true, mirrored to the account
+try { blocks = JSON.parse(localStorage.getItem(LS_BLOCKS)) || {}; } catch (e) { blocks = {}; }
 
 let account = null; // { key, name, uid }
 let auth = null;    // { auth, signIn, signUp, signOut } — lazy Firebase Auth
@@ -46,6 +51,30 @@ export function getDnd() {
 
 export function getNoRequests() {
   return localStorage.getItem(LS_NOREQ) === "1";
+}
+
+// ---- blocking: hides a player's text + voice until unblocked ----
+export function isBlocked(key) {
+  return !!blocks[key];
+}
+export function setBlocked(key, on) {
+  if (on) blocks[key] = true; else delete blocks[key];
+  try { localStorage.setItem(LS_BLOCKS, JSON.stringify(blocks)); } catch (e) {}
+  if (account) {
+    ensureFirebase()
+      .then((f) => f.set(f.ref(f.db, `users/${account.key}/blocks`), blocks))
+      .catch(() => {});
+  }
+}
+export function getBlocks() { return { ...blocks }; }
+
+// ---- voice prefs saved to the account (mode + gains) ----
+export function saveVoicePrefs(prefs) {
+  if (account) {
+    ensureFirebase()
+      .then((f) => f.update(f.ref(f.db, `users/${account.key}/voice`), prefs))
+      .catch(() => {});
+  }
 }
 
 export function setNoRequests(on) {
@@ -125,6 +154,13 @@ async function adoptProfile(uid, wantName = null) {
   // Their cloud-saved preferences come back with them.
   if (typeof prof.dnd === "boolean") localStorage.setItem(LS_DND, prof.dnd ? "1" : "0");
   if (typeof prof.noRequests === "boolean") localStorage.setItem(LS_NOREQ, prof.noRequests ? "1" : "0");
+  if (prof.blocks && typeof prof.blocks === "object") {
+    blocks = prof.blocks;
+    try { localStorage.setItem(LS_BLOCKS, JSON.stringify(blocks)); } catch (e) {}
+  }
+  if (prof.voice) {
+    import("./chat.js").then((c) => c.applyCloudVoice?.(prof.voice)).catch(() => {});
+  }
   await goOnline();
   refreshLoginButton();
   return account;
@@ -161,6 +197,9 @@ export async function logout() {
   localStorage.removeItem(LS_NAME);
   localStorage.removeItem(LS_DND);
   localStorage.removeItem(LS_NOREQ);
+  localStorage.removeItem(LS_BLOCKS);
+  localStorage.removeItem(LS_VOICE);
+  blocks = {};
   sessionStorage.clear();
   refreshLoginButton();
   toast("Logged out — this device forgot you.");

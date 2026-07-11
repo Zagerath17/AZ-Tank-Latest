@@ -58,8 +58,6 @@ export const CANNON = {
   speed: 0.55,       // one slow-ish projectile
   r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 3500,
-  shots: 3,          // three shells per crate
-  gapMs: 3500,       // reload between shells
   shrapN: 30,        // irregular shrapnel burst on expiry / tank hit
   shrapSpeed: 1.1,
   shrapR: 0.6,
@@ -373,11 +371,17 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
 // Pickup icon on the arena floor.
 // Redesigned: a plated badge with a colored rim per weapon, a crisp
 // glyph, a springy pop-in when it lands, and a soft idle bob.
-const GEAR_RIM = {
+export const GEAR_RIM = {
   laser: "#e8452e",
   mg: "#e5a13c",
   rocket: "#e8452e",
   cannon: "#566072",
+};
+export const WEAPON_NAMES = {
+  laser: "Laser",
+  mg: "Machine Gun",
+  rocket: "Homing Rocket",
+  cannon: "Cannon",
 };
 
 function easeOutBack(t) {

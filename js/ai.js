@@ -402,11 +402,22 @@ export function botActions(t, world, dt, now) {
           // (canFire) still stop a dry mag.
           if (ai.burstLeft > 0) ai.burstLeft -= 1;
           else ai.burstLeft = (P.burst ?? 1) - 1;
-          // The basic barrel now has a hard 3.5 s reload — no point
-          // pulling a dead trigger. Specials keep their own pacing.
-          const floorCd = special
-            ? (special === "cannon" ? (world.cannonCd ?? 0) + 120 : 0)
-            : (world.basicCd ?? 0) + 120;
+          // The basic gun is a 3-round magazine: follow-ups can come
+          // 0.5 s apart while rounds remain; an empty mag means a
+          // 3.5 s wait for the next round. Never pull a dead trigger.
+          let floorCd = 0;
+          if (!special) {
+            const regen = world.magRegen ?? 3500;
+            const live = (t.basicMag ?? []).filter((ts) => now - ts < regen).sort((a, b) => a - b);
+            const left = (world.magSize ?? 3) - live.length - 1; // after THIS shot
+            if (left > 0) {
+              floorCd = (world.magGap ?? 500) + 60;
+            } else {
+              // Wait for the OLDEST spent round to regenerate.
+              const oldest = live[0] ?? now;
+              floorCd = Math.max(0, oldest + regen - now) + 140;
+            }
+          }
           ai.fireAt = ai.burstLeft > 0
             ? now + Math.max(160, P.cooldown * 1000 * 0.35, floorCd)
             : now + Math.max(P.cooldown * 1000 * (0.8 + Math.random() * 0.4), floorCd);

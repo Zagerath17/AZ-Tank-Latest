@@ -28,6 +28,8 @@ import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame } from "./game.js";
 import * as social from "./social.js";
 import { rankBadge, applyMatchResult } from "./ranked.js";
+import { showVersus, recordResult } from "./versus.js";
+import { startChat, stopChat, startVoice, stopVoice } from "./chat.js";
 import { AI_LEVELS } from "./ai.js";
 
 const FB_VERSION = "10.12.2";
@@ -163,6 +165,17 @@ export function lobbyInfo() {
   };
 }
 
+// Roster (humans, excluding me) for the per-player audio mixer.
+export function lobbyPeers() {
+  if (!current) return [];
+  const me = myId();
+  const entries = current.playersCache ?? [];
+  const resolved = current.resolvedCache ?? {};
+  return entries
+    .filter(([id, p]) => id !== me && !p.bot)
+    .map(([id, p]) => ({ id, name: p.name ?? "Player", color: resolved[id] ?? "slate", ukey: p.ukey ?? null }));
+}
+
 // Fire-and-forget write helper used by the in-game streams.
 function write(path, value) {
   if (!current || !fb) return;
@@ -261,6 +274,9 @@ function exitToOnline() {
 
 async function leaveLobby() {
   social.setStatus("online");
+  stopChat();
+  stopVoice();
+  if (current?.versusPoll) clearInterval(current.versusPoll);
   const c = current;
   stopGame(); // no-op if we weren't mid-match
   if (!c) { showScreen("screen-online"); return; }
@@ -384,7 +400,8 @@ function handleSnapshot(code, snap) {
   }
 
   if (lobby.state === "starting" && lobby.round?.seed != null) {
-    if (!current.inGame) beginOnlineGame(code, lobby);
+    if (!current.inGame && !current.versusShown) enterVersus(code, lobby);
+    else if (!current.inGame && current.versusShown) maybeBeginFromReady(code, lobby);
     else if (humans.length === 1 && humans[0][0] === me) {
       // Everyone else walked out mid-match. No point circling an
       // empty arena — take the survivor (now the host) back to the
@@ -441,7 +458,46 @@ function returnToLobbySolo(entries) {
     .catch(() => { /* the next snapshot retries via state check */ });
 }
 
+// Show the head-to-head card, mark myself ready, and wait for the
+// rest (or a 6 s grace) before the round actually begins.
+function enterVersus(code, lobby) {
+  current.versusShown = true;
+  const me = myId();
+  const entries = sortPlayers(lobby.players);
+  const resolved = resolveColors(entries);
+  const roster = entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
+    id, name: p.name ?? null, color: resolved[id], ukey: p.ukey ?? null, bot: p.bot ?? null,
+  }));
+  showVersus(roster, me, lobby.rankedMode ?? "4p");
+  showScreen("screen-versus");
+
+  // Mark ready; bots are implicitly ready.
+  ensureFirebase().then((f) => {
+    f.set(f.ref(f.db, `lobbies/${code}/ready/${me}`), true).catch(() => {});
+  });
+  current.versusAt = Date.now();
+  maybeBeginFromReady(code, lobby);
+}
+
+function maybeBeginFromReady(code, lobby) {
+  if (current.inGame) return;
+  const entries = sortPlayers(lobby.players);
+  const humans = entries.filter(([, p]) => !p.bot).map(([id]) => id);
+  const ready = lobby.ready ?? {};
+  const allReady = humans.every((id) => ready[id]);
+  const waited = Date.now() - (current.versusAt ?? Date.now());
+  // Everyone ready, or we've given the stragglers 6 seconds.
+  if (allReady || waited > 6000) {
+    beginOnlineGame(code, lobby);
+  } else if (!current.versusPoll) {
+    current.versusPoll = setInterval(() => {
+      if (current?.lastLobby) maybeBeginFromReady(current.code, current.lastLobby);
+    }, 500);
+  }
+}
+
 function beginOnlineGame(code, lobby) {
+  if (current.versusPoll) { clearInterval(current.versusPoll); current.versusPoll = 0; }
   const me = myId();
   const entries = sortPlayers(lobby.players);
   const resolved = resolveColors(entries);
@@ -470,6 +526,9 @@ function beginOnlineGame(code, lobby) {
   startOnlineGame({
     ranked: !!lobby.ranked,
     winTarget: lobby.ranked ? (rMode === "1v1" ? 3 : 5) : null,
+    casualPlayers: !lobby.ranked ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
+      id, key: p.ukey ?? null,
+    })) : null,
     onRankedEnd: (placements) => {
       // Everyone computes identically and writes only their OWN elo.
       if (!rankedInfo) return;
@@ -477,7 +536,10 @@ function beginOnlineGame(code, lobby) {
         ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000 }),
         score: pl.score,
       }));
-      applyMatchResult(rMode, merged).finally(() => {
+      Promise.allSettled([
+        applyMatchResult(rMode, merged),
+        recordResult(rMode, merged.map((m) => ({ id: m.id, key: m.key, score: m.score }))),
+      ]).finally(() => {
         leaveLobby();
         showScreen("screen-ranked");
       });
@@ -536,6 +598,7 @@ function renderLobby(code, lobby) {
   const isHost = lobby.hostId === me;
   current.isHost = isHost;
   current.lastLobby = lobby;
+  if (lobby.state === "waiting") { current.versusShown = false; } // ready for the next match card
   renderLobbyCode(code, lobby);
   social.setStatus("lobby", code);
 
@@ -584,6 +647,17 @@ function renderLobby(code, lobby) {
 
   // My color choice lost a conflict (or was never set)? Adopt the
   // resolved one so the database matches what everyone sees.
+  // Spin up casual text+voice chat once (not in ranked lobbies).
+  if (!lobby.ranked && !current.chatOn) {
+    current.chatOn = true;
+    startChat(code, resolved[me]);
+    const peerIds = entries.filter(([, p]) => !p.bot).map(([id]) => id);
+    startVoice(code, me, peerIds).catch(() => {});
+  }
+  // Keep the chat panel visible only for casual lobbies.
+  const chatWrap = document.getElementById("lobby-chat");
+  if (chatWrap) chatWrap.hidden = !!lobby.ranked;
+
   const mine = entries.find(([id]) => id === me);
   if (mine && !mine[1].bot && mine[1].color !== resolved[me]) {
     if (mine[1].color) toast(`That paint was taken — you're ${COLOR_NAMES[resolved[me]]} now.`);
@@ -628,7 +702,12 @@ function renderLobby(code, lobby) {
     return `
       <li class="lobby-row p-${color}">
         ${tankSVG(color)}
-        <span class="lobby-name">${typeof p.e1 === "number" ? rankBadge(p.e1, 16) : ""} ${p.name ?? COLOR_NAMES[color]}</span>
+        <span class="lobby-name">${(() => {
+          // 4-player ranked lobbies show the 4p rating; everywhere
+          // else (casual + 1v1) shows the 1v1 rating.
+          const e = lobby.ranked && lobby.rankedMode === "4p" ? p.e4 : p.e1;
+          return typeof e === "number" ? rankBadge(e, 16) : "";
+        })()} ${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");
