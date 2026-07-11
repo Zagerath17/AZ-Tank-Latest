@@ -670,16 +670,39 @@ body {
 }
 
 /* ---- in-lobby chat ---- */
+/* ---- lobby layout: two columns on wide screens ---- */
+.lobby-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+@media (min-aspect-ratio: 13/10) {
+  .lobby-grid { grid-template-columns: 1.1fr 1fr; align-items: start; }
+}
+.lobby-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.lobby-main .lobby-list { max-height: 30vh; overflow-y: auto; }
+
 .chat-box {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 10px;
-  border-top: 1px solid rgba(255,255,255,.12);
-  padding-top: 10px;
+  min-height: 0;
+  height: 100%;
+}
+@media (min-aspect-ratio: 13/10) {
+  .chat-box { border-left: 1px solid rgba(255,255,255,.12); padding-left: 12px; }
 }
 .chat-log {
-  height: 120px;
+  flex: 1;
+  min-height: 90px;
+  max-height: 42vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -766,7 +789,19 @@ body {
 }
 .vs-fighter .tank { width: 54px; height: 54px; }
 .vs-name { font-weight: 700; }
-.vs-record { font-size: .78rem; opacity: .8; }
+.vs-record {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-family: "Black Ops One", system-ui;
+  color: #ffffff;
+  font-size: 2rem;
+  line-height: 1;
+}
+.vs-record .vs-dash { opacity: .55; font-size: 1.5rem; }
+.vs-record .vs-w, .vs-record .vs-l { min-width: 1ch; text-align: center; }
 .vs-foes { }
 
 /* ---- social ---- */
@@ -862,6 +897,20 @@ body {
 }
 .notice.show { top: 12px; }
 .notice .notice-x { opacity: .6; }
+
+.arena-wrap { position: relative; }
+.weapon-hud {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  font-family: "Black Ops One", system-ui;
+  font-size: clamp(.85rem, 2.4vw, 1.25rem);
+  letter-spacing: .04em;
+  padding: 2px 6px;
+  text-shadow: 0 2px 4px rgba(0,0,0,.6);
+  pointer-events: none;
+  white-space: nowrap;
+}
 
 .shrink-timer {
   font-family: "Black Ops One", system-ui;
