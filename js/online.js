@@ -77,7 +77,26 @@ export async function ensureFirebase() {
     orderByChild: dbMod.orderByChild,
     limitToLast: dbMod.limitToLast,
     startAt: dbMod.startAt,
+    push: dbMod.push,
+    goOffline: dbMod.goOffline,
+    goOnline: dbMod.goOnline,
   };
+  // On page hide, close the realtime socket cleanly. This lets
+  // onDisconnect fire server-side WITHOUT the SDK's sync-XHR unload
+  // path (the one browsers warn about re: sendBeacon).
+  if (!fb._hideHooked) {
+    fb._hideHooked = true;
+    // Only on a genuine page teardown — not a tab switch, which would
+    // wrongly drop presence. pageshow restores the socket if the page
+    // is resurrected from the bfcache.
+    window.addEventListener("pagehide", (e) => {
+      if (!e.persisted) { try { fb.goOffline(fb.db); } catch (err) {} }
+    });
+    window.addEventListener("pageshow", (e) => {
+      if (e.persisted) { try { fb.goOnline(fb.db); } catch (err) {} }
+    });
+  }
+
   return fb;
 }
 
@@ -277,6 +296,7 @@ async function leaveLobby() {
   stopChat();
   stopVoice();
   if (current?.versusPoll) clearInterval(current.versusPoll);
+  if (current?.versusCountdown) clearInterval(current.versusCountdown);
   const c = current;
   stopGame(); // no-op if we weren't mid-match
   if (!c) { showScreen("screen-online"); return; }
@@ -470,6 +490,16 @@ function enterVersus(code, lobby) {
   }));
   showVersus(roster, me, lobby.rankedMode ?? "4p");
   showScreen("screen-versus");
+  // Live "starting in…" countdown on the versus card.
+  const waitEl = document.querySelector("#screen-versus .vs-wait");
+  if (waitEl) {
+    clearInterval(current.versusCountdown);
+    current.versusCountdown = setInterval(() => {
+      const left = Math.max(0, 3 - Math.floor((Date.now() - (current.versusAt ?? Date.now())) / 1000));
+      waitEl.textContent = left > 0 ? `Starting in ${left}…` : "Starting…";
+      if (left <= 0 && current.inGame) clearInterval(current.versusCountdown);
+    }, 200);
+  }
 
   // Mark ready; bots are implicitly ready.
   ensureFirebase().then((f) => {
@@ -486,13 +516,16 @@ function maybeBeginFromReady(code, lobby) {
   const ready = lobby.ready ?? {};
   const allReady = humans.every((id) => ready[id]);
   const waited = Date.now() - (current.versusAt ?? Date.now());
-  // Everyone ready, or we've given the stragglers 6 seconds.
-  if (allReady || waited > 6000) {
+  // The head-to-head card is shown for a guaranteed MINIMUM of 3 s so
+  // players actually see who they're up against — then it begins once
+  // everyone's ready (or after a 6 s grace for stragglers).
+  const MIN_SHOW = 3000;
+  if (waited >= MIN_SHOW && (allReady || waited > 6000)) {
     beginOnlineGame(code, lobby);
   } else if (!current.versusPoll) {
     current.versusPoll = setInterval(() => {
       if (current?.lastLobby) maybeBeginFromReady(current.code, current.lastLobby);
-    }, 500);
+    }, 250);
   }
 }
 

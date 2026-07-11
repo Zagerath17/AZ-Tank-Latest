@@ -928,6 +928,93 @@ function flashActive(now) {
     && now >= S.shrinkWarnAt && now < S.shrinkCutAt;
 }
 
+// Ensure every living tank can reach every other within the safe box.
+// If the shrink walled someone off, knock down the fewest walls needed
+// to rejoin the components. Cells use (c,r); a wall between neighbors
+// is H (vertical move) or V (horizontal move).
+function reconnectSurvivors(c0, r0, c1, r1) {
+  const W = c1 - c0 + 1;
+  const Hh = r1 - r0 + 1;
+  if (W <= 0 || Hh <= 0) return;
+  const idx = (c, r) => (r - r0) * W + (c - c0);
+
+  const open = (c, r, dir) => {
+    // Is the passage from (c,r) toward dir open (no wall)?
+    if (dir === "N") return !S.maze.H[r][c];
+    if (dir === "S") return !S.maze.H[r + 1][c];
+    if (dir === "W") return !S.maze.V[r][c];
+    if (dir === "E") return !S.maze.V[r][c + 1];
+    return false;
+  };
+
+  // Label connected components across the safe box.
+  const comp = new Array(W * Hh).fill(-1);
+  let nComp = 0;
+  for (let sr = r0; sr <= r1; sr++) {
+    for (let sc = c0; sc <= c1; sc++) {
+      if (comp[idx(sc, sr)] !== -1) continue;
+      const id = nComp++;
+      const stack = [[sc, sr]];
+      comp[idx(sc, sr)] = id;
+      while (stack.length) {
+        const [c, r] = stack.pop();
+        const steps = [
+          ["N", c, r - 1], ["S", c, r + 1], ["W", c - 1, r], ["E", c + 1, r],
+        ];
+        for (const [dir, nc, nr] of steps) {
+          if (nc < c0 || nc > c1 || nr < r0 || nr > r1) continue;
+          if (comp[idx(nc, nr)] !== -1) continue;
+          if (open(c, r, dir)) { comp[idx(nc, nr)] = id; stack.push([nc, nr]); }
+        }
+      }
+    }
+  }
+  if (nComp <= 1) return; // already fully connected
+
+  // Which components do live tanks occupy?
+  const tankComps = new Set();
+  for (const t of S.tanks) {
+    if (t.dead || t.gone) continue;
+    const c = Math.min(c1, Math.max(c0, Math.floor(t.x / CELL)));
+    const r = Math.min(r1, Math.max(r0, Math.floor(t.y / CELL)));
+    tankComps.add(comp[idx(c, r)]);
+  }
+  if (tankComps.size <= 1) return; // survivors already share a region
+
+  // Merge components until all tank-bearing ones are joined: repeatedly
+  // find any wall on the boundary between two different components and
+  // remove it (union the two). Simple + guarantees connectivity.
+  const parent = Array.from({ length: nComp }, (_, i) => i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const union = (a, b) => { parent[find(a)] = find(b); };
+
+  const roots = () => new Set([...tankComps].map(find));
+  let guard = 0;
+  while (roots().size > 1 && guard++ < W * Hh) {
+    let knocked = false;
+    for (let r = r0; r <= r1 && !knocked; r++) {
+      for (let c = c0; c <= c1 && !knocked; c++) {
+        const a = comp[idx(c, r)];
+        // try East and South neighbors
+        for (const [dir, nc, nr, wall] of [
+          ["E", c + 1, r, () => { S.maze.V[r][c + 1] = false; }],
+          ["S", c, r + 1, () => { S.maze.H[r + 1][c] = false; }],
+        ]) {
+          if (nc > c1 || nr > r1) continue;
+          const bcomp = comp[idx(nc, nr)];
+          if (find(a) !== find(bcomp)) {
+            wall();            // remove the dividing wall
+            union(a, bcomp);
+            knocked = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!knocked) break; // nothing left to merge (shouldn't happen)
+  }
+}
+
 function stepShrink(now) {
   if (!S.ranked || S.shrinkCutAt === Infinity) return;
 
@@ -961,9 +1048,22 @@ function stepShrink(now) {
 
   S.shrinkLevel += 1;
   const { c0, r0, c1, r1 } = safeBox();
+
+  // Strip EVERY wall outside the new safe box so the dead ring renders
+  // as clean white canvas — then seal a fresh solid border around the
+  // surviving arena.
+  for (let r = 0; r <= S.maze.rows; r++) {
+    for (let c = 0; c < S.maze.cols; c++) {
+      if (r < r0 || r > r1 + 1 || c < c0 || c > c1) S.maze.H[r][c] = false;
+    }
+  }
+  for (let r = 0; r < S.maze.rows; r++) {
+    for (let c = 0; c <= S.maze.cols; c++) {
+      if (r < r0 || r > r1 || c < c0 || c > c1 + 1) S.maze.V[r][c] = false;
+    }
+  }
   for (let r = r0; r <= r1; r++) { S.maze.V[r][c0] = true; S.maze.V[r][c1 + 1] = true; }
   for (let c = c0; c <= c1; c++) { S.maze.H[r0][c] = true; S.maze.H[r1 + 1][c] = true; }
-  S.rects = wallRects(S.maze, CELL, WALL_T);
 
   const inSafe = (x, y) =>
     x > c0 * CELL && x < (c1 + 1) * CELL && y > r0 * CELL && y < (r1 + 1) * CELL;
@@ -971,6 +1071,15 @@ function stepShrink(now) {
     if (t.dead || t.gone) continue;
     if (!inSafe(t.x, t.y)) { killTank(t); continue; } // caught in the ring
   }
+
+  // The shrink can wall survivors off from each other. Guarantee the
+  // arena stays connected: BFS the safe box, and if any live tank sits
+  // in a region cut off from the first, punch through the thinnest
+  // wall separating them until everyone shares one component.
+  reconnectSurvivors(c0, r0, c1, r1);
+
+  S.rects = wallRects(S.maze, CELL, WALL_T);
+
   S.bullets = S.bullets.filter((b) => inSafe(b.x, b.y));
   S.rockets = S.rockets.filter((k) => inSafe(k.x, k.y));
   S.cannons = S.cannons.filter((k) => inSafe(k.x, k.y));
@@ -1520,15 +1629,9 @@ function draw(now) {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, S.worldW, S.worldH);
 
-  // Ranked shrink: the dead ring is a void behind the fresh border.
-  if (S.ranked && S.shrinkLevel > 0) {
-    const L = S.shrinkLevel * CELL;
-    ctx.fillStyle = "#181c25";
-    ctx.fillRect(0, 0, S.worldW, L);
-    ctx.fillRect(0, S.worldH - L, S.worldW, L);
-    ctx.fillRect(0, 0, L, S.worldH);
-    ctx.fillRect(S.worldW - L, 0, L, S.worldH);
-  }
+  // Ranked shrink: the dead ring is simply gone — plain white canvas
+  // where it used to be. Nothing to draw; the walls there were already
+  // stripped from S.rects when the ring dropped.
 
   ctx.fillStyle = "#808896";
   for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
@@ -1746,14 +1849,15 @@ function draw(now) {
   }
 }
 
-// Giant blue 3-2-1 with a black border, fading in and out per second.
+// Giant blue 3-2-1 with a black border. No motion — it simply fades
+// in and back out over each second.
 function drawCountdown(now) {
   const remain = S.freezeUntil - now;
   const n = Math.ceil(remain / 1000);
   if (n < 1) return;
-  const frac = 1 - ((remain / 1000) % 1 || 1); // 0→1 inside this second
-  const alpha = Math.sin(Math.PI * Math.min(1, frac * 1.15)); // fade in, fade out
-  const size = S.worldH * (0.34 + 0.06 * frac); // gentle grow
+  const intoSec = (remain / 1000) % 1 || 1; // 1→0 across the second
+  const alpha = Math.sin(Math.PI * intoSec); // 0 at the edges, 1 mid-second
+  const size = S.worldH * 0.36; // fixed — no grow
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, alpha);

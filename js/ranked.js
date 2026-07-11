@@ -31,7 +31,7 @@ export const DEFAULT_ELO = 500;
 
 export const MODES = {
   "1v1": { label: "1v1", eloField: "elo1", queuePath: "queue/1v1", size: 2, winTarget: 3 },
-  "4p": { label: "4-Player", eloField: "elo4", queuePath: "queue/4p", size: 4, winTarget: 5 },
+  "4p": { label: "FFA", eloField: "elo4", queuePath: "queue/4p", size: 4, winTarget: 5 },
 };
 
 const TIERS = [
@@ -266,36 +266,32 @@ async function renderLeaderboard() {
   const M = MODES[activeMode];
   try {
     const f = await ensureFirebase();
-    const qs = await f.get(f.query(f.ref(f.db, "users"), f.orderByChild(M.eloField), f.limitToLast(50)));
-    const rows = [];
-    qs.forEach((c) => {
+    // Index-free: pull every profile once and rank on the client. This
+    // works whether or not the .indexOn rule is set, so the board can
+    // never throw a false "connection" error over a missing index.
+    const snap = await f.get(f.ref(f.db, "users"));
+    const all = [];
+    snap.forEach((c) => {
       const v = c.val();
-      if (typeof v?.[M.eloField] === "number") rows.push({ key: c.key, name: v.name ?? c.key, elo: v[M.eloField] });
+      if (typeof v?.[M.eloField] === "number") {
+        all.push({ key: c.key, name: v.name ?? c.key, elo: v[M.eloField] });
+      }
     });
-    rows.sort((a, b) => b.elo - a.elo);
+    all.sort((a, b) => b.elo - a.elo);
+    const rows = all.slice(0, 50);
 
     let myElo = null;
     let myPos = null;
     if (acc) {
-      myElo = (await fetchMyElo(activeMode)) ?? null;
-      if (myElo != null) {
-        const inTop = rows.findIndex((r) => r.key === acc.key);
-        if (inTop >= 0) myPos = inTop + 1;
-        else {
-          const above = await f.get(f.query(f.ref(f.db, "users"), f.orderByChild(M.eloField), f.startAt(myElo + 0.001)));
-          let n = 0;
-          above.forEach(() => { n += 1; });
-          myPos = n + 1;
-        }
-      }
+      myElo = (await fetchMyElo(activeMode)) ?? DEFAULT_ELO;
+      const idx = all.findIndex((r) => r.key === acc.key);
+      myPos = idx >= 0 ? idx + 1 : null;
     }
 
     const badge = document.getElementById("ranked-mybadge");
     if (badge) {
       badge.innerHTML = acc
-        ? myElo != null
-          ? `${rankBadge(myElo, 34)} <b>${rankOf(myElo).name}</b> · ${myElo} Elo (${M.label})${myPos ? ` · #${myPos} worldwide` : ""}`
-          : `Play a ranked ${M.label} match to get rated.`
+        ? `${rankBadge(myElo, 34)} <b>${rankOf(myElo).name}</b> · ${myElo} Elo (${M.label})${myPos ? ` · #${myPos} worldwide` : " · unranked"}`
         : "Log in from the title screen to play ranked.";
     }
 
@@ -319,12 +315,14 @@ async function renderLeaderboard() {
       }
     }
   } catch (e) {
-    host.innerHTML = `<li class="hint">Couldn't load the ${M.label} leaderboard — check your connection (and the users .indexOn rule).</li>`;
+    host.innerHTML = `<li class="hint">Couldn't reach the leaderboard right now. Pull to refresh in a moment.</li>`;
     const badge = document.getElementById("ranked-mybadge");
-    if (badge) {
-      badge.textContent = getAccount()
-        ? "Rating unavailable — check your connection."
-        : "Log in from the title screen to play ranked.";
+    if (badge && acc) {
+      // We still know our own rating locally even if the board failed.
+      const solo = (await fetchMyElo(activeMode).catch(() => DEFAULT_ELO)) ?? DEFAULT_ELO;
+      badge.innerHTML = `${rankBadge(solo, 34)} <b>${rankOf(solo).name}</b> · ${solo} Elo (${M.label})`;
+    } else if (badge) {
+      badge.textContent = "Log in from the title screen to play ranked.";
     }
   }
 }
