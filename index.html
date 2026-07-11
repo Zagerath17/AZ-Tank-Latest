@@ -78,9 +78,13 @@
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>Ranked</h2>
       </header>
+      <div class="settings-tabs">
+        <button class="btn tab-btn is-on" id="ranked-tab-1v1" type="button">1v1</button>
+        <button class="btn tab-btn" id="ranked-tab-4p" type="button">4-Player</button>
+      </div>
       <p class="rank-mybadge" id="ranked-mybadge">Loading…</p>
       <button class="btn btn-big btn-go" id="ranked-queue" type="button">FIND MATCH</button>
-      <p class="hint" id="ranked-status">4-player matches. First to 5 round wins takes it.</p>
+      <p class="hint" id="ranked-status">Pairs within ±100 Elo. Everyone starts at Copper 500.</p>
       <h3 class="board-title">Top 50 worldwide</h3>
       <ol class="lobby-list" id="ranked-board"><li class="hint">Loading…</li></ol>
       <li class="board-row board-me" id="ranked-me" hidden></li>
