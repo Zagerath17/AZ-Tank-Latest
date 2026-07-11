@@ -234,6 +234,52 @@ export const sfx = {
     } catch (e) {}
   },
 
+  // Sniper: a sharp, high crack with a quick tail — a rifle report.
+  snipe() {
+    if (!ready() || limited("snipe", 80)) return;
+    try {
+      blip("square", 3200, 500, 0.05, 0.16);
+      blip("sawtooth", 900, 120, 0.12, 0.12);
+      blip("sine", 140, 60, 0.18, 0.14);
+    } catch (e) {}
+  },
+
+  // Phase activate: an airy, ghostly shimmer.
+  phase() {
+    if (!ready() || limited("phase", 150)) return;
+    try {
+      blip("sine", 300, 900, 0.3, 0.1);
+      blip("triangle", 1200, 400, 0.25, 0.06, 0.03);
+    } catch (e) {}
+  },
+
+  // Wall placed: a solid brick thud.
+  wallup() {
+    if (!ready() || limited("wallup", 100)) return;
+    try {
+      blip("square", 180, 70, 0.12, 0.16);
+      blip("triangle", 90, 50, 0.18, 0.12);
+    } catch (e) {}
+  },
+
+  // Wall destroyed: a short crumble.
+  wallbreak() {
+    if (!ready() || limited("wallbreak", 100)) return;
+    try {
+      blip("sawtooth", 300, 60, 0.2, 0.14);
+      blip("square", 140, 40, 0.14, 0.1, 0.04);
+    } catch (e) {}
+  },
+
+  // Speed boost activate: a bright rising sweep.
+  boost() {
+    if (!ready() || limited("boost", 150)) return;
+    try {
+      blip("triangle", 400, 1600, 0.22, 0.14);
+      blip("square", 800, 2000, 0.14, 0.08, 0.04);
+    } catch (e) {}
+  },
+
   // Machine-gun wind-up: a rising whir matching the 0.5 s spin-up.
   windup() {
     if (!ready() || limited("windup", 300)) return;
@@ -328,7 +374,10 @@ export const sfx = {
 
 // A quiet two-oscillator rumble through a lowpass. Idles softly the
 // whole match; revs (louder, higher) while a local tank is driving.
-export function setEngine(active, moving) {
+// active: match is live. localMoving: a tank YOU drive is moving.
+// enemyMoving: some other tank is moving (heard at 50% weight). The
+// whole engine bed is then 20% louder than the old baseline.
+export function setEngine(active, localMoving, enemyMoving) {
   if (!ready()) return;
   try {
     if (!engine) {
@@ -353,8 +402,16 @@ export function setEngine(active, moving) {
       engine = { gain: g, o1, o2 };
     }
     const t = ctx.currentTime;
-    const target = !active ? 0 : moving ? 0.05 : 0.018;
-    const freq = moving ? 72 : 52;
+    const LOUD = 1.2; // everything 20% louder than the old levels
+    // Contributions: your engine full, enemy engines at half weight.
+    // idle bed is always present while active.
+    const idle = 0.018;
+    const localRev = localMoving ? 0.05 : 0;
+    const enemyRev = enemyMoving ? 0.05 * 0.5 : 0;
+    const anyMoving = localMoving || enemyMoving;
+    // Take the loudest driver for pitch, sum the beds for volume.
+    const target = !active ? 0 : Math.max(idle, localRev + enemyRev) * LOUD;
+    const freq = anyMoving ? 72 : 52;
     engine.gain.gain.setTargetAtTime(target, t, 0.12);
     engine.o1.frequency.setTargetAtTime(freq, t, 0.18);
     engine.o2.frequency.setTargetAtTime(freq / 2, t, 0.18);

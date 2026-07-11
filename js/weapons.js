@@ -11,7 +11,7 @@
 
 import { segmentHitsAnyRect } from "./maze.js";
 
-export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon"];
+export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon", "sniper", "boost", "phase", "wall"];
 
 // Barrel geometry in multiples of TANK_R. The barrel hitbox is the
 // rectangle from the hull center to len·R forward, hw·R half-wide —
@@ -19,9 +19,13 @@ export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon"];
 export const BARRELS = {
   normal: { len: 1.5,  hw: 0.31 },
   laser:  { len: 1.85, hw: 0.15 },
+  sniper: { len: 2.05, hw: 0.19 },
   mg:     { len: 1.45, hw: 0.36 },
   rocket: { len: 1.3,  hw: 0.44 },
   cannon: { len: 1.2,  hw: 0.52 },
+  boost:  { len: 1.5,  hw: 0.31 },
+  phase:  { len: 1.5,  hw: 0.31 },
+  wall:   { len: 1.5,  hw: 0.31 },
 };
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
@@ -31,6 +35,49 @@ export const LASER = {
   width: 0.9,        // beam half-thickness, × bullet radius
   beamSpeed: 9500,   // px/s — you can SEE it travel, but barely
   flashMs: 320,
+};
+
+export const SNIPER = {
+  shots: 2,          // two rounds total
+  rangeCells: 5,     // the bullet dies after this many cells
+  previewCells: 3,   // aim preview reaches this far (no bounce)
+  speed: 4.2,        // × normal bullet — a fast round
+  r: 0.42,           // slim slug, × bullet radius
+};
+
+export const BOOST = {
+  mult: 1.2,         // +20% move speed
+  durationMs: 6000,  // for six seconds
+};
+
+export const PHASE = {
+  durationMs: 2000,  // two seconds of intangibility
+  opacity: 0.5,      // half-transparent while phasing
+};
+
+// A temporary brick wall the player drops. It BLOCKS movement and
+// eats projectiles (they don't bounce off it — they're consumed). It
+// takes different hit-values per weapon, and expires after 10 s.
+export const WALL = {
+  lifeMs: 10000,
+  lengthCells: 0.5,  // half a cell long
+  thickCells: 0.16,  // slab thickness
+  // "health" is abstract; each weapon subtracts a share sized so the
+  // stated shot-counts destroy it. HP = 12 (LCM-friendly):
+  //   basic 3 shots → 4 each; fractal 4 → 3; MG 7 → ~1.72;
+  //   laser/cannon/rocket/sniper 1 → 12 (one-shot).
+  // HP = 84 (LCM of 3,4,7) so every shot-count divides evenly with
+  // integer damage — no floating-point rounding surprises.
+  hp: 84,
+  dmg: {
+    basic: 28,     // 84/3  → 3 basic shots
+    shrapnel: 21,  // 84/4  → 4 fractals
+    mg: 12,        // 84/7  → 7 MG rounds
+    laser: 84,     // one-shot
+    cannon: 84,
+    rocket: 84,
+    sniper: 84,
+  },
 };
 
 export const MG = {
@@ -329,6 +376,16 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
       ctx.fill();
       break;
 
+    case "sniper":
+      // Long, slim barrel with a teal muzzle bead.
+      ctx.fillStyle = cMain;
+      rrect(0, -W, L, W * 2, W * 0.55);
+      ctx.fillStyle = "#33c2b0";
+      ctx.beginPath();
+      ctx.arc(L - R * 0.05, 0, R * 0.11, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+
     case "mg": {
       // Gatling: housing + three thin tubes filling the hitbox.
       ctx.fillStyle = cDark;
@@ -371,17 +428,23 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
 // Pickup icon on the arena floor.
 // Redesigned: a plated badge with a colored rim per weapon, a crisp
 // glyph, a springy pop-in when it lands, and a soft idle bob.
+// Each weapon gets its own distinct accent color — used for the crate
+// rim AND the equipped-weapon label, so they always correspond.
 export const GEAR_RIM = {
-  laser: "#e8452e",
-  mg: "#e5a13c",
-  rocket: "#e8452e",
-  cannon: "#566072",
+  laser: "#e8452e",   // red
+  mg: "#e5a13c",      // amber
+  rocket: "#c65cff",  // violet
+  cannon: "#566072",  // steel
+  sniper: "#33c2b0",  // teal
+  boost: "#ffd23f",   // yellow
 };
 export const WEAPON_NAMES = {
   laser: "Laser",
   mg: "Machine Gun",
   rocket: "Homing Rocket",
   cannon: "Cannon",
+  sniper: "Sniper",
+  boost: "Speed Boost",
 };
 
 function easeOutBack(t) {

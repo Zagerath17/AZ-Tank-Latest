@@ -84,6 +84,11 @@ export async function ensureFirebase() {
   // On page hide, close the realtime socket cleanly. This lets
   // onDisconnect fire server-side WITHOUT the SDK's sync-XHR unload
   // path (the one browsers warn about re: sendBeacon).
+  if (!fb._clockHooked) {
+    fb._clockHooked = true;
+    trackServerClock(fb);
+  }
+
   if (!fb._hideHooked) {
     fb._hideHooked = true;
     // Only on a genuine page teardown — not a tab switch, which would
@@ -98,6 +103,23 @@ export async function ensureFirebase() {
   }
 
   return fb;
+}
+
+// Firebase publishes the estimated offset between this device's clock
+// and the server's at /.info/serverTimeOffset. We track it so every
+// client can agree on "now" within a few ms — the backbone of a clean
+// synchronized match start.
+let serverClockOffset = 0;
+function trackServerClock(f) {
+  try {
+    f.onValue(f.ref(f.db, "/.info/serverTimeOffset"), (snap) => {
+      const v = snap.val();
+      if (typeof v === "number") serverClockOffset = v;
+    });
+  } catch (e) { /* offset stays 0 — falls back to local time */ }
+}
+function serverNow() {
+  return Date.now() + serverClockOffset;
 }
 
 // Per-tab id, so two tabs count as two players (handy for testing).
@@ -324,7 +346,10 @@ async function startMatch() {
   const f = await ensureFirebase();
   await f.update(current.lobbyRef, {
     state: "starting",
-    round: { n: 1, seed: Math.floor(Math.random() * 2147483647) },
+    // startAt is a SERVER timestamp: every client shows the versus
+    // card for 3 s measured from this shared clock, then begins — no
+    // per-device drift, so everyone drops into the round together.
+    round: { n: 1, seed: Math.floor(Math.random() * 2147483647), startAt: f.serverTimestamp() },
   });
 }
 
@@ -420,15 +445,17 @@ function handleSnapshot(code, snap) {
   }
 
   if (lobby.state === "starting" && lobby.round?.seed != null) {
-    if (!current.inGame && !current.versusShown) enterVersus(code, lobby);
-    else if (!current.inGame && current.versusShown) maybeBeginFromReady(code, lobby);
-    else if (humans.length === 1 && humans[0][0] === me) {
-      // Everyone else walked out mid-match. No point circling an
-      // empty arena — take the survivor (now the host) back to the
-      // lobby, bots and all, ready to restart.
-      returnToLobbySolo(entries);
-    } else {
-      onlineLobbyUpdate(lobby);
+    current.lastLobby = lobby; // keep fresh so the versus timer sees updates
+    if (!current.inGame && !current.versusShown) {
+      enterVersus(code, lobby);
+    } else if (!current.inGame && current.versusShown) {
+      maybeBeginFromReady(code, lobby);
+    } else if (current.inGame) {
+      if (humans.length === 1 && humans[0][0] === me) {
+        returnToLobbySolo(entries);
+      } else {
+        onlineLobbyUpdate(lobby);
+      }
     }
     return;
   }
@@ -490,47 +517,50 @@ function enterVersus(code, lobby) {
   }));
   showVersus(roster, me, lobby.rankedMode ?? "4p");
   showScreen("screen-versus");
-  // Live "starting in…" countdown on the versus card.
-  const waitEl = document.querySelector("#screen-versus .vs-wait");
-  if (waitEl) {
-    clearInterval(current.versusCountdown);
-    current.versusCountdown = setInterval(() => {
-      const left = Math.max(0, 3 - Math.floor((Date.now() - (current.versusAt ?? Date.now())) / 1000));
-      waitEl.textContent = left > 0 ? `Starting in ${left}…` : "Starting…";
-      if (left <= 0 && current.inGame) clearInterval(current.versusCountdown);
-    }, 200);
-  }
 
-  // Mark ready; bots are implicitly ready.
+  // Announce readiness (informational — the shared clock, not this
+  // flag, is what actually starts the round).
   ensureFirebase().then((f) => {
     f.set(f.ref(f.db, `lobbies/${code}/ready/${me}`), true).catch(() => {});
   });
-  current.versusAt = Date.now();
+
+  // The countdown is driven by the SHARED server timestamp so every
+  // client's 3-2-1 lines up. A steady rAF-style interval updates text.
+  const waitEl = document.querySelector("#screen-versus .vs-wait");
+  clearInterval(current.versusCountdown);
+  current.versusCountdown = setInterval(() => {
+    const startAt = current.lastLobby?.round?.startAt;
+    const left = startAt ? Math.max(0, Math.ceil((startAt + 3000 - serverNow()) / 1000)) : 3;
+    if (waitEl) waitEl.textContent = left > 0 ? `Starting in ${left}…` : "Starting…";
+  }, 150);
+
   maybeBeginFromReady(code, lobby);
 }
 
+// Begin once the shared 3 s window has elapsed. Because it's anchored
+// to the server clock (not each device's local time), all clients fire
+// within a frame or two of each other — no straggler stuck on the card.
 function maybeBeginFromReady(code, lobby) {
   if (current.inGame) return;
-  const entries = sortPlayers(lobby.players);
-  const humans = entries.filter(([, p]) => !p.bot).map(([id]) => id);
-  const ready = lobby.ready ?? {};
-  const allReady = humans.every((id) => ready[id]);
-  const waited = Date.now() - (current.versusAt ?? Date.now());
-  // The head-to-head card is shown for a guaranteed MINIMUM of 3 s so
-  // players actually see who they're up against — then it begins once
-  // everyone's ready (or after a 6 s grace for stragglers).
-  const MIN_SHOW = 3000;
-  if (waited >= MIN_SHOW && (allReady || waited > 6000)) {
+  const startAt = lobby.round?.startAt ?? current.lastLobby?.round?.startAt;
+  const elapsed = startAt ? serverNow() - startAt : 0;
+  if (elapsed >= 3000) {
     beginOnlineGame(code, lobby);
   } else if (!current.versusPoll) {
-    current.versusPoll = setInterval(() => {
-      if (current?.lastLobby) maybeBeginFromReady(current.code, current.lastLobby);
-    }, 250);
+    // Poll on a timer AND off snapshots; whichever fires first wins.
+    const delay = Math.max(60, 3000 - elapsed);
+    current.versusPoll = setTimeout(() => {
+      current.versusPoll = 0;
+      if (current?.lastLobby && !current.inGame) {
+        maybeBeginFromReady(current.code, current.lastLobby);
+      }
+    }, Math.min(delay, 400));
   }
 }
 
 function beginOnlineGame(code, lobby) {
-  if (current.versusPoll) { clearInterval(current.versusPoll); current.versusPoll = 0; }
+  if (current.versusPoll) { clearTimeout(current.versusPoll); current.versusPoll = 0; }
+  if (current.versusCountdown) { clearInterval(current.versusCountdown); current.versusCountdown = 0; }
   const me = myId();
   const entries = sortPlayers(lobby.players);
   const resolved = resolveColors(entries);
@@ -595,6 +625,7 @@ function beginOnlineGame(code, lobby) {
     },
     sendDead: (id) => write(`players/${id}/dead`, true),
     sendGear: (key, gear) => write(`gear/${key}`, gear),
+    sendGearRemove: (key) => write(`gear/${key}`, null),
     sendPickup: (gearKey, pid, type) => {
       if (!current || !fb) return;
       // One atomic update: the pickup vanishes and the gun appears.

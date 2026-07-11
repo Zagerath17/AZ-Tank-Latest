@@ -119,6 +119,7 @@ export function botActions(t, world, dt, now) {
     pushUntil: 0, burstLeft: 0,
     dodgePt: null, dodgeHold: 0, gearKey: null,
     laserWaryOf: null, laserWaryUntil: 0,
+    abilityAt: null, abilityWant: false,
     prevLos: false,
     vel: {},
   });
@@ -136,6 +137,9 @@ export function botActions(t, world, dt, now) {
   }
   const ammo = (world.maxBullets ?? 5) - liveShots;
   const special = t.weapon ?? null; // a picked-up weapon fires outside the cap
+
+  // Speed boost isn't aimed — pop it the moment we have it (a tiny
+  // delay so it doesn't fire the same frame it's grabbed).
   const canFire = ammo > 0 || !!special;
   const sureShotsOnly = !special && ammo <= P.reserve;
 
@@ -237,6 +241,19 @@ export function botActions(t, world, dt, now) {
         }
       }
     }
+    // Sniper aim lines are just as deadly — and go through walls — so
+    // step off them exactly the same way.
+    if (!hazardSteer && world.snipes && world.snipes.length) {
+      for (const L of world.snipes) {
+        if (L.by === t.id) continue;
+        const near = nearestOnPolyline(t.x, t.y, L.pts);
+        if (near && near.d < (world.tankR ?? 22) + world.cell * 0.22) {
+          hazardSteer = true;
+          sidestepLine(t, ai, L, world, rBody, acts, now);
+          break;
+        }
+      }
+    }
   }
 
   /* ---- 3. target selection + velocity tracking ---- */
@@ -260,6 +277,57 @@ export function botActions(t, world, dt, now) {
   if (los && !ai.prevLos) ai.fireAt = Math.max(ai.fireAt, now + P.react * 1000);
   if (!los) { ai.burstLeft = 0; ai.pushUntil = 0; } // the look is gone
   ai.prevLos = los;
+
+  /* ---- 3b. tactical abilities: used with PURPOSE, never on grab ---- */
+  // These fire `acts.shoot` only when the situation calls for it, then
+  // return early (activating consumes the ability). A small reaction
+  // delay keeps it from looking robotic.
+  if (t.weapon === "boost" || t.weapon === "phase" || t.weapon === "wall") {
+    const threatSoon = ai.threat && ai.threat.impactAt && (ai.threat.impactAt - now) < 700;
+    if (ai.abilityAt == null) {
+      // Decide WHEN (and whether) to use it, once per pickup.
+      ai.abilityAt = 0;
+      ai.abilityWant = false;
+    }
+
+    let want = false;
+    if (t.weapon === "boost") {
+      // Practical sprint: when there's distance to close on a target
+      // in sight, or when actively fleeing an incoming threat. Not
+      // when idling next to the enemy.
+      const chasing = los && dist > cell * 2.2;
+      const fleeing = !!ai.threat && dist < cell * 2.0;
+      want = chasing || fleeing;
+    } else if (t.weapon === "phase") {
+      // Phase to escape a shot you can't dodge, or to slip through a
+      // wall toward a target you otherwise can't reach.
+      const trapped = threatSoon;
+      const wallBetween = los === false && dist < P.range * cell &&
+        segmentHitsAnyRect(t.x, t.y, target.x, target.y, world.rects);
+      want = trapped || (wallBetween && dist < cell * 3.5);
+    } else if (t.weapon === "wall") {
+      // Drop a blocker when an enemy has a clear look at you at mid
+      // range (screen the incoming fire), or to wall off a chaser.
+      want = los && dist > cell * 1.4 && dist < cell * 5;
+    }
+
+    if (want && !ai.abilityWant) {
+      // Commit with a short human reaction delay (250–600 ms).
+      ai.abilityWant = true;
+      ai.abilityAt = now + 250 + Math.random() * 350;
+    }
+    if (!want) ai.abilityWant = false; // situation passed — reset
+
+    if (ai.abilityWant && now >= ai.abilityAt) {
+      ai.abilityWant = false;
+      ai.abilityAt = null;
+      acts.shoot = true;
+      return finish(ai, acts);
+    }
+  } else {
+    ai.abilityAt = null;
+    ai.abilityWant = false;
+  }
 
   /* ---- 4. shooting ---- */
   if (now > ai.wobbleAt) {
@@ -386,7 +454,9 @@ export function botActions(t, world, dt, now) {
       if (special) {
         // Pickup weapons fire on a clean look — no ricochet trace
         // needed. Exception: the cannon's shrapnel comes back through
-        // walls, so it wants room.
+        // walls, so it wants room. The sniper shoots through walls and
+        // only hits tanks, so a clean look isn't even required — but
+        // aligned+inFireRange here already implies a decent angle.
         if (special !== "cannon" || dist > cell * 1.3) {
           ai.fireAt = now + 650;
           acts.shoot = true;

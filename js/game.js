@@ -18,7 +18,7 @@ import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
-  WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON,
+  WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
   laserPath, rocketSeekStep, stepShrap, bounceCircle, drawBarrel, drawGear,
   GEAR_RIM, WEAPON_NAMES,
 } from "./weapons.js";
@@ -80,7 +80,7 @@ const NO_MUL = { speed: 1, turn: 1 };
 /* ---------- module state ---------- */
 
 let S = null;
-let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl;
+let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, weaponHudEl;
 const held = new Set();
 const touchHeld = new Set();
 
@@ -93,6 +93,7 @@ export function initGame() {
   ctx = canvas.getContext("2d");
   exitBtn = document.getElementById("game-exit");
   shrinkEl = document.getElementById("game-shrink");
+  weaponHudEl = document.getElementById("weapon-hud");
   touchPad = document.getElementById("touch-pad");
   scoreEl = document.getElementById("game-score");
 
@@ -149,6 +150,7 @@ function opts_toState(o) {
     sendDead: o.sendDead,
     sendNextRound: o.sendNextRound,
     sendGear: o.sendGear,
+    sendGearRemove: o.sendGearRemove,
     sendPickup: o.sendPickup,
     sendGun: o.sendGun,
     onExit: o.onExit,
@@ -169,6 +171,7 @@ export function stopGame() {
   window.removeEventListener("blur", clearHeld);
   touchPad.hidden = true;
   if (scoreEl) scoreEl.innerHTML = "";
+  if (weaponHudEl) weaponHudEl.hidden = true;
   S = null;
 }
 
@@ -236,8 +239,10 @@ export function onlineLobbyUpdate(lobby) {
     const gun = p.gun ?? null;
     if (!t.local) {
       t.weapon = gun;
+      if (gun === "sniper" && t.snAmmo == null) t.snAmmo = SNIPER.shots;
     } else if (gun && gun !== t.weapon && nowMs - t.gunClearedAt > 1500) {
       t.weapon = gun;
+      if (gun === "sniper") t.snAmmo = SNIPER.shots;
       if (!t.local) sfx.pickup();
     }
 
@@ -281,6 +286,7 @@ function begin(opts) {
     sendDead: opts.sendDead,
     sendNextRound: opts.sendNextRound,
     sendGear: opts.sendGear,
+    sendGearRemove: opts.sendGearRemove,
     sendPickup: opts.sendPickup,
     sendGun: opts.sendGun,
     onExit: opts.onExit,
@@ -302,6 +308,8 @@ function begin(opts) {
     rockets: [],
     cannons: [],
     shraps: [],
+    snipes: [],
+    walls: [],
     beams: [],
     booms: [],
     seenShots: {},
@@ -362,6 +370,8 @@ function startRound(seed) {
   S.rockets = [];
   S.cannons = [];
   S.shraps = [];
+  S.snipes = [];
+  S.walls = [];
   S.beams = [];
   S.booms = [];
   S.seenShots = {};
@@ -465,10 +475,22 @@ function frame(now) {
   // Shared per-frame data: laser aiming lines (drawn for everyone,
   // dodged by bots) and the hazard list bots treat as bullets.
   S.laserPaths = [];
+  S.sniperAims = [];
   for (const t of S.tanks) {
-    if (t.dead || t.gone || t.weapon !== "laser") continue;
-    const m = muzzlePoint(t, 1);
-    S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.a, S.rects, LASER.previewBounces) });
+    if (t.dead || t.gone) continue;
+    if (t.weapon === "laser") {
+      const m = muzzlePoint(t, 1);
+      S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.a, S.rects, LASER.previewBounces) });
+    } else if (t.weapon === "sniper") {
+      // Straight line, no bounce, through walls, 3 cells long.
+      const m = muzzlePoint(t, 1);
+      const len = SNIPER.previewCells * CELL;
+      S.sniperAims.push({
+        by: t.id, color: HULL[t.color],
+        x0: m.x, y0: m.y,
+        x1: m.x + Math.cos(t.a) * len, y1: m.y + Math.sin(t.a) * len,
+      });
+    }
   }
   // Bots treat every projectile as a bullet to dodge: minis, cannon
   // balls, shrapnel, and rockets still in their straight dumb-fire
@@ -481,7 +503,8 @@ function frame(now) {
     ? S.bullets.concat(S.cannons, S.shraps, straightRk ?? [])
     : S.bullets;
 
-  S.engineMoving = false;
+  S.engineMovingLocal = false;
+  S.engineMovingEnemy = false;
   const frozen = now < (S.freezeUntil ?? 0);
   if (frozen) {
     // Countdown: nobody moves, nothing flies. Tick the numbers.
@@ -527,7 +550,7 @@ function frame(now) {
     }
   }
 
-  setEngine(!S.banner, S.engineMoving);
+  setEngine(!S.banner, S.engineMovingLocal, S.engineMovingEnemy);
   draw(now);
   S.raf = requestAnimationFrame(frame);
 }
@@ -550,6 +573,9 @@ function stepTanks(now, dt) {
             gear: S.gear,
             rockets: S.rockets,
             lasers: S.laserPaths,
+            snipes: (S.sniperAims ?? []).map((A) => ({
+              by: A.by, pts: [{ x: A.x0, y: A.y0 }, { x: A.x1, y: A.y1 }],
+            })),
             bulletSpeed: BULLET_SPEED,
             bulletR: BULLET_R,
             muzzle: BARRELS.normal.len * TANK_R + BULLET_R + 2,
@@ -563,17 +589,24 @@ function stepTanks(now, dt) {
 
       // Rotation uses the real rectangular hitbox: if the swing would
       // clip a wall, the turn is blocked until the tank backs off.
+      const phasing = now < (t.phaseUntil ?? 0);
       const turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
       if (turn !== 0) {
         const na = t.a + turn * TURN_SPEED * mul.turn * dt;
-        if (!tankHitsAnyWall(t, t.x, t.y, na)) t.a = na;
+        if (phasing || !tankHitsAnyWall(t, t.x, t.y, na)) t.a = na;
       }
 
       let v = 0;
-      if (acts.up) v += MOVE_SPEED * mul.speed;
-      if (acts.down) v -= REVERSE_SPEED * mul.speed;
+      const boosting = now < (t.boostUntil ?? 0);
+      const boostMul = boosting ? BOOST.mult : 1;
+      if (acts.up) v += MOVE_SPEED * mul.speed * boostMul;
+      if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul;
 
-      if (v !== 0 && !t.bot) S.engineMoving = true;
+      if (v !== 0) {
+        const isMine = S.mode === "online" ? (t.id === S.myId) : !t.bot;
+        if (isMine) S.engineMovingLocal = true;
+        else S.engineMovingEnemy = true;
+      }
 
       // Track link animation: each tread scrolls at its own ground
       // speed. Turning makes them differ; a zero-point turn spins
@@ -585,7 +618,9 @@ function stepTanks(now, dt) {
         t.trkR = (t.trkR ?? 0) + (v - w * half) * dt;
       }
 
-      // Kick up a faint dust puff behind a driving tank.
+      // Kick up a faint dust puff behind a driving tank. While boosting
+      // the trail lasts 20% longer, sits 10% darker, and throws yellow
+      // sparks.
       if (v !== 0 && now >= (t.dustAt ?? 0)) {
         t.dustAt = now + 65 + Math.random() * 45;
         const back = v > 0 ? -1 : 1;
@@ -595,23 +630,49 @@ function stepTanks(now, dt) {
           vx: Math.cos(t.a) * back * 9 + (Math.random() - 0.5) * 8,
           vy: Math.sin(t.a) * back * 9 + (Math.random() - 0.5) * 8,
           born: now,
+          boost: boosting,
         });
-        if (S.dust.length > 260) S.dust.shift();
+        if (boosting) {
+          // A couple of bright yellow sparks riding inside the dust.
+          for (let k = 0; k < 2; k++) {
+            S.dust.push({
+              x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 8,
+              y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 8,
+              vx: Math.cos(t.a) * back * 12 + (Math.random() - 0.5) * 20,
+              vy: Math.sin(t.a) * back * 12 + (Math.random() - 0.5) * 20,
+              born: now,
+              spark: true,
+            });
+          }
+        }
+        while (S.dust.length > 320) S.dust.shift();
       }
 
       if (v !== 0) {
-        // WALL FRICTION, Tank-Trouble style: if the move would touch
-        // a wall — even at a shallow angle — the tank hard-stops.
-        // No sliding along walls. Turn away first, then drive.
         const nx = t.x + Math.cos(t.a) * v * dt;
         const ny = t.y + Math.sin(t.a) * v * dt;
-        if (!tankHitsAnyWall(t, nx, ny, t.a)) {
+        if (phasing) {
+          // Through inner walls freely — but the outer boundary still
+          // holds. Clamp to the play area (one tank-radius in).
+          const lo = safeBox();
+          const minX = lo.c0 * CELL + TANK_RAD, maxX = (lo.c1 + 1) * CELL - TANK_RAD;
+          const minY = lo.r0 * CELL + TANK_RAD, maxY = (lo.r1 + 1) * CELL - TANK_RAD;
+          t.x = Math.min(maxX, Math.max(minX, nx));
+          t.y = Math.min(maxY, Math.max(minY, ny));
+        } else if (!tankHitsAnyWall(t, nx, ny, t.a)) {
           t.x = nx;
           t.y = ny;
         }
       }
 
-      if (acts.shoot && !t.prevShoot) tryFire(t, now);
+      // Phase just ended while sitting inside a wall? Smoothly nudge
+      // the tank to the nearest open spot so it isn't stuck.
+      if (t.wasPhasing && !phasing) {
+        ejectFromWall(t, dt);
+      }
+      t.wasPhasing = phasing;
+
+      if (acts.shoot && !t.prevShoot && !phasing) tryFire(t, now);
       t.prevShoot = acts.shoot;
 
       // Machine gun: the trigger pull spins the barrel up (glowing
@@ -739,11 +800,25 @@ function clearWeapon(t, now) {
   t.mgIdleAt = 0;
   t.mgNext = 0;
   t.mgAmmo = null;
+  t.snAmmo = null;
   t.gunClearedAt = now;
   if (S.mode === "online" && t.local) S.sendGun?.(t.id, null);
 }
 
-function tryFire(t, now) {
+function tryFire(t, now) { 
+  // A cannon ball you fired can be command-detonated: tap fire again
+  // and it bursts wherever it is right now. (Give it a brief arming
+  // window so the same press that launched it doesn't pop it.)
+  const myBall = S.cannons.find((c) => c.by === t.id && now - c.born > 120);
+  if (myBall) {
+    explodeCannon(myBall, now);
+    S.cannons = S.cannons.filter((c) => c !== myBall);
+    if (S.mode === "online" && t.local) {
+      sendTypedShot(t, { w: "detonate", x: +myBall.x.toFixed(1), y: +myBall.y.toFixed(1) }, now);
+    }
+    return;
+  }
+
   if (t.weapon === "mg") return; // manual fire — handled in stepTanks
 
   if (t.weapon) {
@@ -777,6 +852,36 @@ function fireSpecial(t, now) {
     const m = muzzlePoint(t, CANNON.r * BULLET_R);
     spawnCannon(t.id, m.x, m.y, t.a, now);
     sendTypedShot(t, { w: "cannon", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+  } else if (w === "sniper") {
+    // Two rounds per pickup; fire one, keep the barrel until spent.
+    const m = muzzlePoint(t, BARRELS.sniper.len * BULLET_R);
+    spawnSnipe(t.id, m.x, m.y, t.a, now);
+    sendTypedShot(t, { w: "snipe", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+    t.snAmmo = (t.snAmmo ?? SNIPER.shots) - 1;
+    if (t.snAmmo > 0) return; // keep the sniper until both rounds are gone
+    t.snAmmo = null;
+  } else if (w === "boost") {
+    // Speed boost: activating it hands your basic gun straight back
+    // AND grants a temporary sprint. No projectile.
+    t.boostUntil = now + BOOST.durationMs;
+    t.basicMag = []; // refill: basic attacks available immediately
+    t.basicNext = 0;
+    sfx.boost?.();
+    sendTypedShot(t, { w: "boost" }, now);
+  } else if (w === "phase") {
+    // Phase: 2 s of intangibility. Can't shoot while active (handled
+    // in the movement loop). Still vulnerable to everything.
+    t.phaseUntil = now + PHASE.durationMs;
+    sfx.phase?.();
+    sendTypedShot(t, { w: "phase" }, now);
+  } else if (w === "wall") {
+    // Drop a temporary brick wall just ahead of the barrel.
+    spawnWall(t, now);
+    sfx.wallup?.();
+    sendTypedShot(t, {
+      w: "wall",
+      x: +lastWallPos.x.toFixed(1), y: +lastWallPos.y.toFixed(1), a: +t.a.toFixed(3),
+    }, now);
   }
 
   clearWeapon(t, now);
@@ -785,6 +890,32 @@ function fireSpecial(t, now) {
 // Online receive: one dispatcher for every shot type.
 function spawnShot(byId, sh, now = performance.now()) {
   switch (sh.w) {
+    case "snipe": spawnSnipe(byId, sh.x, sh.y, sh.a, now); break;
+    case "boost": {
+      const bt = S.tanks.find((x) => x.id === byId);
+      if (bt) { bt.boostUntil = now + BOOST.durationMs; }
+      break;
+    }
+    case "phase": {
+      const pt = S.tanks.find((x) => x.id === byId);
+      if (pt) pt.phaseUntil = now + PHASE.durationMs;
+      break;
+    }
+    case "wall": {
+      // Rebuild the wall at the shared position (deterministic).
+      addWall(byId, sh.x, sh.y, sh.a, now);
+      break;
+    }
+    case "detonate": {
+      // Command detonation from the owner: burst their airborne ball.
+      const ball = S.cannons.find((c) => c.by === byId);
+      if (ball) {
+        ball.x = sh.x; ball.y = sh.y; // snap to the owner's burst point
+        explodeCannon(ball, now);
+        S.cannons = S.cannons.filter((c) => c !== ball);
+      }
+      break;
+    }
     case "mini": spawnBullet(byId, sh.x, sh.y, sh.a, now, true); break;
     case "laser": fireLaser(byId, sh.x, sh.y, sh.a, now); break;
     case "rocket": spawnRocket(byId, sh.x, sh.y, sh.a, now); break;
@@ -825,6 +956,7 @@ function stepBullets(now, dt) {
     for (let s = 0; s < steps && alive; s++) {
       b.x += (b.vx * dt) / steps;
       b.y += (b.vy * dt) / steps;
+      if (hitWall(b.x, b.y, b.r ?? BULLET_R, b.mini ? "mg" : "basic", now)) { alive = false; break; }
       if (bounceCircle(b, S.rects, b.r ?? BULLET_R)) sfx.bounce();
 
       for (const t of S.tanks) {
@@ -855,6 +987,8 @@ function stepSpecials(now, dt) {
   stepRockets(now, dt);
   stepCannons(now, dt);
   stepShrapnel(now, dt);
+  stepSnipes(now, dt);
+  stepWalls(now, dt);
   stepBeams(now);
   S.beams = S.beams.filter((bm) => !bm.doneAt || now - bm.doneAt < LASER.flashMs);
   S.booms = S.booms.filter((bo) => now - bo.born < 320);
@@ -887,6 +1021,7 @@ function stepGear(now) {
       S.gear.splice(i, 1);
       S.takenGear.set(g.key, now);
       t.weapon = g.type; // barrel (sprite + hitbox) swaps immediately
+      if (g.type === "sniper") t.snAmmo = SNIPER.shots;
       sfx.pickup();
       if (S.mode === "online") S.sendPickup?.(g.key, t.id, g.type);
       break;
@@ -1084,7 +1219,19 @@ function stepShrink(now) {
   S.rockets = S.rockets.filter((k) => inSafe(k.x, k.y));
   S.cannons = S.cannons.filter((k) => inSafe(k.x, k.y));
   S.shraps = S.shraps.filter((k) => inSafe(k.x, k.y));
+  // Gear in the deleted ring is gone — and if we're the controller,
+  // erase it from the lobby too, or the next snapshot would rebuild
+  // it right where it was (the "reappearing crate" bug).
+  const doomedGear = S.gear.filter((g) => !inSafe(g.x, g.y));
   S.gear = S.gear.filter((g) => inSafe(g.x, g.y));
+  if (S.mode === "online" && S.isController) {
+    for (const g of doomedGear) {
+      S.takenGear.set(g.key, performance.now()); // suppress local re-add
+      S.sendGearRemove?.(g.key);
+    }
+  } else {
+    for (const g of doomedGear) S.takenGear.set(g.key, performance.now());
+  }
   sfx.boom(0.5);
 
   // Schedule the next event: another shrink, or — if we've bottomed
@@ -1160,8 +1307,16 @@ function stepBeams(now) {
     const head = Math.min(bm.total, ((now - bm.born) / 1000) * LASER.beamSpeed);
     // Kill along the newly swept span, sampled finely. The shooter
     // is immune only at their own muzzle — reflections still bite.
+    let cut = false;
     for (let d = bm.head; ; d = Math.min(head, d + 4)) {
       const p = beamPointAt(bm, d);
+      // A brick wall stops the beam cold (and one laser destroys it).
+      if (!bm.wallHit && hitWall(p.x, p.y, r, "laser", now)) {
+        bm.total = d;          // truncate the beam here
+        bm.wallHit = true;
+        cut = true;
+        break;
+      }
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
         if (t.id === bm.by && d < TANK_R * 2.6) continue;
@@ -1171,8 +1326,8 @@ function stepBeams(now) {
       }
       if (d >= head) break;
     }
-    bm.head = head;
-    if (head >= bm.total) bm.doneAt = now;
+    bm.head = Math.min(head, bm.total);
+    if (cut || head >= bm.total) bm.doneAt = now;
   }
 }
 
@@ -1255,6 +1410,12 @@ function stepRockets(now, dt) {
         bounceCircle(rk, S.rects, r);
       }
 
+      if (hitWall(rk.x, rk.y, r, "rocket", now)) {
+        S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3 });
+        addFade(rk.x, rk.y, r * 1.4, now);
+        alive = false;
+        break;
+      }
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
         if (t.id === rk.by && age < ROCKET.ownerGraceMs) continue;
@@ -1294,6 +1455,139 @@ function stepRockets(now, dt) {
   S.rockets = survivors;
 }
 
+// Where the last wall was placed (so the network payload matches).
+let lastWallPos = { x: 0, y: 0 };
+
+// Drop a brick wall a bit ahead of the tank, perpendicular to facing.
+function spawnWall(t, now) {
+  const ahead = TANK_RAD + WALL.thickCells * CELL * 0.5 + 4;
+  const x = t.x + Math.cos(t.a) * ahead;
+  const y = t.y + Math.sin(t.a) * ahead;
+  lastWallPos = { x, y };
+  addWall(t.id, x, y, t.a, now);
+}
+
+// Create the wall object. Its long axis is perpendicular to `a`
+// (the tank's facing), so it stands like a barrier in front of you.
+function addWall(byId, x, y, a, now) {
+  const half = WALL.lengthCells * CELL * 0.5;
+  const perp = a + Math.PI / 2;
+  S.walls.push({
+    by: byId,
+    x, y, a: perp,               // a = orientation of the LONG axis
+    hx: half,                    // half-length along `perp`
+    hy: WALL.thickCells * CELL * 0.5, // half-thickness
+    hp: WALL.hp,
+    born: now,
+  });
+}
+
+function spawnSnipe(byId, x, y, a, now) {
+  sfx.snipe?.();
+  const speed = BULLET_SPEED * SNIPER.speed;
+  S.snipes.push({
+    x, y,
+    vx: Math.cos(a) * speed,
+    vy: Math.sin(a) * speed,
+    x0: x, y0: y,               // origin, to measure the 5-cell range
+    maxDist: SNIPER.rangeCells * CELL,
+    born: now,
+    by: byId,
+    r: SNIPER.r * BULLET_R,
+    mini: true,                 // never counts toward ammo
+  });
+}
+
+// Point-vs-walls with damage. `dmgKey` selects the per-weapon value.
+// Returns true if the projectile should die (it hit a wall).
+function hitWall(x, y, r, dmgKey, now) {
+  for (const w of S.walls) {
+    const ca = Math.cos(w.a), sa = Math.sin(w.a);
+    const dx = x - w.x, dy = y - w.y;
+    const lx = dx * ca + dy * sa;
+    const ly = -dx * sa + dy * ca;
+    if (Math.abs(lx) < w.hx + r && Math.abs(ly) < w.hy + r) {
+      w.hp -= WALL.dmg[dmgKey] ?? WALL.dmg.basic;
+      addFade(x, y, r * 1.3, now, "#b5623a"); // brick puff
+      if (w.hp <= 0) { sfx.wallbreak?.(); }
+      return true;
+    }
+  }
+  return false;
+}
+
+function stepWalls(now, dt) {
+  S.walls = S.walls.filter((w) => now - w.born < WALL.lifeMs && w.hp > 0);
+  // A wall blocks tanks: if a tank overlaps a wall slab, push it out
+  // along the slab's short axis (gently). Clamp so we never eject a
+  // tank past the arena boundary (no escaping the map).
+  const lo = safeBox();
+  const minX = lo.c0 * CELL + TANK_RAD, maxX = (lo.c1 + 1) * CELL - TANK_RAD;
+  const minY = lo.r0 * CELL + TANK_RAD, maxY = (lo.r1 + 1) * CELL - TANK_RAD;
+  for (const w of S.walls) {
+    const ca = Math.cos(w.a), sa = Math.sin(w.a);
+    for (const t of S.tanks) {
+      if (t.dead || t.gone) continue;
+      if (now < (t.phaseUntil ?? 0)) continue; // phasing tanks ignore it
+      // tank center in the wall's local frame
+      const dx = t.x - w.x, dy = t.y - w.y;
+      const lx = dx * ca + dy * sa;   // along length
+      const ly = -dx * sa + dy * ca;  // along thickness
+      const ox = w.hx + TANK_RAD;     // overlap extents (circle approx)
+      const oy = w.hy + TANK_RAD;
+      if (Math.abs(lx) < ox && Math.abs(ly) < oy) {
+        // Push out along whichever local axis needs the least travel.
+        // length axis unit = (ca, sa); thickness axis unit = (-sa, ca).
+        const pushL = ox - Math.abs(lx);
+        const pushT = oy - Math.abs(ly);
+        let nx, ny;
+        if (pushT <= pushL) {
+          const s = Math.sign(ly) || 1;
+          nx = t.x + (-sa) * (s * pushT);
+          ny = t.y + (ca) * (s * pushT);
+        } else {
+          const s = Math.sign(lx) || 1;
+          nx = t.x + (ca) * (s * pushL);
+          ny = t.y + (sa) * (s * pushL);
+        }
+        t.x = Math.min(maxX, Math.max(minX, nx));
+        t.y = Math.min(maxY, Math.max(minY, ny));
+        t.tx = t.x; t.ty = t.y;
+      }
+    }
+  }
+}
+
+function stepSnipes(now, dt) {
+  const r = SNIPER.r * BULLET_R;
+  const survivors = [];
+  for (const s of S.snipes) {
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    // The sniper phases through MAZE walls — but a player-built brick
+    // wall is a solid obstacle and stops it (one hit destroys it).
+    if (hitWall(s.x, s.y, SNIPER.r * BULLET_R, "sniper", now)) continue;
+    // Dies at its range limit or when it leaves the arena.
+    const dx = s.x - s.x0, dy = s.y - s.y0;
+    if (dx * dx + dy * dy > s.maxDist * s.maxDist) continue;
+    if (s.x < -20 || s.y < -20 || s.x > S.worldW + 20 || s.y > S.worldH + 20) continue;
+
+    let alive = true;
+    for (const t of S.tanks) {
+      if (t.dead || t.gone) continue;
+      if (t.id === s.by && now - s.born < 120) continue; // don't clip the shooter on exit
+      if (tankHitPoint(t, s.x, s.y, r)) {
+        alive = false;
+        addFade(s.x, s.y, r * 1.4, now);
+        if (S.mode === "local" || t.local) killTank(t);
+        break;
+      }
+    }
+    if (alive) survivors.push(s);
+  }
+  S.snipes = survivors;
+}
+
 function spawnCannon(byId, x, y, a, now) {
   sfx.cannon();
   const speed = BULLET_SPEED * CANNON.speed;
@@ -1313,6 +1607,8 @@ function spawnCannon(byId, x, y, a, now) {
   });
 }
 
+function stepSnipesWrap() {} // (kept for clarity; stepSnipes called in stepSpecials)
+
 function stepCannons(now, dt) {
   const r = CANNON.r * BULLET_R;
   const survivors = [];
@@ -1323,6 +1619,7 @@ function stepCannons(now, dt) {
     let alive = true;
     c.x += c.vx * dt;
     c.y += c.vy * dt;
+    if (hitWall(c.x, c.y, r, "cannon", now)) { explodeCannon(c, now); continue; }
     bounceCircle(c, S.rects, r);
 
     for (const t of S.tanks) {
@@ -1378,6 +1675,7 @@ function stepShrapnel(now, dt) {
     const steps = 2;
     for (let s = 0; s < steps && alive; s++) {
       sh.inWall = stepShrap(sh, S.rects, dt / steps, r, CANNON.wallSlow);
+      if (hitWall(sh.x, sh.y, r, "shrapnel", now)) { alive = false; break; }
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
         if (tankHitPoint(t, sh.x, sh.y, r)) {
@@ -1498,6 +1796,34 @@ function obbHitsRect(x, y, a, rc, hl = TANK_HL, hw = TANK_HW) {
 // changes shape with the equipped weapon). Barrels clunk against
 // walls now: a swing or a move that would poke the barrel into a
 // wall is blocked, exactly like the hull.
+// After phase ends, if the tank is buried in a wall, ease it to the
+// closest open spot (a few px per frame — "smoothly pushes you out").
+function ejectFromWall(t, dt) {
+  if (!tankHitsAnyWall(t, t.x, t.y, t.a)) return;
+  // Sample rings of increasing radius for the nearest free point.
+  let best = null, bestD = Infinity;
+  for (let r = 4; r <= CELL * 1.2 && !best; r += 4) {
+    for (let k = 0; k < 16; k++) {
+      const ang = (k / 16) * Math.PI * 2;
+      const px = t.x + Math.cos(ang) * r;
+      const py = t.y + Math.sin(ang) * r;
+      if (!tankHitsAnyWall(t, px, py, t.a)) {
+        const d = (px - t.x) ** 2 + (py - t.y) ** 2;
+        if (d < bestD) { bestD = d; best = { x: px, y: py }; }
+      }
+    }
+    if (best) break;
+  }
+  if (!best) return;
+  // Glide toward it: up to ~220 px/s so the push reads as smooth.
+  const dx = best.x - t.x, dy = best.y - t.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const step = Math.min(dist, 220 * dt);
+  t.x += (dx / dist) * step;
+  t.y += (dy / dist) * step;
+  t.tx = t.x; t.ty = t.y;
+}
+
 function tankHitsAnyWall(t, x, y, a) {
   const bl = BARRELS[t?.weapon] ?? BARRELS.normal;
   const off = (bl.len * TANK_R) / 2;
@@ -1657,21 +1983,35 @@ function draw(now) {
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
   const pulse = Math.sin(now / 220) * 0.5 + 0.5;
   // Dust puffs drift and dissolve beneath everything that moves.
-  S.dust = S.dust.filter((d) => now - d.born < 560);
+  // Boosted puffs live 20% longer and read 10% darker; sparks are
+  // bright yellow flecks riding inside the trail.
+  const DUST_LIFE = 560, BOOST_LIFE = 560 * 1.2;
+  S.dust = S.dust.filter((d) => now - d.born < (d.boost || d.spark ? BOOST_LIFE : DUST_LIFE));
   for (const d of S.dust) {
-    const k = (now - d.born) / 560;
-    ctx.fillStyle = "#8b93a3";
-    ctx.globalAlpha = 0.16 * (1 - k);
-    ctx.beginPath();
-    ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.22 + k * 0.4), 0, Math.PI * 2);
-    ctx.fill();
+    const life = d.boost || d.spark ? BOOST_LIFE : DUST_LIFE;
+    const k = (now - d.born) / life;
+    if (d.spark) {
+      ctx.fillStyle = "#ffd23f";
+      ctx.globalAlpha = 0.9 * (1 - k);
+      ctx.beginPath();
+      ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.08 + k * 0.06), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = d.boost ? "#7d8492" : "#8b93a3"; // boosted = 10% darker
+      ctx.globalAlpha = (d.boost ? 0.18 : 0.16) * (1 - k);
+      ctx.beginPath();
+      ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.22 + k * 0.4), 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
   ctx.globalAlpha = 1;
 
+  for (const w of S.walls) drawWall(w, now);
   for (const g of S.gear) drawGear(ctx, g, TANK_R, pulse, now);
 
   for (const t of S.tanks) if (t.dead && !t.gone) drawWreck(t);
   for (const L of S.laserPaths ?? []) drawLaserPreview(L);
+  for (const A of S.sniperAims ?? []) drawSniperAim(A);
   for (const t of S.tanks) if (!t.dead && !t.gone) drawTank(t, now);
 
   ctx.fillStyle = "#20242c";
@@ -1701,11 +2041,27 @@ function draw(now) {
     ctx.fill();
   }
 
-  // Shrapnel — ghostly while phasing through a wall.
+  // Shrapnel — always solid, even while passing through a wall.
+  ctx.fillStyle = "#20242c";
   for (const sh of S.shraps) {
-    ctx.fillStyle = sh.inWall ? "rgba(32, 36, 44, .35)" : "#20242c";
     ctx.beginPath();
     ctx.arc(sh.x, sh.y, CANNON.shrapR * BULLET_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Sniper slugs: a slim teal round with a short motion streak.
+  for (const s of S.snipes) {
+    const len = 10;
+    const sp = Math.hypot(s.vx, s.vy) || 1;
+    ctx.strokeStyle = "rgba(51,194,176,.55)";
+    ctx.lineWidth = SNIPER.r * BULLET_R * 1.4;
+    ctx.beginPath();
+    ctx.moveTo(s.x - (s.vx / sp) * len, s.y - (s.vy / sp) * len);
+    ctx.lineTo(s.x, s.y);
+    ctx.stroke();
+    ctx.fillStyle = "#33c2b0";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, SNIPER.r * BULLET_R, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -1796,28 +2152,6 @@ function draw(now) {
     ctx.globalAlpha = 1;
   }
 
-  // Held-weapon readout, lower-right of the arena, in the weapon's
-  // own accent color — so you always know what you're packing.
-  const mine = S.tanks.find((t) => t.local && !t.dead && !t.gone && t.weapon);
-  if (mine) {
-    const label = WEAPON_NAMES[mine.weapon] ?? mine.weapon;
-    const col = GEAR_RIM[mine.weapon] ?? "#eef1f6";
-    ctx.save();
-    ctx.textAlign = "right";
-    ctx.textBaseline = "bottom";
-    const pad = CELL * 0.25;
-    const fs = Math.max(18, S.worldH * 0.04);
-    ctx.font = `800 ${fs}px "Black Ops One", system-ui`;
-    ctx.lineWidth = fs * 0.16;
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "rgba(10,12,16,.85)";
-    ctx.strokeText(label, S.worldW - pad, S.worldH - pad);
-    ctx.fillStyle = col;
-    ctx.fillText(label, S.worldW - pad, S.worldH - pad);
-    // little ammo pip for MG / cannon count if relevant
-    ctx.restore();
-  }
-
   if (S.banner) drawBanner();
 
   if (counting) {
@@ -1826,6 +2160,23 @@ function draw(now) {
   }
 
   ctx.restore();
+
+  // Held-weapon readout: a chip OUTSIDE the canvas, bottom-right.
+  // Shows the local human's own equipped weapon/ability, in local AND
+  // online play. (In local hot-seat, that's the first non-bot tank.)
+  if (weaponHudEl) {
+    const myTank = S.mode === "online"
+      ? S.tanks.find((t) => t.id === S.myId)
+      : S.tanks.find((t) => !t.bot);
+    const w = myTank && !myTank.dead && !myTank.gone ? myTank.weapon : null;
+    if (w) {
+      weaponHudEl.hidden = false;
+      weaponHudEl.textContent = WEAPON_NAMES[w] ?? w;
+      weaponHudEl.style.color = GEAR_RIM[w] ?? "#eef1f6";
+    } else {
+      weaponHudEl.hidden = true;
+    }
+  }
 
   // The ranked shrink timer lives in the top bar, ticking down.
   if (shrinkEl) {
@@ -1889,11 +2240,62 @@ function drawLaserPreview(L) {
   ctx.globalAlpha = 1;
 }
 
+function drawSniperAim(A) {
+  ctx.strokeStyle = A.color;
+  ctx.globalAlpha = 0.4;
+  ctx.lineWidth = BULLET_R * 0.4;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath();
+  ctx.moveTo(A.x0, A.y0);
+  ctx.lineTo(A.x1, A.y1);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+}
+
+function drawWall(w, now) {
+  ctx.save();
+  ctx.translate(w.x, w.y);
+  ctx.rotate(w.a);
+  const L = w.hx, T = w.hy;
+  // Brick slab.
+  ctx.fillStyle = "#9c5638";
+  ctx.fillRect(-L, -T, L * 2, T * 2);
+  // Mortar lines: a couple of courses of staggered bricks.
+  ctx.strokeStyle = "rgba(40,20,12,.55)";
+  ctx.lineWidth = Math.max(1, T * 0.14);
+  ctx.beginPath();
+  ctx.moveTo(-L, 0); ctx.lineTo(L, 0);           // mid course line
+  const brickW = (L * 2) / 3;
+  for (let i = 1; i < 3; i++) {
+    const x = -L + brickW * i;
+    ctx.moveTo(x, -T); ctx.lineTo(x, 0);          // top course verticals
+    const x2 = -L + brickW * (i - 0.5);
+    ctx.moveTo(x2, 0); ctx.lineTo(x2, T);         // bottom course, staggered
+  }
+  ctx.stroke();
+  // Damage tint as HP drops.
+  const frac = Math.max(0, w.hp / WALL.hp);
+  if (frac < 1) {
+    ctx.fillStyle = `rgba(20,10,6,${(1 - frac) * 0.4})`;
+    ctx.fillRect(-L, -T, L * 2, T * 2);
+  }
+  // Life timer: a thin bar above the slab that drains over 10 s.
+  const life = 1 - (now - w.born) / WALL.lifeMs;
+  ctx.fillStyle = "rgba(0,0,0,.4)";
+  ctx.fillRect(-L, -T - 6, L * 2, 3);
+  ctx.fillStyle = "#ffd23f";
+  ctx.fillRect(-L, -T - 6, L * 2 * Math.max(0, life), 3);
+  ctx.restore();
+}
+
 function drawTank(t, now) {
   const hull = HULL[t.color];
   const R = TANK_R;
 
   ctx.save();
+  // Phasing tanks are half-transparent.
+  if (now < (t.phaseUntil ?? 0)) ctx.globalAlpha = PHASE.opacity;
   ctx.translate(t.x, t.y);
   ctx.rotate(t.a);
 
@@ -1910,9 +2312,8 @@ function drawTank(t, now) {
     [R * 0.44, R * 0.8, t.trkR ?? 0],
   ];
   for (const [y0, y1, ph] of bands) {
-    // Forward motion scrolls the links toward the rear (they grip
-    // the ground while the hull moves over them).
-    let off = (-ph % linkGap + linkGap) % linkGap;
+    // Tread links scroll (direction reversed per design).
+    let off = (ph % linkGap + linkGap) % linkGap;
     ctx.beginPath();
     for (let x = -R * 0.88 + off; x <= R * 0.88; x += linkGap) {
       ctx.moveTo(x, y0);

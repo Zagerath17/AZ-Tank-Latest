@@ -35,32 +35,33 @@ export async function showVersus(roster, myId, mode) {
   const host = document.getElementById("versus-body");
   const acc = getAccount();
 
-  const spriteBlock = (r, recTxt) => `
-    <div class="vs-fighter p-${r.color}">
+  // Big white "W - L" numerals sit UNDER each tank. A dash separates
+  // them; no letters. Records fill in async once fetched.
+  const spriteBlock = (r, isMe) => `
+    <div class="vs-fighter p-${r.color}${isMe ? " vs-me" : ""}">
       ${tankSVG(r.color)}
       <span class="vs-name">${r.name ?? "Player"}</span>
-      ${recTxt ? `<span class="vs-record">${recTxt}</span>` : ""}
+      <span class="vs-record" data-fighter="${r.id}">
+        <span class="vs-w">–</span><span class="vs-dash">-</span><span class="vs-l">–</span>
+      </span>
     </div>`;
 
-  // Fill immediately with names, then patch in records asynchronously.
   host.innerHTML = `
-    <div class="vs-side">${spriteBlock(meRow ?? { color: "slate", name: "You" }, "")}</div>
+    <div class="vs-side">${spriteBlock(meRow ?? { id: "me", color: "slate", name: "You" }, true)}</div>
     <div class="vs-mid">VS</div>
-    <div class="vs-side vs-foes">${foes.map((f) => spriteBlock(f, "")).join("")}</div>`;
+    <div class="vs-side vs-foes">${foes.map((f) => spriteBlock(f, false)).join("")}</div>`;
 
   if (!acc) return;
   try {
     const f = await ensureFirebase();
     const recs = await Promise.all(foes.map((fo) => recordVs(f, fo.ukey)));
-    const foeEls = host.querySelectorAll(".vs-foes .vs-fighter");
     foes.forEach((fo, i) => {
-      const el = foeEls[i]?.querySelector(".vs-name");
-      if (el && fo.ukey) {
-        const rec = recs[i];
-        const tag = document.createElement("span");
-        tag.className = "vs-record";
-        tag.textContent = `${rec.w}W – ${rec.l}L vs you`;
-        foeEls[i].appendChild(tag);
+      if (!fo.ukey) return;
+      const rec = recs[i];
+      const box = host.querySelector(`.vs-record[data-fighter="${fo.id}"]`);
+      if (box) {
+        box.querySelector(".vs-w").textContent = rec.w;
+        box.querySelector(".vs-l").textContent = rec.l;
       }
     });
   } catch (e) { /* records are cosmetic */ }
