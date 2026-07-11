@@ -630,6 +630,34 @@ body {
 .lobby-popover { margin-bottom: 10px; outline: 2px solid rgba(255,255,255,.15); border-radius: 12px; }
 .dnd-row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--red, #ff5147); justify-self: start; }
 
+.rank-badge { vertical-align: -3px; margin-right: 2px; }
+.rank-mybadge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.05rem;
+  margin: 6px 0 14px;
+}
+.board-title { margin: 18px 0 8px; opacity: .85; }
+.board-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+.board-pos {
+  width: 44px;
+  font-family: "Black Ops One", system-ui;
+  opacity: .7;
+}
+.board-name { flex: 1; font-weight: 600; }
+.board-elo { font-variant-numeric: tabular-nums; opacity: .85; }
+.board-me {
+  outline: 2px solid var(--red, #ff5147);
+  outline-offset: -2px;
+  border-radius: 10px;
+}
+
 /* ---- notice banner: drops from the top, works on every screen ---- */
 .notice {
   position: fixed;
