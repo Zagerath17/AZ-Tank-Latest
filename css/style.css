@@ -75,8 +75,37 @@ body {
 @media (min-aspect-ratio: 13/10) {
   #app { width: 100%; max-width: 1100px; }
   .screen.is-active { gap: 12px; }
-  .menu-grid { grid-template-columns: 1fr 1fr; }
   .binds { grid-template-columns: 1fr 1fr; }
+
+  /* Menu becomes a left hero + right 2-column button grid, centered,
+     so nothing scrolls even on a short phone-in-landscape screen. */
+  #screen-menu.is-active {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 6vw;
+  }
+  #screen-menu .menu-hero { margin: 0; }
+  #screen-menu .menu-grid {
+    grid-template-columns: 1fr 1fr;
+    width: auto;
+    min-width: 340px;
+  }
+  #screen-menu .foot { position: absolute; bottom: 8px; left: 0; right: 0; }
+}
+
+/* Short screens (most phones in landscape): scale the hero down hard
+   so the logo + tanks never push buttons off the viewport. */
+@media (max-height: 560px) {
+  .logo { font-size: clamp(1.8rem, 7vh, 2.6rem); }
+  .tagline { font-size: .7rem; }
+  .tank-row { display: none; }
+  .menu-hero { gap: 6px; }
+  .btn-big { font-size: .92rem; padding: .62rem .8rem; }
+  .menu-grid { gap: 8px; }
+
+  .screen.is-active { gap: 10px; }
+  .bar h2 { font-size: 1rem; }
 }
 
 /* Phones in PORTRAIT: ask for a turn. The rotate notice sits on top
@@ -241,7 +270,7 @@ body {
   box-shadow: 0 5px 0 var(--shadow);
 }
 
-.btn-big  { font-size: 1.12rem; padding: 1rem; width: 100%; }
+.btn-big  { font-size: 1rem; padding: .78rem 1rem; width: 100%; }
 .btn-small { font-size: .78rem; padding: .5rem .8rem; box-shadow: 0 3px 0 var(--shadow); }
 .btn-small:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--shadow); }
 
@@ -264,6 +293,7 @@ body {
 .btn-go:disabled { box-shadow: 0 5px 0 #07130b; }
 
 .stack { display: grid; gap: 14px; }
+.menu-grid { display: grid; gap: 10px; grid-template-columns: 1fr; width: 100%; }
 
 /* ---------- panels / hints ---------- */
 .panel {
@@ -304,6 +334,20 @@ body {
 }
 .slot .tank { width: 46px; height: 46px; opacity: .35; filter: grayscale(.7); transition: opacity .15s, filter .15s; }
 .slot:focus-visible { outline: 2px solid var(--p); outline-offset: 3px; }
+
+/* Responsive slot layout — placed AFTER the base so it takes effect. */
+@media (min-aspect-ratio: 13/10) {
+  .slots { grid-template-columns: repeat(4, 1fr); }
+}
+@media (max-height: 560px) {
+  .slots { grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .slot { padding: 6px 5px; gap: 2px; }
+  .slot .tank { width: 30px; height: 30px; }
+  .slot-name { font-size: .74rem; }
+  .slot-prompt { font-size: .68rem; }
+  .slot-status { font-size: .66rem; }
+  .bot-chip { font-size: .66rem; padding: 2px 6px; }
+}
 
 .slot-name {
   font-family: "Black Ops One";
