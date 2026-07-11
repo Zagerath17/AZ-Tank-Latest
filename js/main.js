@@ -8,6 +8,7 @@ import { initOnline } from "./online.js";
 import { initGame } from "./game.js";
 import { sfx, startMusic } from "./audio.js";
 import { initSocial, setStatus, getAccount } from "./social.js";
+import { initRanked } from "./ranked.js";
 
 // True while a match is running — screen hops (e.g. Settings mid-game)
 // must not touch the soundtrack or presence.
@@ -132,3 +133,4 @@ initLocal();
 initOnline();
 initGame();
 initSocial();
+initRanked();

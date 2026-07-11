@@ -258,6 +258,10 @@ function begin(opts) {
     sendPickup: opts.sendPickup,
     sendGun: opts.sendGun,
     onExit: opts.onExit,
+    ranked: !!opts.ranked,
+    onRankedEnd: opts.onRankedEnd ?? null,
+    matchOver: false,
+    rankedEndFired: false,
     roundN: opts.roundN ?? 1,
     tanks: [],
     bullets: [],
@@ -444,6 +448,16 @@ function frame(now) {
     stepBullets(now, dt);
     stepSpecials(now, dt);
     maybeEndRound(now);
+  } else if (S.matchOver) {
+    // The match is decided — hold the banner, then report placements
+    // exactly once so every client settles its own Elo.
+    if (!S.rankedEndFired && now - S.roundOverAt > 3500) {
+      S.rankedEndFired = true;
+      const placements = S.roster
+        .map((p) => ({ id: p.id, color: p.color, score: S.scores[p.id] ?? 0 }))
+        .sort((a, b) => b.score - a.score);
+      S.onRankedEnd?.(placements);
+    }
   } else if (now - S.roundOverAt > ROUND_PAUSE) {
     if (S.mode === "local") {
       S.roundN += 1;
@@ -1138,7 +1152,17 @@ function maybeEndRound(now) {
   const w = alive[0] ?? null;
   if (w) {
     S.scores[w.id] = (S.scores[w.id] ?? 0) + 1;
-    S.banner = { text: `${COLOR_NAMES[w.color].toUpperCase()} WINS THE ROUND`, color: HULL[w.color] };
+    if (S.ranked && S.scores[w.id] >= 5) {
+      // Ranked: first to 5 round wins takes the whole match.
+      S.matchOver = true;
+      const who = S.roster.find((p) => p.id === w.id);
+      S.banner = {
+        text: `${(who?.name ?? COLOR_NAMES[w.color]).toUpperCase()} WINS THE MATCH`,
+        color: HULL[w.color],
+      };
+    } else {
+      S.banner = { text: `${COLOR_NAMES[w.color].toUpperCase()} WINS THE ROUND`, color: HULL[w.color] };
+    }
     sfx.roundEnd();
   } else {
     S.banner = { text: "DRAW", color: "#eef1f6" };
@@ -1513,9 +1537,9 @@ function drawTank(t, now) {
   ctx.fillStyle = "#2a303c";
   rr(-R * 0.95, -R * 0.83, R * 1.9, R * 0.42, R * 0.15);
   rr(-R * 0.95, R * 0.41, R * 1.9, R * 0.42, R * 0.15);
-  ctx.strokeStyle = "#454c5c";
-  ctx.lineWidth = Math.max(1.4, R * 0.075);
-  const linkGap = R * 0.3;
+  ctx.strokeStyle = "#6b7488"; // bright enough to read on a phone
+  ctx.lineWidth = Math.max(2, R * 0.12);
+  const linkGap = R * 0.34;
   const bands = [
     [-R * 0.8, -R * 0.44, t.trkL ?? 0],
     [R * 0.44, R * 0.8, t.trkR ?? 0],

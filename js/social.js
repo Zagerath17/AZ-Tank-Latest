@@ -26,6 +26,7 @@ import { sfx } from "./audio.js";
 
 const LS_NAME = "tank.account.v1";
 const LS_DND = "tank.dnd.v1";
+const LS_NOREQ = "tank.noreq.v1";
 
 let account = null; // { key, name, uid }
 let auth = null;    // { auth, signIn, signUp, signOut } — lazy Firebase Auth
@@ -41,6 +42,19 @@ export function getAccount() {
 
 export function getDnd() {
   return localStorage.getItem(LS_DND) === "1";
+}
+
+export function getNoRequests() {
+  return localStorage.getItem(LS_NOREQ) === "1";
+}
+
+export function setNoRequests(on) {
+  localStorage.setItem(LS_NOREQ, on ? "1" : "0");
+  if (account) {
+    ensureFirebase()
+      .then((f) => f.set(f.ref(f.db, `users/${account.key}/noRequests`), !!on))
+      .catch(() => {});
+  }
 }
 
 function keyOf(name) {
@@ -110,6 +124,7 @@ async function adoptProfile(uid, wantName = null) {
   localStorage.setItem(LS_NAME, JSON.stringify(account));
   // Their cloud-saved preferences come back with them.
   if (typeof prof.dnd === "boolean") localStorage.setItem(LS_DND, prof.dnd ? "1" : "0");
+  if (typeof prof.noRequests === "boolean") localStorage.setItem(LS_NOREQ, prof.noRequests ? "1" : "0");
   await goOnline();
   refreshLoginButton();
   return account;
@@ -145,6 +160,7 @@ export async function logout() {
   // session leftovers. (Cloud copy stays — it returns on next login.)
   localStorage.removeItem(LS_NAME);
   localStorage.removeItem(LS_DND);
+  localStorage.removeItem(LS_NOREQ);
   sessionStorage.clear();
   refreshLoginButton();
   toast("Logged out — this device forgot you.");
@@ -166,6 +182,7 @@ async function goOnline() {
       status: "online",
       lobby: null,
       dnd: getDnd(),
+      noRequests: getNoRequests(),
       lastSeen: f.serverTimestamp(),
     });
     f.onDisconnect(f.ref(f.db, `users/${account.key}/status`)).set("offline");
@@ -254,7 +271,7 @@ function startListening() {
     };
 
     listen("requests", (from, _d, fb2) => {
-      if (getDnd()) return; // requests don't come through on DND
+      if (getDnd() || getNoRequests()) return; // silent — the tab still lists them
       fb2.get(fb2.ref(fb2.db, `users/${from}/name`)).then((s) => {
         const who = s.val() ?? from;
         showBanner(`${who} wants to be your friend`, "ACCEPT", () => {
@@ -379,6 +396,63 @@ async function renderFriends() {
   }
 }
 
+async function renderRequests() {
+  const host = document.getElementById("requests-list");
+  if (!account) {
+    host.innerHTML = `<li class="hint">Log in from the title screen first.</li>`;
+    return;
+  }
+  host.innerHTML = `<li class="hint">Loading…</li>`;
+  try {
+    const f = await ensureFirebase();
+    const rs = await f.get(f.ref(f.db, `users/${account.key}/requests`));
+    const keys = Object.keys(rs.val() ?? {});
+    if (!keys.length) {
+      host.innerHTML = `<li class="hint">No pending requests.</li>`;
+      return;
+    }
+    const profiles = await Promise.all(keys.map((k) => fetchProfile(f, k)));
+    host.innerHTML = profiles.map((p, i) => {
+      const key = keys[i];
+      const name = p?.name ?? key;
+      return `
+        <li class="friend-row p-${p?.color ?? "slate"}">
+          ${tankSVG(p?.color ?? "slate")}
+          <span class="friend-name">${name}</span>
+          <button class="btn btn-small" data-req-yes="${key}">ACCEPT</button>
+          <button class="btn btn-small" data-req-no="${key}">DECLINE</button>
+        </li>`;
+    }).join("");
+
+    host.querySelectorAll("[data-req-yes]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const from = btn.dataset.reqYes;
+        try {
+          const f2 = await ensureFirebase();
+          await f2.update(f2.ref(f2.db), {
+            [`users/${account.key}/friends/${from}`]: true,
+            [`users/${from}/friends/${account.key}`]: true,
+            [`users/${account.key}/requests/${from}`]: null,
+          });
+          toast("Friend added.");
+        } catch (e) { toast("Couldn't accept — connection?"); }
+        renderRequests();
+      });
+    });
+    host.querySelectorAll("[data-req-no]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          const f2 = await ensureFirebase();
+          await f2.remove(f2.ref(f2.db, `users/${account.key}/requests/${btn.dataset.reqNo}`));
+        } catch (e) {}
+        renderRequests();
+      });
+    });
+  } catch (e) {
+    host.innerHTML = `<li class="hint">Couldn't load requests — check your connection.</li>`;
+  }
+}
+
 async function searchPlayer() {
   const q = document.getElementById("friend-search").value;
   const out = document.getElementById("friend-results");
@@ -392,13 +466,14 @@ async function searchPlayer() {
     if (!p) { out.innerHTML = `<li class="hint">No player named "${q}".</li>`; return; }
     if (key === account.key) { out.innerHTML = `<li class="hint">That's you.</li>`; return; }
     const already = (await f.get(f.ref(f.db, `users/${account.key}/friends/${key}`))).exists();
-    const blocked = p.dnd && !already;
+    const blocked = (p.dnd || p.noRequests) && !already;
+    const blockLabel = p.noRequests ? "REQUESTS OFF" : "DO NOT DISTURB";
     out.innerHTML = `
       <li class="friend-row p-${p.color ?? "slate"}">
         ${tankSVG(p.color ?? "slate")}
         <span class="friend-name">${p.name}</span>
         <button class="btn btn-small" id="friend-add-btn" ${already || blocked ? "disabled" : ""}>
-          ${already ? "FRIENDS ✓" : blocked ? "DO NOT DISTURB" : "ADD FRIEND"}
+          ${already ? "FRIENDS ✓" : blocked ? blockLabel : "ADD FRIEND"}
         </button>
       </li>`;
     document.getElementById("friend-add-btn")?.addEventListener("click", async () => {
@@ -510,20 +585,24 @@ export function initSocial() {
   siBtn.addEventListener("click", busyGuard(siBtn, () => doSignIn(val("login-email"), val("login-pass"))));
   crBtn.addEventListener("click", busyGuard(crBtn, () => doCreate(val("login-email"), val("login-pass"), val("login-name"))));
 
-  // Social screen tabs
-  const tabF = document.getElementById("tab-friends");
-  const tabA = document.getElementById("tab-addfriends");
-  const panF = document.getElementById("panel-friends");
-  const panA = document.getElementById("panel-addfriends");
-  const show = (add) => {
-    panF.hidden = add;
-    panA.hidden = !add;
-    tabF.classList.toggle("is-on", !add);
-    tabA.classList.toggle("is-on", add);
-    if (!add) renderFriends();
+  // Social screen tabs: Friends | Requests | Add Friends
+  const tabs = {
+    friends: [document.getElementById("tab-friends"), document.getElementById("panel-friends")],
+    requests: [document.getElementById("tab-requests"), document.getElementById("panel-requests")],
+    add: [document.getElementById("tab-addfriends"), document.getElementById("panel-addfriends")],
   };
-  tabF.addEventListener("click", () => show(false));
-  tabA.addEventListener("click", () => show(true));
+  const show = (which) => {
+    for (const [name, [tab, panel]] of Object.entries(tabs)) {
+      const on = name === which;
+      panel.hidden = !on;
+      tab.classList.toggle("is-on", on);
+    }
+    if (which === "friends") renderFriends();
+    if (which === "requests") renderRequests();
+  };
+  tabs.friends[0].addEventListener("click", () => show("friends"));
+  tabs.requests[0].addEventListener("click", () => show("requests"));
+  tabs.add[0].addEventListener("click", () => show("add"));
   document.getElementById("friend-search-btn").addEventListener("click", searchPlayer);
   document.getElementById("friend-search").addEventListener("keydown", (e) => {
     if (e.key === "Enter") searchPlayer();
@@ -533,7 +612,7 @@ export function initSocial() {
   // stays LIVE, re-polling every 10 seconds while you're looking.
   let liveTimer = 0;
   onEnter("screen-social", () => {
-    show(false);
+    show("friends");
     liveTimer = setInterval(() => {
       if (!document.getElementById("panel-friends").hidden) renderFriends();
     }, 10000);

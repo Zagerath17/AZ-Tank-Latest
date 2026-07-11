@@ -27,6 +27,7 @@ import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, t
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame } from "./game.js";
 import * as social from "./social.js";
+import { rankBadge, applyMatchResult } from "./ranked.js";
 import { AI_LEVELS } from "./ai.js";
 
 const FB_VERSION = "10.12.2";
@@ -70,6 +71,10 @@ export async function ensureFirebase() {
     onValue: dbMod.onValue,
     onDisconnect: dbMod.onDisconnect,
     serverTimestamp: dbMod.serverTimestamp,
+    query: dbMod.query,
+    orderByChild: dbMod.orderByChild,
+    limitToLast: dbMod.limitToLast,
+    startAt: dbMod.startAt,
   };
   return fb;
 }
@@ -107,6 +112,43 @@ function sortPlayers(players) {
   return Object.entries(players ?? {}).sort(
     (a, b) => (a[1].joinedAt ?? 0) - (b[1].joinedAt ?? 0) || a[0].localeCompare(b[0]),
   );
+}
+
+async function myEloOrNull(f) {
+  const acc = social.getAccount();
+  if (!acc) return null;
+  try {
+    const s = await f.get(f.ref(f.db, `users/${acc.key}/elo`));
+    return s.exists() ? s.val() : 1000;
+  } catch (e) { return null; }
+}
+
+// Ranked lobbies are made by the matchmaker, never by hand: the
+// maker becomes host, everyone auto-starts once assembled.
+export async function createRankedLobby(expect) {
+  const f = await ensureFirebase();
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    const lobbyRef = f.ref(f.db, `lobbies/${code}`);
+    const existing = await f.get(lobbyRef);
+    if (existing.exists()) continue;
+    await f.set(lobbyRef, {
+      createdAt: f.serverTimestamp(),
+      hostId: myId(),
+      state: "waiting",
+      ranked: true,
+      expect,
+      players: { [myId()]: {
+        joinedAt: f.serverTimestamp(),
+        name: social.getAccount()?.name ?? null,
+        ukey: social.getAccount()?.key ?? null,
+        elo: await myEloOrNull(f),
+      } },
+    });
+    await enterLobby(code);
+    return code;
+  }
+  throw new Error("Couldn't find a free lobby code.");
 }
 
 // What the social layer needs to know about my current lobby.
@@ -148,7 +190,13 @@ async function createLobby() {
       createdAt: f.serverTimestamp(),
       hostId: myId(),
       state: "waiting",
-      players: { [myId()]: { joinedAt: f.serverTimestamp(), name: social.getAccount()?.name ?? null } },
+      hideCode: localStorage.getItem("tank.hideCode.v1") === "1",
+      players: { [myId()]: {
+        joinedAt: f.serverTimestamp(),
+        name: social.getAccount()?.name ?? null,
+        ukey: social.getAccount()?.key ?? null,
+        elo: await myEloOrNull(f),
+      } },
     });
     await enterLobby(code);
     return;
@@ -170,6 +218,8 @@ export async function joinLobby(code) {
     await f.set(f.ref(f.db, `lobbies/${code}/players/${myId()}`), {
       joinedAt: f.serverTimestamp(),
       name: social.getAccount()?.name ?? null,
+      ukey: social.getAccount()?.key ?? null,
+      elo: await myEloOrNull(f),
     });
   }
   await enterLobby(code);
@@ -278,12 +328,15 @@ async function removeBot(id) {
 
 // The code display honors this device's hide toggle — keep the room
 // number off-screen while streaming. Copy still copies the real code.
-function renderLobbyCode(code) {
-  const hidden = localStorage.getItem("tank.hideCode.v1") === "1";
+function renderLobbyCode(code, lobby) {
+  const hidden = !!lobby?.hideCode;
   const el = document.getElementById("lobby-code");
   el.textContent = hidden ? "••••" : code;
   const btn = document.getElementById("lobby-hide");
-  if (btn) btn.textContent = hidden ? "SHOW" : "HIDE";
+  if (btn) {
+    btn.textContent = hidden ? "SHOW" : "HIDE";
+    btn.hidden = !current?.isHost; // only the host holds this switch
+  }
 }
 
 /* ---------- snapshot routing ---------- */
@@ -383,7 +436,7 @@ function beginOnlineGame(code, lobby) {
   const resolved = resolveColors(entries);
   const roster = entries
     .slice(0, MAX_PLAYERS)
-    .map(([id, p]) => ({ id, color: resolved[id], bot: p.bot ?? null }));
+    .map(([id, p]) => ({ id, color: resolved[id], bot: p.bot ?? null, name: p.name ?? null }));
 
   if (!roster.some((p) => p.id === me && !p.bot)) {
     toast("The match started without you.");
@@ -394,7 +447,26 @@ function beginOnlineGame(code, lobby) {
   current.inGame = true;
   social.setStatus("round");
 
+  const rankedInfo = lobby.ranked
+    ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
+        id, key: p.ukey ?? null, elo: p.elo ?? 1000,
+      }))
+    : null;
+
   startOnlineGame({
+    ranked: !!lobby.ranked,
+    onRankedEnd: (placements) => {
+      // Everyone computes identically and writes only their OWN elo.
+      if (!rankedInfo) return;
+      const merged = placements.map((pl) => ({
+        ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000 }),
+        score: pl.score,
+      }));
+      applyMatchResult(merged).finally(() => {
+        leaveLobby();
+        showScreen("screen-ranked");
+      });
+    },
     roundN: lobby.round.n,
     seed: lobby.round.seed,
     myId: me,
@@ -449,11 +521,29 @@ function renderLobby(code, lobby) {
   const isHost = lobby.hostId === me;
   current.isHost = isHost;
   current.lastLobby = lobby;
+  renderLobbyCode(code, lobby);
   social.setStatus("lobby", code);
 
-  // Host with room (and an account) can beckon friends in.
+  // Host with room (and an account) can beckon friends in — but
+  // ranked lobbies are matchmade: no invites, no bots, auto-start.
   const socialBtn = document.getElementById("lobby-social");
-  socialBtn.hidden = !(isHost && social.getAccount());
+  socialBtn.hidden = !(isHost && social.getAccount()) || !!lobby.ranked;
+  if (lobby.ranked) {
+    document.getElementById("lobby-addbot").hidden = true;
+    document.getElementById("lobby-start").hidden = true;
+    if (isHost && lobby.state === "waiting") {
+      const count = Object.keys(lobby.players ?? {}).length;
+      const age = Date.now() - (lobby.createdAt ?? Date.now());
+      if (count >= (lobby.expect ?? 4) || (count >= 2 && age > 15000)) {
+        startMatch().catch(() => {});
+      } else if (!current.rankedTimer) {
+        current.rankedTimer = setTimeout(() => {
+          current.rankedTimer = 0;
+          if (current?.lastLobby) renderLobby(current.code, current.lastLobby);
+        }, 4000);
+      }
+    }
+  }
 
   const myIndex = entries.findIndex(([id]) => id === me);
   if (myIndex === -1) { toast("You were removed from the lobby."); exitToOnline(); return; }
@@ -469,7 +559,7 @@ function renderLobby(code, lobby) {
       .catch(() => { /* retried on next snapshot */ });
   }
 
-  renderLobbyCode(code);
+  renderLobbyCode(code, null); // real state paints on the first snapshot
 
   const resolved = resolveColors(entries);
   current.playersCache = entries;
@@ -521,7 +611,7 @@ function renderLobby(code, lobby) {
     return `
       <li class="lobby-row p-${color}">
         ${tankSVG(color)}
-        <span class="lobby-name">${p.name ?? COLOR_NAMES[color]}</span>
+        <span class="lobby-name">${typeof p.elo === "number" ? rankBadge(p.elo, 16) : ""} ${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");
@@ -591,11 +681,15 @@ export function initOnline() {
   const createBtn = document.getElementById("btn-create");
   const joinBtn = document.getElementById("btn-join");
   const startBtn = document.getElementById("lobby-start");
+  // The HOST's toggle hides the code for the whole lobby (synced —
+  // fresh joiners see it hidden from the first frame). The host's
+  // preference is also remembered on their device for future lobbies.
   const hideBtn = document.getElementById("lobby-hide");
   hideBtn.addEventListener("click", () => {
-    const k = "tank.hideCode.v1";
-    localStorage.setItem(k, localStorage.getItem(k) === "1" ? "0" : "1");
-    if (current) renderLobbyCode(current.code);
+    if (!current?.isHost) return;
+    const next = !(current.lastLobby?.hideCode);
+    localStorage.setItem("tank.hideCode.v1", next ? "1" : "0");
+    write("hideCode", next);
   });
 
   document.getElementById("lobby-social").addEventListener("click", () => {

@@ -6,7 +6,7 @@
 
 import { onEnter, onLeave, toast, COLORS, SLOT_NAMES, tankSVG } from "./main.js";
 import { getAudioLevels, setAudioLevel, sfx } from "./audio.js";
-import { getDnd, setDnd } from "./social.js";
+import { getDnd, setDnd, getNoRequests, setNoRequests } from "./social.js";
 
 const STORE_KEY = "tank.keybinds.v1";
 
@@ -194,6 +194,13 @@ function initAudioPanel() {
     dnd.checked = getDnd();
     paint();
     dnd.addEventListener("change", () => { setDnd(dnd.checked); paint(); });
+  }
+
+  // Block friend requests entirely (independent of DND).
+  const noreq = document.getElementById("noreq-toggle");
+  if (noreq) {
+    noreq.checked = getNoRequests();
+    noreq.addEventListener("change", () => setNoRequests(noreq.checked));
   }
 }
 
