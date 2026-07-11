@@ -88,6 +88,10 @@ Then open http://localhost:8080
    not secrets — committing them is normal. The rules are the lock.)
 6. Reload the site — the Online screen now shows Create/Join.
 
+> Note: the `.indexOn` on `users` is optional — the leaderboard sorts
+> on the client, so it works without it. The index just keeps very
+> large boards fast.
+
 ## Deploy: GitHub → Netlify
 
 ```bash

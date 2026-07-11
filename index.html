@@ -28,15 +28,15 @@
         <p class="tagline">Last tank rolling wins</p>
         <div class="tank-row" id="menu-tanks" aria-hidden="true"></div>
       </div>
-      <nav class="stack">
-        <button class="btn btn-big" data-go="screen-local">Local</button>
-        <button class="btn btn-big" data-go="screen-online">Online</button>
+      <nav class="menu-grid">
         <button class="btn btn-big" data-go="screen-ranked">Ranked</button>
+        <button class="btn btn-big" data-go="screen-online">Custom</button>
+        <button class="btn btn-big" data-go="screen-local">Local</button>
         <button class="btn btn-big" data-go="screen-social">Social</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
-        <button class="btn" id="menu-login" type="button">👤 LOG IN</button>
+        <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -58,7 +58,8 @@
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>Account</h2>
       </header>
-      <p class="hint">Sign in — or create an account with a username.</p>
+      <p class="hint">Sign in — or create an account with a username. You'll stay
+        signed in on this device until you log out.</p>
       <div class="form-col">
         <input type="email" id="login-email" placeholder="email" autocomplete="email">
         <input type="password" id="login-pass" placeholder="password (6+ characters)"
@@ -222,7 +223,7 @@
     <section class="screen" id="screen-online" aria-label="Online">
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
-        <h2>Online</h2>
+        <h2>Custom</h2>
       </header>
       <div class="stack" id="online-actions">
         <button class="btn btn-big" id="btn-create">Create lobby</button>
