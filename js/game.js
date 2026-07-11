@@ -43,14 +43,18 @@ const GEAR_EVERY_MS = 5500;    // then every 5.5–9 s
 
 const BULLET_SPEED = U * 3.2;
 const BULLET_R = U * 0.085;
-const BULLET_LIFE = 6000;   // ms a bullet keeps bouncing
-const MAX_BULLETS = 5;      // live bullets per tank (Tank Trouble classic)
+const BULLET_LIFE = 12000;  // ms a bullet keeps bouncing (doubled)
+const MAX_BULLETS = 3;      // live bullets per tank
+const BASIC_CD = 3500;      // ms between basic shots
 
 const ROUND_PAUSE = 2600;   // ms between rounds
 const NET_SEND_MS = 90;
 const MAZE_SIZES = [
   [7, 5], [7, 6], [8, 5], [8, 6], [8, 7], [9, 5],
   [9, 6], [9, 7], [10, 6], [10, 7], [11, 6], [11, 8],
+  // The big leagues: sprawling arenas for longer hunts.
+  [12, 8], [12, 9], [13, 9], [13, 10], [14, 10], [15, 10],
+  [15, 11], [16, 11], [17, 12], [18, 12],
 ];
 
 const HULL = PALETTE; // every pickable paint + the Impossible black
@@ -259,6 +263,7 @@ function begin(opts) {
     sendGun: opts.sendGun,
     onExit: opts.onExit,
     ranked: !!opts.ranked,
+    winTarget: opts.winTarget ?? 5,
     onRankedEnd: opts.onRankedEnd ?? null,
     matchOver: false,
     rankedEndFired: false,
@@ -505,6 +510,8 @@ function stepTanks(now, dt) {
             bulletR: BULLET_R,
             muzzle: BARRELS.normal.len * TANK_R + BULLET_R + 2,
             maxBullets: MAX_BULLETS,
+            basicCd: BASIC_CD,
+            cannonCd: CANNON.gapMs,
             moveSpeed: MOVE_SPEED,
           }, dt, now)
         : readActions(t, binds);
@@ -688,6 +695,8 @@ function clearWeapon(t, now) {
   t.mgIdleAt = 0;
   t.mgNext = 0;
   t.mgAmmo = null;
+  t.cnAmmo = null;
+  t.cnNext = 0;
   t.gunClearedAt = now;
   if (S.mode === "online" && t.local) S.sendGun?.(t.id, null);
 }
@@ -700,10 +709,13 @@ function tryFire(t, now) {
     return;
   }
 
+  if (now < (t.basicNext ?? 0)) return; // the barrel takes its time now
+
   let live = 0;
   for (const b of S.bullets) if (b.by === t.id && !b.mini) live++;
   if (live >= MAX_BULLETS) return;
 
+  t.basicNext = now + BASIC_CD;
   const m = muzzlePoint(t, BULLET_R);
   spawnBullet(t.id, m.x, m.y, t.a, now);
   sendTypedShot(t, { x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
@@ -721,9 +733,16 @@ function fireSpecial(t, now) {
     spawnRocket(t.id, m.x, m.y, t.a, now);
     sendTypedShot(t, { w: "rocket", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
   } else if (w === "cannon") {
+    // Three shells per crate, with a slow reload between them.
+    if (now < (t.cnNext ?? 0)) return;
+    t.cnAmmo ??= CANNON.shots;
     const m = muzzlePoint(t, CANNON.r * BULLET_R);
     spawnCannon(t.id, m.x, m.y, t.a, now);
     sendTypedShot(t, { w: "cannon", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+    t.cnAmmo -= 1;
+    t.cnNext = now + CANNON.gapMs;
+    if (t.cnAmmo > 0) return; // keep the gun until the shells are spent
+    t.cnAmmo = null;
   }
 
   clearWeapon(t, now);
@@ -1152,7 +1171,7 @@ function maybeEndRound(now) {
   const w = alive[0] ?? null;
   if (w) {
     S.scores[w.id] = (S.scores[w.id] ?? 0) + 1;
-    if (S.ranked && S.scores[w.id] >= 5) {
+    if (S.ranked && S.scores[w.id] >= (S.winTarget ?? 5)) {
       // Ranked: first to 5 round wins takes the whole match.
       S.matchOver = true;
       const who = S.roster.find((p) => p.id === w.id);

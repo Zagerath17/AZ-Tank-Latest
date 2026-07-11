@@ -56,9 +56,11 @@ export const ROCKET = {
 
 export const CANNON = {
   speed: 0.55,       // one slow-ish projectile
-  r: 1.5,            // big ball (but not comically big)
+  r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 3500,
-  shrapN: 22,        // irregular shrapnel burst on expiry / tank hit
+  shots: 3,          // three shells per crate
+  gapMs: 3500,       // reload between shells
+  shrapN: 30,        // irregular shrapnel burst on expiry / tank hit
   shrapSpeed: 1.1,
   shrapR: 0.6,
   wallSlow: 0.15,    // shrapnel crawls while phasing through a wall

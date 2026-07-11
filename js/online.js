@@ -114,18 +114,18 @@ function sortPlayers(players) {
   );
 }
 
-async function myEloOrNull(f) {
+async function myEloOrNull(f, field) {
   const acc = social.getAccount();
   if (!acc) return null;
   try {
-    const s = await f.get(f.ref(f.db, `users/${acc.key}/elo`));
-    return s.exists() ? s.val() : 1000;
+    const s = await f.get(f.ref(f.db, `users/${acc.key}/${field}`));
+    return s.exists() ? s.val() : 500;
   } catch (e) { return null; }
 }
 
 // Ranked lobbies are made by the matchmaker, never by hand: the
 // maker becomes host, everyone auto-starts once assembled.
-export async function createRankedLobby(expect) {
+export async function createRankedLobby(mode, expect) {
   const f = await ensureFirebase();
   for (let attempt = 0; attempt < 25; attempt++) {
     const code = String(Math.floor(1000 + Math.random() * 9000));
@@ -137,12 +137,14 @@ export async function createRankedLobby(expect) {
       hostId: myId(),
       state: "waiting",
       ranked: true,
+      rankedMode: mode, // "1v1" | "4p"
       expect,
       players: { [myId()]: {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
-        elo: await myEloOrNull(f),
+        e1: await myEloOrNull(f, "elo1"),
+        e4: await myEloOrNull(f, "elo4"),
       } },
     });
     await enterLobby(code);
@@ -195,7 +197,8 @@ async function createLobby() {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
-        elo: await myEloOrNull(f),
+        e1: await myEloOrNull(f, "elo1"),
+        e4: await myEloOrNull(f, "elo4"),
       } },
     });
     await enterLobby(code);
@@ -219,7 +222,8 @@ export async function joinLobby(code) {
       joinedAt: f.serverTimestamp(),
       name: social.getAccount()?.name ?? null,
       ukey: social.getAccount()?.key ?? null,
-      elo: await myEloOrNull(f),
+      e1: await myEloOrNull(f, "elo1"),
+      e4: await myEloOrNull(f, "elo4"),
     });
   }
   await enterLobby(code);
@@ -363,6 +367,13 @@ function handleSnapshot(code, snap) {
     write("hostId", me);
   }
 
+  if (lobby.state === "cancelled") {
+    toast("A player never arrived — match cancelled. Queue again!");
+    leaveLobby();
+    showScreen("screen-ranked");
+    return;
+  }
+
   if (current.inGame && lobby.state !== "starting") {
     // The host ended the match — everyone regroups in the lobby.
     stopGame();
@@ -447,14 +458,18 @@ function beginOnlineGame(code, lobby) {
   current.inGame = true;
   social.setStatus("round");
 
+  const rMode = lobby.rankedMode ?? "4p";
   const rankedInfo = lobby.ranked
     ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
-        id, key: p.ukey ?? null, elo: p.elo ?? 1000,
+        id,
+        key: p.ukey ?? null,
+        elo: (rMode === "1v1" ? p.e1 : p.e4) ?? 500,
       }))
     : null;
 
   startOnlineGame({
     ranked: !!lobby.ranked,
+    winTarget: lobby.ranked ? (rMode === "1v1" ? 3 : 5) : null,
     onRankedEnd: (placements) => {
       // Everyone computes identically and writes only their OWN elo.
       if (!rankedInfo) return;
@@ -462,7 +477,7 @@ function beginOnlineGame(code, lobby) {
         ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000 }),
         score: pl.score,
       }));
-      applyMatchResult(merged).finally(() => {
+      applyMatchResult(rMode, merged).finally(() => {
         leaveLobby();
         showScreen("screen-ranked");
       });
@@ -534,8 +549,10 @@ function renderLobby(code, lobby) {
     if (isHost && lobby.state === "waiting") {
       const count = Object.keys(lobby.players ?? {}).length;
       const age = Date.now() - (lobby.createdAt ?? Date.now());
-      if (count >= (lobby.expect ?? 4) || (count >= 2 && age > 15000)) {
-        startMatch().catch(() => {});
+      if (count >= (lobby.expect ?? 4)) {
+        startMatch().catch(() => {}); // strict size — no short-handed starts
+      } else if (age > 40000) {
+        write("state", "cancelled"); // a no-show — everyone re-queues
       } else if (!current.rankedTimer) {
         current.rankedTimer = setTimeout(() => {
           current.rankedTimer = 0;
@@ -611,7 +628,7 @@ function renderLobby(code, lobby) {
     return `
       <li class="lobby-row p-${color}">
         ${tankSVG(color)}
-        <span class="lobby-name">${typeof p.elo === "number" ? rankBadge(p.elo, 16) : ""} ${p.name ?? COLOR_NAMES[color]}</span>
+        <span class="lobby-name">${typeof p.e1 === "number" ? rankBadge(p.e1, 16) : ""} ${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");

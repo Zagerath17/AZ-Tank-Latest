@@ -156,7 +156,7 @@ export function botActions(t, world, dt, now) {
   const moveStuck = ai.wantedMove && movedSq < (dt * cell * 0.2) ** 2;
   const turnStuck = ai.wantedTurn && turned < dt * 0.4;
   ai.stuckT = moveStuck || turnStuck ? ai.stuckT + dt : 0;
-  if (ai.stuckT > 0.55) {
+  if (ai.stuckT > 0.42) { // corners get un-stuck FAST
     ai.stuckT = 0;
     const progressed = (t.x - ai.jamX) ** 2 + (t.y - ai.jamY) ** 2 > (cell * 0.4) ** 2;
     ai.escMode = progressed ? Math.floor(Math.random() * ESCAPES.length) : ai.escMode + 1;
@@ -402,9 +402,14 @@ export function botActions(t, world, dt, now) {
           // (canFire) still stop a dry mag.
           if (ai.burstLeft > 0) ai.burstLeft -= 1;
           else ai.burstLeft = (P.burst ?? 1) - 1;
+          // The basic barrel now has a hard 3.5 s reload — no point
+          // pulling a dead trigger. Specials keep their own pacing.
+          const floorCd = special
+            ? (special === "cannon" ? (world.cannonCd ?? 0) + 120 : 0)
+            : (world.basicCd ?? 0) + 120;
           ai.fireAt = ai.burstLeft > 0
-            ? now + Math.max(160, P.cooldown * 1000 * 0.35)
-            : now + P.cooldown * 1000 * (0.8 + Math.random() * 0.4);
+            ? now + Math.max(160, P.cooldown * 1000 * 0.35, floorCd)
+            : now + Math.max(P.cooldown * 1000 * (0.8 + Math.random() * 0.4), floorCd);
           if (Math.random() < P.fireProb) acts.shoot = true;
         } else {
           ai.fireAt = now + 220; // bad angle — hold fire...
@@ -526,7 +531,10 @@ function navigate(t, ai, target, world, P, rBody, now, acts) {
     const w = ai.path[i];
     const wx = (w.c + 0.5) * cell;
     const wy = (w.r + 0.5) * cell;
-    if (corridorClear(t.x, t.y, wx, wy, world.rects, rBody)) {
+    // Extra margin (1.18×): the sight-line can squeak past a corner
+    // that the hull's swinging shoulders then catch. Costing a bit
+    // of corner-cutting buys never getting hooked on the edge.
+    if (corridorClear(t.x, t.y, wx, wy, world.rects, rBody * 1.18)) {
       aimX = wx; aimY = wy; found = true;
     }
   }
