@@ -765,40 +765,7 @@ body {
   color: inherit;
   font: inherit;
 }
-.ptt-dot {
-  width: 14px; height: 14px; border-radius: 50%;
-  background: #566072; flex: none;
-  transition: background .12s, box-shadow .12s;
-}
-.ptt-dot.live { background: #46d160; box-shadow: 0 0 8px #46d160; }
 
-/* ---- voice settings + player mixer ---- */
-.select {
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(255,255,255,.2);
-  background: rgba(255,255,255,.06);
-  color: inherit;
-  font: inherit;
-}
-.player-mixer { margin-bottom: 16px; }
-.player-mixer ul { display: flex; flex-direction: column; gap: 8px; }
-.mixer-row {
-  display: grid;
-  grid-template-columns: 1fr 2fr auto auto;
-  gap: 8px;
-  align-items: center;
-  padding: 6px 8px;
-  border-radius: 8px;
-  background: rgba(255,255,255,.04);
-  border-left: 4px solid var(--p, #7e8ba3);
-}
-.mixer-name { font-weight: 600; font-size: .9rem; }
-.mixer-gain { accent-color: var(--red, #ff5147); }
-.mixer-mute.is-on, .mixer-block.is-on { background: var(--red, #ff5147); color: #fff; }
-.online-binds { margin-top: 18px; border-top: 1px solid rgba(255,255,255,.12); padding-top: 12px; }
-.online-binds h3, .player-mixer h3 { margin-bottom: 10px; opacity: .85; }
-.bind-row { display: flex; align-items: center; gap: 12px; }
 .bind-row span { flex: 1; }
 
 /* ---- versus / loading ---- */
@@ -958,6 +925,35 @@ body {
   text-shadow: 0 2px 4px rgba(0,0,0,.6);
   pointer-events: none;
   white-space: nowrap;
+}
+
+/* Health readout, bottom-left of the arena: pips (hearts) plus a
+   number, both outside the play canvas. */
+.health-hud {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  pointer-events: none;
+  text-shadow: 0 2px 4px rgba(0,0,0,.6);
+}
+.health-hud .hp-pips { display: flex; gap: 3px; }
+.health-hud .hp-pip {
+  width: clamp(9px, 1.5vw, 14px);
+  height: clamp(9px, 1.5vw, 14px);
+  border-radius: 3px;
+  background: #3bd16f;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.35);
+}
+.health-hud .hp-pip.spent { background: rgba(255,255,255,.16); }
+.health-hud .hp-num {
+  font-family: "Black Ops One", system-ui;
+  font-size: clamp(.85rem, 2.2vw, 1.15rem);
+  color: #eaf2ea;
+  min-width: 2.2ch;
 }
 
 .shrink-timer {
