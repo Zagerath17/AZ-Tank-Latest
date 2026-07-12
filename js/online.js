@@ -393,14 +393,16 @@ async function removeBot(id) {
 
 // The code display honors this device's hide toggle — keep the room
 // number off-screen while streaming. Copy still copies the real code.
+// This is a LOCAL preference (not synced): anyone can hide their own
+// view without affecting other players.
 function renderLobbyCode(code, lobby) {
-  const hidden = !!lobby?.hideCode;
+  const hidden = localStorage.getItem("tank.hideCode.v1") === "1";
   const el = document.getElementById("lobby-code");
-  el.textContent = hidden ? "••••" : code;
+  if (el) el.textContent = hidden ? "••••" : (code ?? "····");
   const btn = document.getElementById("lobby-hide");
   if (btn) {
     btn.textContent = hidden ? "SHOW" : "HIDE";
-    btn.hidden = !current?.isHost; // only the host holds this switch
+    btn.hidden = false; // available to everyone, host or not
   }
 }
 
@@ -842,14 +844,14 @@ export function initOnline() {
   const joinBtn = document.getElementById("btn-join");
   const startBtn = document.getElementById("lobby-start");
   // The HOST's toggle hides the code for the whole lobby (synced —
-  // fresh joiners see it hidden from the first frame). The host's
-  // preference is also remembered on their device for future lobbies.
+  // Hiding the code is a local, per-device toggle (handy while
+  // streaming). It flips this device's preference and re-renders at
+  // once — no host check, no server round-trip.
   const hideBtn = document.getElementById("lobby-hide");
   hideBtn.addEventListener("click", () => {
-    if (!current?.isHost) return;
-    const next = !(current.lastLobby?.hideCode);
-    localStorage.setItem("tank.hideCode.v1", next ? "1" : "0");
-    write("hideCode", next);
+    const now = localStorage.getItem("tank.hideCode.v1") === "1";
+    localStorage.setItem("tank.hideCode.v1", now ? "0" : "1");
+    renderLobbyCode(current?.code, current?.lastLobby);
   });
 
   document.getElementById("lobby-social").addEventListener("click", () => {

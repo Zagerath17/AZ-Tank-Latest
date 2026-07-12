@@ -363,8 +363,8 @@ function startRound(seed) {
   // behind a fresh border. After the arena hits minimum size, one
   // more minute and the ENTIRE floor flashes and collapses — a draw.
   S.shrinkLevel = 0;
-  S.shrinkWarnAt = S.ranked ? S.freezeUntil + 55000 : Infinity; // flash starts
-  S.shrinkCutAt = S.ranked ? S.freezeUntil + 60000 : Infinity;  // ring drops
+  S.shrinkWarnAt = S.ranked ? S.freezeUntil + 25000 : Infinity; // flash starts
+  S.shrinkCutAt = S.ranked ? S.freezeUntil + 30000 : Infinity;  // ring drops
   S.shrinkFlashTick = -1; // last second we played a flash tick for
   S.finalCollapse = false;
   S.rockets = [];
@@ -376,8 +376,10 @@ function startRound(seed) {
   S.booms = [];
   S.seenShots = {};
   S.banner = null;
+  S.personalMsg = null;
   S.roundOverAt = 0;
   S.sentNext = false;
+  for (const t of S.tanks) { t.phaseUntil = 0; t.wasPhasing = false; t.ejecting = false; }
 
   // Players 1 & 2 in opposite corners, 3 & 4 in the other pair.
   const corners = [
@@ -602,7 +604,9 @@ function stepTanks(now, dt) {
       if (acts.up) v += MOVE_SPEED * mul.speed * boostMul;
       if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul;
 
-      if (v !== 0) {
+      // The engine is "running" whenever the tank drives OR turns in
+      // place — a stationary spin still spins the treads.
+      if (v !== 0 || turn !== 0) {
         const isMine = S.mode === "online" ? (t.id === S.myId) : !t.bot;
         if (isMine) S.engineMovingLocal = true;
         else S.engineMovingEnemy = true;
@@ -619,19 +623,22 @@ function stepTanks(now, dt) {
       }
 
       // Kick up a faint dust puff behind a driving tank. While boosting
-      // the trail lasts 20% longer, sits 10% darker, and throws yellow
-      // sparks.
+      // the trail lasts 20% longer, reads much darker, DOUBLES the puff
+      // count, and throws yellow sparks.
       if (v !== 0 && now >= (t.dustAt ?? 0)) {
         t.dustAt = now + 65 + Math.random() * 45;
         const back = v > 0 ? -1 : 1;
-        S.dust.push({
-          x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
-          y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
-          vx: Math.cos(t.a) * back * 9 + (Math.random() - 0.5) * 8,
-          vy: Math.sin(t.a) * back * 9 + (Math.random() - 0.5) * 8,
-          born: now,
-          boost: boosting,
-        });
+        const puffs = boosting ? 2 : 1; // boost dispenses double the dust
+        for (let p = 0; p < puffs; p++) {
+          S.dust.push({
+            x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
+            y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
+            vx: Math.cos(t.a) * back * 9 + (Math.random() - 0.5) * 8,
+            vy: Math.sin(t.a) * back * 9 + (Math.random() - 0.5) * 8,
+            born: now,
+            boost: boosting,
+          });
+        }
         if (boosting) {
           // A couple of bright yellow sparks riding inside the dust.
           for (let k = 0; k < 2; k++) {
@@ -645,7 +652,7 @@ function stepTanks(now, dt) {
             });
           }
         }
-        while (S.dust.length > 320) S.dust.shift();
+        while (S.dust.length > 400) S.dust.shift();
       }
 
       if (v !== 0) {
@@ -665,12 +672,15 @@ function stepTanks(now, dt) {
         }
       }
 
-      // Phase just ended while sitting inside a wall? Smoothly nudge
-      // the tank to the nearest open spot so it isn't stuck.
-      if (t.wasPhasing && !phasing) {
-        ejectFromWall(t, dt);
-      }
+      // Phase just ended? Mark the tank for ejection. It then glides
+      // out over as many frames as it takes (see ejectFromWall), not
+      // just the single frame the ability expired.
+      if (t.wasPhasing && !phasing) t.ejecting = true;
       t.wasPhasing = phasing;
+      if (t.ejecting && !phasing) {
+        const clear = ejectFromWall(t, dt);
+        if (clear) t.ejecting = false;
+      }
 
       if (acts.shoot && !t.prevShoot && !phasing) tryFire(t, now);
       t.prevShoot = acts.shoot;
@@ -1235,14 +1245,14 @@ function stepShrink(now) {
   sfx.boom(0.5);
 
   // Schedule the next event: another shrink, or — if we've bottomed
-  // out — the one-minute fuse to the final all-map collapse.
+  // out — the 30-second fuse to the final all-map collapse.
   if (canShrinkMore()) {
-    S.shrinkWarnAt = now + 55000;
-    S.shrinkCutAt = now + 60000;
+    S.shrinkWarnAt = now + 25000;
+    S.shrinkCutAt = now + 30000;
   } else {
     S.finalCollapse = true;
-    S.shrinkWarnAt = now + 55000;
-    S.shrinkCutAt = now + 60000;
+    S.shrinkWarnAt = now + 25000;
+    S.shrinkCutAt = now + 30000;
   }
   S.shrinkFlashTick = -1;
 }
@@ -1698,6 +1708,21 @@ function killTank(t) {
   t.dead = true;
   sfx.boom();
   if (S.mode === "online" && t.local) S.sendDead?.(t.id);
+
+  // If the tank that just died is the local human's, show a black
+  // "Destroyed" message. It clears after 2 s (so they can spectate)
+  // as long as the round is still going. If they were the last one
+  // out, the round-end banner takes over anyway.
+  if (isLocalHuman(t)) {
+    S.personalMsg = { text: "Destroyed", color: "#0a0c10", born: performance.now(), kind: "dead" };
+  }
+}
+
+// The tank the human on THIS device controls (online: their id; local
+// hot-seat: the first non-bot seat).
+function isLocalHuman(t) {
+  if (!t) return false;
+  return S.mode === "online" ? t.id === S.myId : (!t.bot && t === S.tanks.find((x) => !x.bot));
 }
 
 /* ---------- rounds ---------- */
@@ -1720,6 +1745,10 @@ function maybeEndRound(now) {
       };
     } else {
       S.banner = { text: `${COLOR_NAMES[w.color].toUpperCase()} WINS THE ROUND`, color: HULL[w.color] };
+    }
+    // If the local human won the round, flash a gold "Victory".
+    if (isLocalHuman(w)) {
+      S.personalMsg = { text: "Victory", color: "#ffd23f", born: now, kind: "win" };
     }
     sfx.roundEnd();
   } else {
@@ -1798,30 +1827,49 @@ function obbHitsRect(x, y, a, rc, hl = TANK_HL, hw = TANK_HW) {
 // wall is blocked, exactly like the hull.
 // After phase ends, if the tank is buried in a wall, ease it to the
 // closest open spot (a few px per frame — "smoothly pushes you out").
+// Returns true once the tank is fully clear. Called every frame while
+// t.ejecting is set, so the glide plays out smoothly over time.
 function ejectFromWall(t, dt) {
-  if (!tankHitsAnyWall(t, t.x, t.y, t.a)) return;
-  // Sample rings of increasing radius for the nearest free point.
+  // Clear of BOTH maze walls and any player-built brick wall?
+  if (!tankHitsAnyWall(t, t.x, t.y, t.a) && !tankInBrickWall(t, t.x, t.y)) {
+    return true;
+  }
+  // Find the nearest position that clears everything.
   let best = null, bestD = Infinity;
-  for (let r = 4; r <= CELL * 1.2 && !best; r += 4) {
-    for (let k = 0; k < 16; k++) {
-      const ang = (k / 16) * Math.PI * 2;
+  for (let r = 4; r <= CELL * 1.6; r += 4) {
+    for (let k = 0; k < 24; k++) {
+      const ang = (k / 24) * Math.PI * 2;
       const px = t.x + Math.cos(ang) * r;
       const py = t.y + Math.sin(ang) * r;
-      if (!tankHitsAnyWall(t, px, py, t.a)) {
+      if (!tankHitsAnyWall(t, px, py, t.a) && !tankInBrickWall(t, px, py)) {
         const d = (px - t.x) ** 2 + (py - t.y) ** 2;
         if (d < bestD) { bestD = d; best = { x: px, y: py }; }
       }
     }
     if (best) break;
   }
-  if (!best) return;
-  // Glide toward it: up to ~220 px/s so the push reads as smooth.
+  if (!best) return false;
+  // Glide toward it: up to ~260 px/s so the push reads as smooth but
+  // doesn't dawdle.
   const dx = best.x - t.x, dy = best.y - t.y;
   const dist = Math.hypot(dx, dy) || 1;
-  const step = Math.min(dist, 220 * dt);
+  const step = Math.min(dist, 260 * dt);
   t.x += (dx / dist) * step;
   t.y += (dy / dist) * step;
   t.tx = t.x; t.ty = t.y;
+  return dist <= step + 0.5; // reached it this frame → clear
+}
+
+// Does the tank (circle approx) overlap any player-built brick wall?
+function tankInBrickWall(t, x, y) {
+  for (const w of S.walls) {
+    const ca = Math.cos(w.a), sa = Math.sin(w.a);
+    const dx = x - w.x, dy = y - w.y;
+    const lx = dx * ca + dy * sa;
+    const ly = -dx * sa + dy * ca;
+    if (Math.abs(lx) < w.hx + TANK_RAD && Math.abs(ly) < w.hy + TANK_RAD) return true;
+  }
+  return false;
 }
 
 function tankHitsAnyWall(t, x, y, a) {
@@ -1997,7 +2045,7 @@ function draw(now) {
       ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.08 + k * 0.06), 0, Math.PI * 2);
       ctx.fill();
     } else {
-      ctx.fillStyle = d.boost ? "#7d8492" : "#8b93a3"; // boosted = 10% darker
+      ctx.fillStyle = d.boost ? "#646974" : "#8b93a3"; // boosted = 20% darker again
       ctx.globalAlpha = (d.boost ? 0.18 : 0.16) * (1 - k);
       ctx.beginPath();
       ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.22 + k * 0.4), 0, Math.PI * 2);
@@ -2049,17 +2097,18 @@ function draw(now) {
     ctx.fill();
   }
 
-  // Sniper slugs: a slim teal round with a short motion streak.
+  // Sniper slugs: a black ball (sized between a basic and MG round)
+  // with a short dark motion streak.
   for (const s of S.snipes) {
     const len = 10;
     const sp = Math.hypot(s.vx, s.vy) || 1;
-    ctx.strokeStyle = "rgba(51,194,176,.55)";
-    ctx.lineWidth = SNIPER.r * BULLET_R * 1.4;
+    ctx.strokeStyle = "rgba(20,24,28,.5)";
+    ctx.lineWidth = SNIPER.r * BULLET_R * 1.2;
     ctx.beginPath();
     ctx.moveTo(s.x - (s.vx / sp) * len, s.y - (s.vy / sp) * len);
     ctx.lineTo(s.x, s.y);
     ctx.stroke();
-    ctx.fillStyle = "#33c2b0";
+    ctx.fillStyle = "#14181c";
     ctx.beginPath();
     ctx.arc(s.x, s.y, SNIPER.r * BULLET_R, 0, Math.PI * 2);
     ctx.fill();
@@ -2152,7 +2201,17 @@ function draw(now) {
     ctx.globalAlpha = 1;
   }
 
-  if (S.banner) drawBanner();
+  // Round result. If the LOCAL player won this round, the gold
+  // "Victory" message stands in for the generic "X WINS" banner — we
+  // still dim the field, but skip the banner's own text to avoid two
+  // overlapping headlines. Otherwise draw the banner normally.
+  const personalWin = S.personalMsg && S.personalMsg.kind === "win";
+  if (S.banner && !personalWin) drawBanner();
+  else if (S.banner && personalWin) {
+    ctx.fillStyle = "rgba(10, 12, 16, .55)";
+    ctx.fillRect(0, 0, S.worldW, S.worldH);
+  }
+  if (S.personalMsg) drawPersonalMsg(now);
 
   if (counting) {
     if ("filter" in ctx) ctx.filter = "none";
@@ -2274,18 +2333,12 @@ function drawWall(w, now) {
     ctx.moveTo(x2, 0); ctx.lineTo(x2, T);         // bottom course, staggered
   }
   ctx.stroke();
-  // Damage tint as HP drops.
+  // Damage tint as HP drops (the only visual cue — no timer bar).
   const frac = Math.max(0, w.hp / WALL.hp);
   if (frac < 1) {
     ctx.fillStyle = `rgba(20,10,6,${(1 - frac) * 0.4})`;
     ctx.fillRect(-L, -T, L * 2, T * 2);
   }
-  // Life timer: a thin bar above the slab that drains over 10 s.
-  const life = 1 - (now - w.born) / WALL.lifeMs;
-  ctx.fillStyle = "rgba(0,0,0,.4)";
-  ctx.fillRect(-L, -T - 6, L * 2, 3);
-  ctx.fillStyle = "#ffd23f";
-  ctx.fillRect(-L, -T - 6, L * 2 * Math.max(0, life), 3);
   ctx.restore();
 }
 
@@ -2367,6 +2420,41 @@ function drawWreck(t) {
   ctx.beginPath();
   ctx.arc(0, 0, TANK_R * 0.32, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+}
+
+// A personal, centered message for the local player: "Destroyed"
+// (black) on death, "Victory" (gold) on a round win. The death one
+// fades out after 2 s so the player can spectate the rest of the round.
+function drawPersonalMsg(now) {
+  const m = S.personalMsg;
+  if (!m) return;
+  const age = now - m.born;
+  // Death message auto-clears after 2 s (unless the round already
+  // ended and its banner is up, which supersedes it visually).
+  if (m.kind === "dead" && age > 2000) { S.personalMsg = null; return; }
+  // Fade in over 150 ms; the death one fades out over its final 400 ms.
+  let alpha = Math.min(1, age / 150);
+  if (m.kind === "dead") alpha *= Math.min(1, Math.max(0, (2000 - age) / 400));
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  let size = CELL * 0.9;
+  ctx.font = `${size}px "Black Ops One", system-ui, sans-serif`;
+  const tw = ctx.measureText(m.text).width;
+  if (tw > S.worldW * 0.9) {
+    size *= (S.worldW * 0.9) / tw;
+    ctx.font = `${size}px "Black Ops One", system-ui, sans-serif`;
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Subtle outline so black reads on dark walls and gold reads on white.
+  ctx.lineWidth = size * 0.08;
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = m.kind === "dead" ? "rgba(245,247,250,.6)" : "rgba(10,12,16,.7)";
+  ctx.strokeText(m.text, S.worldW / 2, S.worldH / 2);
+  ctx.fillStyle = m.color;
+  ctx.fillText(m.text, S.worldW / 2, S.worldH / 2);
   ctx.restore();
 }
 

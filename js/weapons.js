@@ -42,7 +42,7 @@ export const SNIPER = {
   rangeCells: 5,     // the bullet dies after this many cells
   previewCells: 3,   // aim preview reaches this far (no bounce)
   speed: 4.2,        // × normal bullet — a fast round
-  r: 0.42,           // slim slug, × bullet radius
+  r: 0.75,           // between a basic ball (1.0) and an MG ball (0.5)
 };
 
 export const BOOST = {
@@ -61,7 +61,7 @@ export const PHASE = {
 export const WALL = {
   lifeMs: 10000,
   lengthCells: 0.5,  // half a cell long
-  thickCells: 0.16,  // slab thickness
+  thickCells: 0.1067, // slab thickness (2/3 of the original 0.16)
   // "health" is abstract; each weapon subtracts a share sized so the
   // stated shot-counts destroy it. HP = 12 (LCM-friendly):
   //   basic 3 shots → 4 each; fractal 4 → 3; MG 7 → ~1.72;
@@ -105,7 +105,7 @@ export const CANNON = {
   speed: 0.55,       // one slow-ish projectile
   r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 3500,
-  shrapN: 30,        // irregular shrapnel burst on expiry / tank hit
+  shrapN: 36,        // irregular shrapnel burst on expiry / tank hit
   shrapSpeed: 1.1,
   shrapR: 0.6,
   wallSlow: 0.15,    // shrapnel crawls while phasing through a wall
@@ -437,6 +437,8 @@ export const GEAR_RIM = {
   cannon: "#566072",  // steel
   sniper: "#33c2b0",  // teal
   boost: "#ffd23f",   // yellow
+  phase: "#b06bff",   // purple
+  wall: "#c8823c",    // brick orange
 };
 export const WEAPON_NAMES = {
   laser: "Laser",
@@ -445,6 +447,8 @@ export const WEAPON_NAMES = {
   cannon: "Cannon",
   sniper: "Sniper",
   boost: "Speed Boost",
+  phase: "Phase",
+  wall: "Wall",
 };
 
 function easeOutBack(t) {
@@ -598,6 +602,83 @@ export function drawGear(ctx, g, R, pulse, now = 0) {
         ctx.beginPath();
         ctx.arc(R * 0.06, 0, R * ro, a0, a1);
         ctx.stroke();
+      }
+      break;
+    }
+    case "sniper": {
+      // A crosshair over a small black round — precision.
+      ctx.strokeStyle = rim;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 0.28, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineCap = "round";
+      for (const [x0, y0, x1, y1] of [
+        [-0.42, 0, -0.16, 0], [0.16, 0, 0.42, 0],
+        [0, -0.42, 0, -0.16], [0, 0.16, 0, 0.42],
+      ]) {
+        ctx.beginPath();
+        ctx.moveTo(x0 * R, y0 * R);
+        ctx.lineTo(x1 * R, y1 * R);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#20242c";
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 0.09, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    case "boost": {
+      // A double chevron pointing right — speed.
+      ctx.strokeStyle = rim;
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      for (const dx of [-0.16, 0.14]) {
+        ctx.beginPath();
+        ctx.moveTo((dx - 0.16) * R, -R * 0.24);
+        ctx.lineTo((dx + 0.16) * R, 0);
+        ctx.lineTo((dx - 0.16) * R, R * 0.24);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "phase": {
+      // A ghostly ring with a dashed inner ring — intangibility.
+      ctx.strokeStyle = rim;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 0.3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([R * 0.12, R * 0.1]);
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 0.16, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      break;
+    }
+    case "wall": {
+      // A little brick wall — a couple of staggered courses.
+      ctx.fillStyle = rim;
+      const bw = R * 0.44, bh = R * 0.16;
+      rrect(-bw, -R * 0.24, bw * 2, bh, R * 0.03);
+      rrect(-bw, -R * 0.04, bw * 2, bh, R * 0.03);
+      rrect(-bw, R * 0.16, bw * 2, bh, R * 0.03);
+      ctx.strokeStyle = "rgba(40, 22, 12, 0.5)";
+      ctx.lineWidth = 1.4;
+      // vertical mortar joints, staggered per course
+      for (const [y, off] of [[-0.24, 0], [-0.04, 0.22], [0.16, 0]]) {
+        for (const fx of [-0.5, 0, 0.5]) {
+          const x = (fx + off) * bw;
+          if (x <= -bw || x >= bw) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, y * R);
+          ctx.lineTo(x, (y * R) + bh);
+          ctx.stroke();
+        }
       }
       break;
     }

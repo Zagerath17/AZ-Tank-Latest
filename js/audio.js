@@ -375,7 +375,7 @@ export const sfx = {
 // A quiet two-oscillator rumble through a lowpass. Idles softly the
 // whole match; revs (louder, higher) while a local tank is driving.
 // active: match is live. localMoving: a tank YOU drive is moving.
-// enemyMoving: some other tank is moving (heard at 50% weight). The
+// enemyMoving: some other tank is moving (heard at 30% weight). The
 // whole engine bed is then 20% louder than the old baseline.
 export function setEngine(active, localMoving, enemyMoving) {
   if (!ready()) return;
@@ -403,11 +403,11 @@ export function setEngine(active, localMoving, enemyMoving) {
     }
     const t = ctx.currentTime;
     const LOUD = 1.2; // everything 20% louder than the old levels
-    // Contributions: your engine full, enemy engines at half weight.
+    // Contributions: your engine full, enemy engines at 30% weight.
     // idle bed is always present while active.
     const idle = 0.018;
     const localRev = localMoving ? 0.05 : 0;
-    const enemyRev = enemyMoving ? 0.05 * 0.5 : 0;
+    const enemyRev = enemyMoving ? 0.05 * 0.3 : 0;
     const anyMoving = localMoving || enemyMoving;
     // Take the loudest driver for pitch, sum the beds for volume.
     const target = !active ? 0 : Math.max(idle, localRev + enemyRev) * LOUD;

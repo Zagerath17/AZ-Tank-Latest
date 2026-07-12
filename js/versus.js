@@ -35,34 +35,36 @@ export async function showVersus(roster, myId, mode) {
   const host = document.getElementById("versus-body");
   const acc = getAccount();
 
-  // Big white "W - L" numerals sit UNDER each tank. A dash separates
-  // them; no letters. Records fill in async once fetched.
-  const spriteBlock = (r, isMe) => `
+  // ONE giant number sits under each tank — your wins under yours, the
+  // opponent's wins under theirs — with a single hyphen spanning the
+  // gap between them (e.g. 2 — 1). Filled in async once fetched.
+  const spriteBlock = (r, isMe, side) => `
     <div class="vs-fighter p-${r.color}${isMe ? " vs-me" : ""}">
       ${tankSVG(r.color)}
       <span class="vs-name">${r.name ?? "Player"}</span>
-      <span class="vs-record" data-fighter="${r.id}">
-        <span class="vs-w">–</span><span class="vs-dash">-</span><span class="vs-l">–</span>
-      </span>
+      <span class="vs-score" data-fighter="${r.id}" data-side="${side}">–</span>
     </div>`;
 
+  // 1v1: your record vs the single opponent. The dash lives in the
+  // center column so it reads as one ratio across both cards.
+  const only = foes[0];
   host.innerHTML = `
-    <div class="vs-side">${spriteBlock(meRow ?? { id: "me", color: "slate", name: "You" }, true)}</div>
-    <div class="vs-mid">VS</div>
-    <div class="vs-side vs-foes">${foes.map((f) => spriteBlock(f, false)).join("")}</div>`;
+    <div class="vs-side">${spriteBlock(meRow ?? { id: "me", color: "slate", name: "You" }, true, "me")}</div>
+    <div class="vs-mid"><span class="vs-vs">VS</span><span class="vs-ratio-dash">-</span></div>
+    <div class="vs-side vs-foes">${foes.map((f, i) => spriteBlock(f, false, "foe")).join("")}</div>`;
 
   if (!acc) return;
   try {
     const f = await ensureFirebase();
     const recs = await Promise.all(foes.map((fo) => recordVs(f, fo.ukey)));
+    // Your wins go under your card; the opponent's wins (= your losses
+    // to them) go under theirs.
+    const myBox = host.querySelector('.vs-score[data-side="me"]');
+    if (only && only.ukey && myBox) myBox.textContent = recs[0].w;
     foes.forEach((fo, i) => {
       if (!fo.ukey) return;
-      const rec = recs[i];
-      const box = host.querySelector(`.vs-record[data-fighter="${fo.id}"]`);
-      if (box) {
-        box.querySelector(".vs-w").textContent = rec.w;
-        box.querySelector(".vs-l").textContent = rec.l;
-      }
+      const box = host.querySelector(`.vs-score[data-fighter="${fo.id}"]`);
+      if (box) box.textContent = recs[i].l; // opponent's wins over you
     });
   } catch (e) { /* records are cosmetic */ }
 }
