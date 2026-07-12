@@ -36,7 +36,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.2.5</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ LOCAL ============ -->
@@ -136,58 +136,13 @@
       <div class="settings-tabs">
         <button class="btn tab-btn is-on" id="tab-controls" type="button">Controls</button>
         <button class="btn tab-btn" id="tab-audio" type="button">Audio</button>
-        <button class="btn tab-btn" id="tab-voice" type="button">Voice</button>
       </div>
       <div id="panel-controls">
         <p class="hint">Tap a key to rebind it, then press the new key. Esc cancels. These apply to local battles.</p>
         <div class="binds" id="binds"></div>
         <button class="btn" id="binds-reset">Reset to defaults</button>
-        <div class="online-binds">
-          <h3>Online keybinds</h3>
-          <div class="bind-row">
-            <span>Push to talk</span>
-            <button class="btn btn-small key-btn" id="bind-ptt" data-bind="ptt">V</button>
-          </div>
-        </div>
       </div>
-      <div id="panel-voice" hidden>
-        <p class="hint">Voice chat is push-to-talk by default. These settings are saved to your account.</p>
-        <div class="vol-row">
-          <label for="voice-mode">Voice chat</label>
-          <select id="voice-mode" class="select">
-            <option value="ptt">Push to talk</option>
-            <option value="on">Always on</option>
-            <option value="off">Off</option>
-          </select>
-          <span class="vol-val"></span>
-        </div>
-        <div class="vol-row">
-          <label for="voice-input">Input device</label>
-          <select id="voice-input" class="select"><option value="">Default</option></select>
-          <span class="vol-val"></span>
-        </div>
-        <div class="vol-row">
-          <label for="voice-output">Output device</label>
-          <select id="voice-output" class="select"><option value="">Default</option></select>
-          <span class="vol-val"></span>
-        </div>
-        <div class="vol-row">
-          <label for="voice-ingain">Input gain</label>
-          <input type="range" id="voice-ingain" min="0" max="200" step="1">
-          <span class="vol-val" id="voice-ingain-val">100%</span>
-        </div>
-        <div class="vol-row">
-          <label for="voice-outgain">Output gain</label>
-          <input type="range" id="voice-outgain" min="0" max="200" step="1">
-          <span class="vol-val" id="voice-outgain-val">100%</span>
-        </div>
-      </div>
-
       <div id="panel-audio" hidden>
-        <div class="player-mixer" id="player-mixer" hidden>
-          <h3>Players in your lobby</h3>
-          <ul id="player-mixer-list"></ul>
-        </div>
         <p class="hint">Levels apply instantly and are remembered on this device.</p>
         <div class="vol-row">
           <label for="vol-master">Master volume</label>
@@ -277,7 +232,6 @@
         <div class="chat-box" id="lobby-chat">
           <div class="chat-log" id="chat-log"></div>
           <div class="chat-row">
-            <span class="ptt-dot" id="ptt-indicator" title="Voice"></span>
             <input type="text" id="chat-input" maxlength="240" placeholder="Message…"
                    autocomplete="off">
             <button class="btn btn-small" id="chat-send" type="button">Send</button>
@@ -297,6 +251,7 @@
       </header>
       <div class="arena-wrap">
         <canvas id="arena"></canvas>
+        <span class="health-hud" id="health-hud" hidden></span>
         <span class="weapon-hud" id="weapon-hud" hidden></span>
       </div>
       <div class="touch-pad" id="touch-pad" hidden>
