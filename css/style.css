@@ -73,30 +73,71 @@ body {
 
 /* ===== Landscape / wide: the game wants a horizontal stage ===== */
 @media (min-aspect-ratio: 13/10) {
-  #app { width: 100%; max-width: 1100px; }
-  .screen.is-active { gap: 12px; }
+  #app { width: 100%; max-width: 1180px; padding-inline: 32px; }
+  .screen.is-active { gap: 16px; }
   .binds { grid-template-columns: 1fr 1fr; }
 
-  /* Menu becomes a left hero + right 2-column button grid, centered,
-     so nothing scrolls even on a short phone-in-landscape screen. */
+  /* Menu: a centered hero + a clean 2-column button grid, sized up so
+     it commands the screen instead of floating in a corner. */
   #screen-menu.is-active {
     flex-direction: row;
     align-items: center;
     justify-content: center;
-    gap: 6vw;
+    gap: 8vw;
   }
   #screen-menu .menu-hero { margin: 0; }
   #screen-menu .menu-grid {
     grid-template-columns: 1fr 1fr;
     width: auto;
-    min-width: 340px;
+    min-width: 420px;
+    gap: 16px;
   }
-  #screen-menu .foot { position: absolute; bottom: 8px; left: 0; right: 0; }
+  #screen-menu .foot { position: absolute; bottom: 16px; left: 0; right: 0; }
 }
 
-/* Short screens (most phones in landscape): scale the hero down hard
-   so the logo + tanks never push buttons off the viewport. */
-@media (max-height: 560px) {
+/* ========================================================
+   DESKTOP POLISH — make PC (wide + tall) look deliberate:
+   a grand hero, substantial buttons, and centered, well-
+   proportioned screens that fill the space instead of
+   floating in a narrow left column.
+   ======================================================== */
+@media (min-aspect-ratio: 13/10) and (min-height: 600px) {
+  /* Hero: bigger logo, roomier tagline, animated tanks visible. */
+  #screen-menu .logo { font-size: clamp(3.2rem, 6vw, 5rem); }
+  #screen-menu .tagline { font-size: 1rem; letter-spacing: .18em; }
+  #screen-menu .tank-row { display: flex; gap: 26px; margin-top: 10px; }
+  #screen-menu .tank-row .tank { width: 52px; height: 52px; }
+  #screen-menu .menu-hero { gap: 20px; }
+
+  /* Menu buttons: chunky, confident targets. */
+  #screen-menu .menu-grid { min-width: 480px; gap: 18px; }
+  #screen-menu .btn-big { font-size: 1.35rem; padding: 1.15rem 1.4rem; }
+  #screen-menu .foot { font-size: .82rem; }
+
+  /* Content screens: cap width and center so forms/lists/boards sit
+     in a tidy column rather than stretching edge-to-edge. */
+  #screen-online.is-active,
+  #screen-ranked.is-active,
+  #screen-social.is-active,
+  #screen-settings.is-active,
+  #screen-local.is-active {
+    align-items: stretch;
+    max-width: 960px;
+    margin-inline: auto;
+    width: 100%;
+    padding-top: 4px;
+  }
+
+  /* Section headers read a little larger on desktop. */
+  .bar h2 { font-size: 1.5rem; }
+  .btn { font-size: 1.02rem; }
+  .btn-small { font-size: .85rem; }
+}
+
+/* Ultra-wide: don't let the app sprawl. */
+@media (min-width: 1400px) {
+  #app { max-width: 1240px; }
+}
   .logo { font-size: clamp(1.8rem, 7vh, 2.6rem); }
   .tagline { font-size: .7rem; }
   .tank-row { display: none; }
@@ -772,9 +813,20 @@ body {
 }
 .vs-side { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
 .vs-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   font-family: "Black Ops One", system-ui;
-  font-size: 2rem;
-  opacity: .8;
+}
+.vs-mid .vs-vs { font-size: 2rem; opacity: .7; }
+/* The one hyphen that ties the two giant numbers into a single ratio. */
+.vs-mid .vs-ratio-dash {
+  font-size: 4.5rem;
+  line-height: 1;
+  color: #ffffff;
+  opacity: .85;
+  margin-top: 2.2rem;   /* drop it down to sit level with the numbers */
 }
 .vs-fighter {
   display: flex;
@@ -785,24 +837,20 @@ body {
   border-radius: 14px;
   background: rgba(255,255,255,.05);
   outline: 2px solid var(--p, #7e8ba3);
-  min-width: 96px;
+  min-width: 120px;
 }
-.vs-fighter .tank { width: 54px; height: 54px; }
-.vs-name { font-weight: 700; }
-.vs-record {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 4px;
+.vs-fighter .tank { width: 64px; height: 64px; }
+.vs-name { font-weight: 700; font-size: 1.05rem; }
+/* One giant white numeral under each card. */
+.vs-score {
+  margin-top: 6px;
   font-family: "Black Ops One", system-ui;
   color: #ffffff;
-  font-size: 2rem;
+  font-size: 4.5rem;
   line-height: 1;
+  min-width: 1.2ch;
+  text-align: center;
 }
-.vs-record .vs-dash { opacity: .55; font-size: 1.5rem; }
-.vs-record .vs-w, .vs-record .vs-l { min-width: 1ch; text-align: center; }
-.vs-foes { }
 
 /* ---- social ---- */
 .friend-row {
