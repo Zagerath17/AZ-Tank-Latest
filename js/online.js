@@ -29,7 +29,7 @@ import { startOnlineGame, onlineLobbyUpdate, stopGame } from "./game.js";
 import * as social from "./social.js";
 import { rankBadge, applyMatchResult } from "./ranked.js";
 import { showVersus, recordResult } from "./versus.js";
-import { startChat, stopChat, startVoice, stopVoice } from "./chat.js";
+import { startChat, stopChat, updateChatColors } from "./chat.js";
 import { AI_LEVELS } from "./ai.js";
 
 const FB_VERSION = "10.12.2";
@@ -316,7 +316,6 @@ function exitToOnline() {
 async function leaveLobby() {
   social.setStatus("online");
   stopChat();
-  stopVoice();
   if (current?.versusPoll) clearInterval(current.versusPoll);
   if (current?.versusCountdown) clearInterval(current.versusCountdown);
   const c = current;
@@ -713,18 +712,26 @@ function renderLobby(code, lobby) {
 
   // My color choice lost a conflict (or was never set)? Adopt the
   // resolved one so the database matches what everyone sees.
-  // Spin up casual text+voice chat once (not in ranked lobbies).
+  // Spin up casual text chat once (not in ranked lobbies).
   if (!lobby.ranked && !current.chatOn) {
     current.chatOn = true;
     startChat(code, resolved[me]);
-    const peerIds = entries.filter(([, p]) => !p.bot).map(([id]) => id);
-    startVoice(code, me, peerIds).catch(() => {});
   }
   // Keep the chat panel visible only for casual lobbies.
   const chatWrap = document.getElementById("lobby-chat");
   if (chatWrap) chatWrap.hidden = !!lobby.ranked;
 
+  // Feed every player's CURRENT color to the chat so old lines recolor
+  // live when someone changes paint.
+  if (!lobby.ranked) {
+    const colorMap = {};
+    for (const [id, p] of entries) colorMap[id] = resolved[id] ?? p.color ?? "slate";
+    updateChatColors(colorMap);
+  }
+
   const mine = entries.find(([id]) => id === me);
+  // Keep the color our outgoing chat lines are stamped with in sync.
+  if (!lobby.ranked) window.__myLobbyColor = resolved[me] ?? window.__myLobbyColor;
   if (mine && !mine[1].bot && mine[1].color !== resolved[me]) {
     if (mine[1].color) toast(`That paint was taken — you're ${COLOR_NAMES[resolved[me]]} now.`);
     write(`players/${me}/color`, resolved[me]);

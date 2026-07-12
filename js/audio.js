@@ -195,6 +195,15 @@ export const sfx = {
     } catch (e) {}
   },
 
+  // Tank takes a non-lethal hit: a short metallic thunk.
+  hit() {
+    if (!ready() || limited("hit", 60)) return;
+    try {
+      blip("square", 320, 150, 0.05, 0.1);
+      blip("triangle", 180, 90, 0.08, 0.08);
+    } catch (e) {}
+  },
+
   // Tank explosion: noise crunch sweeping down + a sub thump.
   boom() {
     if (!ready() || limited("boom", 90)) return;

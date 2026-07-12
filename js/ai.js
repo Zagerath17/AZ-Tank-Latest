@@ -21,7 +21,7 @@
 // ================================================================
 
 import { segmentHitsAnyRect } from "./maze.js";
-import { ROCKET } from "./weapons.js";
+import { ROCKET, SNIPER } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
@@ -272,6 +272,17 @@ export function botActions(t, world, dt, now) {
     dist < P.range * cell &&
     !segmentHitsAnyRect(t.x, t.y, target.x, target.y, world.rects);
 
+  // The sniper is special: its round flies straight THROUGH walls and
+  // only stops on a tank, dying after SNIPER.rangeCells. So when the
+  // bot holds a sniper, "having a shot" means the target is simply
+  // within range along the aim line — walls in between don't matter.
+  // We treat that as line-of-sight for aiming and firing purposes, so
+  // the bot lines up and takes wall-piercing shots instead of trying to
+  // circle for a clean look like it would with the basic cannon.
+  const sniperReady =
+    t.weapon === "sniper" && dist < SNIPER.rangeCells * cell;
+  const shotLos = los || sniperReady; // aim/fire when either holds
+
   // Reaction delay on ACQUIRING a target: when someone first comes
   // into view, the bot needs `react` seconds before it can shoot.
   if (los && !ai.prevLos) ai.fireAt = Math.max(ai.fireAt, now + P.react * 1000);
@@ -336,7 +347,7 @@ export function botActions(t, world, dt, now) {
   }
 
   let combatSteered = false;
-  if (los) {
+  if (shotLos) {
     // Aim point: lead the target by its tracked velocity (per tier).
     const tv = ai.vel[target.id];
     let aimX = target.x;
@@ -445,7 +456,10 @@ export function botActions(t, world, dt, now) {
     // ricochet path first, and respect the ammo count: never
     // dry-fire; on reserve rounds, only shots verified to land.
     const aligned = Math.abs(angleDiff(t.a, wantW)) < P.aimTol;
-    const inFireRange = dist <= P.fireRange * cell;
+    // The sniper's own range caps where its round actually reaches;
+    // otherwise use the tier's effective fire range.
+    const fireRangeCells = t.weapon === "sniper" ? SNIPER.rangeCells : P.fireRange;
+    const inFireRange = dist <= fireRangeCells * cell;
     const mediumHold = t.bot === "medium" && dodging; // medium can't multitask
     if (special === "mg") {
       // The MG is manual now: HOLD the trigger while the sight is on.
@@ -586,7 +600,18 @@ function navigate(t, ai, target, world, P, rBody, now, acts) {
   const tgKey = tgCell.c + "," + tgCell.r;
 
   if (now > ai.repathAt || !ai.path.length || ai.tgKey !== tgKey) {
-    ai.path = bfsPath(world.maze, myCell, tgCell);
+    const fresh = bfsPath(world.maze, myCell, tgCell);
+    // Junction stability: in a braided maze there are often several
+    // equally-short routes, and replanning every half-second can flip
+    // between them, making the bot wobble at open intersections. If the
+    // new route is no shorter than the one we're already committed to
+    // (and still valid from here), keep the old one.
+    const oldValid = ai.path && ai.path.length &&
+      ai.path[0] && Math.abs(ai.path[0].c - myCell.c) + Math.abs(ai.path[0].r - myCell.r) <= 1 &&
+      ai.tgKey === tgKey;
+    if (!oldValid || !fresh.length || fresh.length < ai.path.length - 1) {
+      ai.path = fresh;
+    }
     ai.tgKey = tgKey;
     ai.repathAt = now + 500;
   }
@@ -604,11 +629,14 @@ function navigate(t, ai, target, world, P, rBody, now, acts) {
   // Aim at the FARTHEST waypoint reachable in one straight drivable
   // line (same trick as the homing rocket): corners get cut smoothly
   // and the heading barely needs correcting in between — confident
-  // driving instead of stop-start waypoint chasing.
+  // driving instead of stop-start waypoint chasing. Looking several
+  // cells ahead lets the bot commit through the open junctions a
+  // braided maze is full of, rather than re-aiming at every cell.
   let aimX = target.x;
   let aimY = target.y;
   let found = !ai.path.length; // empty path → drive at the target
-  for (let i = Math.min(3, ai.path.length) - 1; i >= 0 && !found; i--) {
+  const lookAhead = Math.min(6, ai.path.length);
+  for (let i = lookAhead - 1; i >= 0 && !found; i--) {
     const w = ai.path[i];
     const wx = (w.c + 0.5) * cell;
     const wy = (w.r + 0.5) * cell;

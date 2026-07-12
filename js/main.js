@@ -9,8 +9,7 @@ import { initGame } from "./game.js";
 import { sfx, startMusic } from "./audio.js";
 import { initSocial, setStatus, getAccount } from "./social.js";
 import { initRanked } from "./ranked.js";
-import { initChat, setPtt } from "./chat.js";
-import { getPttKey } from "./settings.js";
+import { initChat } from "./chat.js";
 
 // True while a match is running — screen hops (e.g. Settings mid-game)
 // must not touch the soundtrack or presence.
@@ -142,13 +141,3 @@ initChat();
 
 // Push-to-talk: hold the bound key to open the mic (ignored when
 // typing in a text field). Works on any screen during a lobby.
-window.addEventListener("keydown", (e) => {
-  if (e.code === getPttKey() && !e.repeat) {
-    const el = document.activeElement;
-    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
-    setPtt(true);
-  }
-});
-window.addEventListener("keyup", (e) => {
-  if (e.code === getPttKey()) setPtt(false);
-});

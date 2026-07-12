@@ -53,7 +53,7 @@ export function getNoRequests() {
   return localStorage.getItem(LS_NOREQ) === "1";
 }
 
-// ---- blocking: hides a player's text + voice until unblocked ----
+// ---- blocking: hides a player's text until unblocked ----
 export function isBlocked(key) {
   return !!blocks[key];
 }
@@ -68,14 +68,6 @@ export function setBlocked(key, on) {
 }
 export function getBlocks() { return { ...blocks }; }
 
-// ---- voice prefs saved to the account (mode + gains) ----
-export function saveVoicePrefs(prefs) {
-  if (account) {
-    ensureFirebase()
-      .then((f) => f.update(f.ref(f.db, `users/${account.key}/voice`), prefs))
-      .catch(() => {});
-  }
-}
 
 export function setNoRequests(on) {
   localStorage.setItem(LS_NOREQ, on ? "1" : "0");
@@ -157,9 +149,6 @@ async function adoptProfile(uid, wantName = null) {
   if (prof.blocks && typeof prof.blocks === "object") {
     blocks = prof.blocks;
     try { localStorage.setItem(LS_BLOCKS, JSON.stringify(blocks)); } catch (e) {}
-  }
-  if (prof.voice) {
-    import("./chat.js").then((c) => c.applyCloudVoice?.(prof.voice)).catch(() => {});
   }
   await goOnline();
   refreshLoginButton();

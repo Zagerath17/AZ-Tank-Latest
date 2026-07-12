@@ -15,7 +15,7 @@
 import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
 import { COLORS, COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
-import { mulberry32, generateMaze, wallRects, segmentFirstHit } from "./maze.js";
+import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
@@ -42,9 +42,33 @@ const GEAR_MAX = 15;           // pickups on the field at once
 const GEAR_FIRST_MS = 3500;    // first pickup after round start
 const GEAR_EVERY_MS = 5500;    // then every 5.5–9 s
 
+// ---- Ranked closing zone ----
+const ZONE_FIRST_MS = 30000;   // first layer claimed 30 s in
+const ZONE_PERIOD = 30000;     // a new layer every 30 s thereafter
+const ZONE_WARN_MS = 5000;     // a layer blinks this long before it turns red
+const ZONE_DMG_PERIOD = 2000;  // red cells deal 1 dmg every 2 s
+const ZONE_DMG = 1;            // damage per tick
+const ZONE_INSIDE_FRAC = 0.30; // a tank must be >30% into a red cell to be hit
+
 const BULLET_SPEED = U * 3.2;
 const BULLET_R = U * 0.085;
 const BULLET_LIFE = 6000;   // ms a bullet keeps bouncing
+
+// ---- Health & damage ----
+// Every tank starts with 6 HP. Weapons chip it down; at 0 the tank is
+// destroyed. (Environmental deaths — the ring, the collapse — always
+// kill outright regardless of HP.)
+const TANK_HP = 6;
+const DMG = {
+  basic: 2,       // basic cannon ball
+  mg: 1,          // machine-gun ball
+  cannonBall: 6,  // the big cannon's direct ball hit
+  shrapnel: 2,    // each fractal from the cannon
+  rocket: 5,      // homing rocket
+  laserBase: 8,   // laser at zero bounces; −1 per bounce, min 1
+  sniper: 4,      // sniper slug
+};
+
 // The basic gun is a 3-round magazine: consecutive shots come 0.5 s
 // apart, and each spent round takes 3.5 s to regenerate.
 const MAG_SIZE = 3;
@@ -77,10 +101,13 @@ const MAZE_SIZES = [
 const HULL = PALETTE; // every pickable paint + the Impossible black
 const NO_MUL = { speed: 1, turn: 1 };
 
+// The non-rectangular silhouettes used for casual arenas.
+const MAZE_SHAPES_NONRECT = MAZE_SHAPES.filter((s) => s !== "rect");
+
 /* ---------- module state ---------- */
 
 let S = null;
-let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, weaponHudEl;
+let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, weaponHudEl, healthHudEl;
 const held = new Set();
 const touchHeld = new Set();
 
@@ -94,6 +121,7 @@ export function initGame() {
   exitBtn = document.getElementById("game-exit");
   shrinkEl = document.getElementById("game-shrink");
   weaponHudEl = document.getElementById("weapon-hud");
+  healthHudEl = document.getElementById("health-hud");
   touchPad = document.getElementById("touch-pad");
   scoreEl = document.getElementById("game-score");
 
@@ -172,6 +200,7 @@ export function stopGame() {
   touchPad.hidden = true;
   if (scoreEl) scoreEl.innerHTML = "";
   if (weaponHudEl) weaponHudEl.hidden = true;
+  if (healthHudEl) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
   S = null;
 }
 
@@ -343,8 +372,24 @@ function begin(opts) {
 
 function startRound(seed) {
   const rng = mulberry32(seed);
-  const [cols, rows] = MAZE_SIZES[Math.floor(rng() * MAZE_SIZES.length)];
-  S.maze = generateMaze(cols, rows, rng);
+  // Every match — ranked included — can roll a random silhouette now
+  // that the closing zone works on any shape. Every maze is braided so
+  // there are many open routes.
+  let shape = rng() < 0.55
+    ? "rect"
+    : MAZE_SHAPES_NONRECT[Math.floor(rng() * MAZE_SHAPES_NONRECT.length)];
+  // Shaped arenas lose cells to the mask, so pull their grid size from
+  // the upper half of the list to keep the playable area generous.
+  let sizeIdx;
+  if (shape === "rect") {
+    sizeIdx = Math.floor(rng() * MAZE_SIZES.length);
+  } else {
+    const lo = Math.floor(MAZE_SIZES.length * 0.5);
+    sizeIdx = lo + Math.floor(rng() * (MAZE_SIZES.length - lo));
+  }
+  const [cols, rows] = MAZE_SIZES[sizeIdx];
+  S.mazeShape = shape;
+  S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.3 });
   S.rects = wallRects(S.maze, CELL, WALL_T);
   S.worldW = cols * CELL;
   S.worldH = rows * CELL;
@@ -358,15 +403,21 @@ function startRound(seed) {
   S.freezeUntil = performance.now() + 3000;
   S.cdLast = 4; // last number we ticked for (4 = none yet)
   S.gearNextAt = S.freezeUntil + GEAR_FIRST_MS;
-  // Ranked sudden-shrink: every minute the doomed outer ring flashes
-  // red for 5 s (killing anyone who touches it), then drops away
-  // behind a fresh border. After the arena hits minimum size, one
-  // more minute and the ENTIRE floor flashes and collapses — a draw.
-  S.shrinkLevel = 0;
-  S.shrinkWarnAt = S.ranked ? S.freezeUntil + 25000 : Infinity; // flash starts
-  S.shrinkCutAt = S.ranked ? S.freezeUntil + 30000 : Infinity;  // ring drops
-  S.shrinkFlashTick = -1; // last second we played a flash tick for
-  S.finalCollapse = false;
+  // ---- Ranked closing zone ----
+  // A creeping "red zone" eats the arena from the outside in. Each
+  // layer of cells first BLINKS as a warning, then turns permanently
+  // red: red cells delete gear and steadily damage tanks sitting in
+  // them. A new layer is claimed every ZONE_PERIOD until the whole map
+  // is red. Ring-distance (from maze.js) tells us each cell's layer, so
+  // this works for every shape, not just rectangles.
+  const rd = ringDistance(S.maze);
+  S.zoneDist = rd.dist;        // per-cell layer from the boundary
+  S.zoneMaxLayer = rd.maxLayer;
+  S.zoneLevel = 0;             // layers currently permanently red
+  S.zoneWarnLevel = -1;        // layer currently blinking (‑1 = none)
+  S.zoneNextAt = S.ranked ? S.freezeUntil + ZONE_FIRST_MS : Infinity;
+  S.zoneWarnUntil = 0;
+  S.zoneDamageAt = 0;          // next time red cells tick damage
   S.rockets = [];
   S.cannons = [];
   S.shraps = [];
@@ -381,13 +432,32 @@ function startRound(seed) {
   S.sentNext = false;
   for (const t of S.tanks) { t.phaseUntil = 0; t.wasPhasing = false; t.ejecting = false; }
 
-  // Players 1 & 2 in opposite corners, 3 & 4 in the other pair.
-  const corners = [
+  // Players 1 & 2 in opposite corners, 3 & 4 in the other pair. For a
+  // shaped maze a raw corner may fall outside the silhouette, so snap
+  // each to the nearest playable cell.
+  const rawCorners = [
     [0, 0],
     [cols - 1, rows - 1],
     [cols - 1, 0],
     [0, rows - 1],
   ];
+  const inside = S.maze.inside;
+  const cellInside = (c, r) =>
+    !inside || (r >= 0 && r < rows && c >= 0 && c < cols && inside[r][c]);
+  const snapInside = (c0, r0) => {
+    if (cellInside(c0, r0)) return [c0, r0];
+    // Spiral outward for the closest inside cell.
+    let best = [Math.floor(cols / 2), Math.floor(rows / 2)], bestD = Infinity;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (!cellInside(c, r)) continue;
+        const d = (c - c0) ** 2 + (r - r0) ** 2;
+        if (d < bestD) { bestD = d; best = [c, r]; }
+      }
+    }
+    return best;
+  };
+  const corners = rawCorners.map(([c, r]) => snapInside(c, r));
 
   S.tanks = S.roster.map((spec, i) => {
     const [c, r] = corners[i];
@@ -399,6 +469,7 @@ function startRound(seed) {
       local: S.mode === "local" ? true : spec.id === S.myId,
       x, y, a, tx: x, ty: y, ta: a,
       dead: false,
+      hp: TANK_HP, // baseline health; damage chips this down to 0
       gone: !S.present.has(spec.id),
       prevShoot: false,
       weapon: null,
@@ -978,7 +1049,7 @@ function stepBullets(now, dt) {
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
           // Authority: in local mode we own everyone; online we only
           // pronounce deaths for tanks simulated on this device.
-          if (S.mode === "local" || t.local) killTank(t);
+          if (S.mode === "local" || t.local) damageTank(t, b.mini ? DMG.mg : DMG.basic);
           break;
         }
       }
@@ -1040,230 +1111,116 @@ function stepGear(now) {
 }
 
 // The safe box under the current shrink level: [c0..c1] × [r0..r1].
+// The map never physically shrinks now, so the "safe box" is simply
+// the full playable grid — tanks may drive anywhere, red zone or not.
 function safeBox() {
-  const L = S.shrinkLevel ?? 0;
-  return { c0: L, r0: L, c1: S.maze.cols - 1 - L, r1: S.maze.rows - 1 - L };
+  return { c0: 0, r0: 0, c1: S.maze.cols - 1, r1: S.maze.rows - 1 };
 }
 
-function canShrinkMore() {
-  const L = (S.shrinkLevel ?? 0) + 1;
-  return Math.min(S.maze.cols, S.maze.rows) - 2 * L >= 3;
+// Which zone layer a world point sits in (its cell's ring-distance),
+// or Infinity if it's outside the shape / off-grid.
+function cellLayerAt(x, y) {
+  if (!S.zoneDist) return Infinity;
+  const c = Math.floor(x / CELL);
+  const r = Math.floor(y / CELL);
+  if (r < 0 || r >= S.maze.rows || c < 0 || c >= S.maze.cols) return Infinity;
+  return S.zoneDist[r][c];
 }
 
-// The rectangle (world units) of the ring currently doomed — the
-// band between the current edge and the next one in.
-function doomedRing() {
-  const L0 = (S.shrinkLevel ?? 0) * CELL;
-  if (S.finalCollapse) return { x0: L0, y0: L0, x1: S.worldW - L0, y1: S.worldH - L0, whole: true };
-  return { x0: L0, y0: L0, x1: S.worldW - L0, y1: S.worldH - L0, inset: CELL };
+// Is the cell containing (x,y) permanently red? (layer < zoneLevel)
+function inRedZone(x, y) {
+  return cellLayerAt(x, y) < (S.zoneLevel ?? 0);
 }
 
-// Is (x,y) inside the doomed band (the red zone) right now?
-function inDoomBand(x, y) {
-  const L0 = (S.shrinkLevel ?? 0) * CELL;
-  if (S.finalCollapse) return true; // the whole floor is doomed
-  const L1 = L0 + CELL;
-  const outer = x >= L0 && x <= S.worldW - L0 && y >= L0 && y <= S.worldH - L0;
-  const inner = x >= L1 && x <= S.worldW - L1 && y >= L1 && y <= S.worldH - L1;
-  return outer && !inner;
+// Is that cell currently BLINKING as the next-to-fall layer?
+function inWarnZone(x, y) {
+  return (S.zoneWarnLevel ?? -1) >= 0 && cellLayerAt(x, y) === S.zoneWarnLevel;
 }
 
-function flashActive(now) {
-  return S.ranked && S.shrinkCutAt !== Infinity
-    && now >= S.shrinkWarnAt && now < S.shrinkCutAt;
-}
-
-// Ensure every living tank can reach every other within the safe box.
-// If the shrink walled someone off, knock down the fewest walls needed
-// to rejoin the components. Cells use (c,r); a wall between neighbors
-// is H (vertical move) or V (horizontal move).
-function reconnectSurvivors(c0, r0, c1, r1) {
-  const W = c1 - c0 + 1;
-  const Hh = r1 - r0 + 1;
-  if (W <= 0 || Hh <= 0) return;
-  const idx = (c, r) => (r - r0) * W + (c - c0);
-
-  const open = (c, r, dir) => {
-    // Is the passage from (c,r) toward dir open (no wall)?
-    if (dir === "N") return !S.maze.H[r][c];
-    if (dir === "S") return !S.maze.H[r + 1][c];
-    if (dir === "W") return !S.maze.V[r][c];
-    if (dir === "E") return !S.maze.V[r][c + 1];
-    return false;
-  };
-
-  // Label connected components across the safe box.
-  const comp = new Array(W * Hh).fill(-1);
-  let nComp = 0;
-  for (let sr = r0; sr <= r1; sr++) {
-    for (let sc = c0; sc <= c1; sc++) {
-      if (comp[idx(sc, sr)] !== -1) continue;
-      const id = nComp++;
-      const stack = [[sc, sr]];
-      comp[idx(sc, sr)] = id;
-      while (stack.length) {
-        const [c, r] = stack.pop();
-        const steps = [
-          ["N", c, r - 1], ["S", c, r + 1], ["W", c - 1, r], ["E", c + 1, r],
-        ];
-        for (const [dir, nc, nr] of steps) {
-          if (nc < c0 || nc > c1 || nr < r0 || nr > r1) continue;
-          if (comp[idx(nc, nr)] !== -1) continue;
-          if (open(c, r, dir)) { comp[idx(nc, nr)] = id; stack.push([nc, nr]); }
-        }
-      }
+// Fraction of the tank's body sitting inside red cells, sampled over a
+// small grid of points across its footprint. Used to gate damage at
+// the ">30% inside" threshold.
+function redOverlapFrac(t) {
+  const R = TANK_RAD * 0.9;
+  let inside = 0, total = 0;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      total++;
+      if (inRedZone(t.x + dx * R, t.y + dy * R)) inside++;
     }
   }
-  if (nComp <= 1) return; // already fully connected
-
-  // Which components do live tanks occupy?
-  const tankComps = new Set();
-  for (const t of S.tanks) {
-    if (t.dead || t.gone) continue;
-    const c = Math.min(c1, Math.max(c0, Math.floor(t.x / CELL)));
-    const r = Math.min(r1, Math.max(r0, Math.floor(t.y / CELL)));
-    tankComps.add(comp[idx(c, r)]);
-  }
-  if (tankComps.size <= 1) return; // survivors already share a region
-
-  // Merge components until all tank-bearing ones are joined: repeatedly
-  // find any wall on the boundary between two different components and
-  // remove it (union the two). Simple + guarantees connectivity.
-  const parent = Array.from({ length: nComp }, (_, i) => i);
-  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-  const union = (a, b) => { parent[find(a)] = find(b); };
-
-  const roots = () => new Set([...tankComps].map(find));
-  let guard = 0;
-  while (roots().size > 1 && guard++ < W * Hh) {
-    let knocked = false;
-    for (let r = r0; r <= r1 && !knocked; r++) {
-      for (let c = c0; c <= c1 && !knocked; c++) {
-        const a = comp[idx(c, r)];
-        // try East and South neighbors
-        for (const [dir, nc, nr, wall] of [
-          ["E", c + 1, r, () => { S.maze.V[r][c + 1] = false; }],
-          ["S", c, r + 1, () => { S.maze.H[r + 1][c] = false; }],
-        ]) {
-          if (nc > c1 || nr > r1) continue;
-          const bcomp = comp[idx(nc, nr)];
-          if (find(a) !== find(bcomp)) {
-            wall();            // remove the dividing wall
-            union(a, bcomp);
-            knocked = true;
-            break;
-          }
-        }
-      }
-    }
-    if (!knocked) break; // nothing left to merge (shouldn't happen)
-  }
+  return inside / total;
 }
 
+// The creeping zone. Every ZONE_PERIOD a new outer layer is claimed:
+// it blinks for ZONE_WARN_MS as a warning, then turns permanently red.
+// Red cells delete gear sitting in them and chip 1 HP off any tank
+// more than 30% inside them, every ZONE_DMG_PERIOD. This proceeds until
+// every cell is red (at which point any survivors all die → draw).
 function stepShrink(now) {
-  if (!S.ranked || S.shrinkCutAt === Infinity) return;
+  if (!S.ranked || S.zoneNextAt === Infinity) return;
 
-  // During the 5 s warning: tick once per second (synced to the
-  // pulse), and vaporize any tank that dares touch the red.
-  if (now >= S.shrinkWarnAt && now < S.shrinkCutAt) {
-    const sec = Math.ceil((S.shrinkCutAt - now) / 1000);
-    if (sec !== S.shrinkFlashTick) {
-      S.shrinkFlashTick = sec;
-      sfx.count(sec); // the flash tick — same voice as the countdown
+  // --- promote a layer: start its warning blink ---
+  if (S.zoneWarnLevel < 0 && S.zoneLevel <= S.zoneMaxLayer && now >= S.zoneNextAt) {
+    S.zoneWarnLevel = S.zoneLevel;      // this layer begins blinking
+    S.zoneWarnUntil = now + ZONE_WARN_MS;
+    S.zoneFlashTick = -1;
+  }
+
+  // --- during the blink: tick the warning voice once a second ---
+  if (S.zoneWarnLevel >= 0 && now < S.zoneWarnUntil) {
+    const sec = Math.ceil((S.zoneWarnUntil - now) / 1000);
+    if (sec !== S.zoneFlashTick) { S.zoneFlashTick = sec; sfx.count(sec); }
+  }
+
+  // --- blink finished: the layer turns permanently red ---
+  if (S.zoneWarnLevel >= 0 && now >= S.zoneWarnUntil) {
+    S.zoneLevel = S.zoneWarnLevel + 1;  // this layer is now red
+    S.zoneWarnLevel = -1;
+    sfx.boom(0.4);
+    // Purge gear now trapped in the red zone (and erase from the DB if
+    // we're the online controller, so a snapshot can't rebuild it).
+    const doomedGear = S.gear.filter((g) => inRedZone(g.x, g.y));
+    S.gear = S.gear.filter((g) => !inRedZone(g.x, g.y));
+    for (const g of doomedGear) {
+      S.takenGear.set(g.key, now);
+      if (S.mode === "online" && S.isController) S.sendGearRemove?.(g.key);
     }
+    // Schedule the next layer, or — once the whole map is red — a final
+    // sweep that finishes off anyone still standing.
+    if (S.zoneLevel <= S.zoneMaxLayer) {
+      S.zoneNextAt = now + ZONE_PERIOD;
+    } else {
+      S.zoneNextAt = Infinity; // fully closed
+    }
+  }
+
+  // --- red-zone damage tick ---
+  if (now >= (S.zoneDamageAt ?? 0)) {
+    S.zoneDamageAt = now + ZONE_DMG_PERIOD;
+    const fullyClosed = (S.zoneLevel ?? 0) > S.zoneMaxLayer;
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
-      if (inDoomBand(t.x, t.y)) killTank(t);
-    }
-    return;
-  }
-
-  if (now < S.shrinkCutAt) return;
-
-  // ---- the cut fires ----
-  if (S.finalCollapse) {
-    // Whole arena just collapsed: everyone still alive dies → draw.
-    for (const t of S.tanks) {
-      if (!t.dead && !t.gone) killTank(t);
-    }
-    S.shrinkCutAt = Infinity;
-    sfx.boom(0.6);
-    return;
-  }
-
-  S.shrinkLevel += 1;
-  const { c0, r0, c1, r1 } = safeBox();
-
-  // Strip EVERY wall outside the new safe box so the dead ring renders
-  // as clean white canvas — then seal a fresh solid border around the
-  // surviving arena.
-  for (let r = 0; r <= S.maze.rows; r++) {
-    for (let c = 0; c < S.maze.cols; c++) {
-      if (r < r0 || r > r1 + 1 || c < c0 || c > c1) S.maze.H[r][c] = false;
+      // Once the entire map is red, everyone left takes damage no
+      // matter where they stand (no safe corner remains).
+      if (fullyClosed || redOverlapFrac(t) > ZONE_INSIDE_FRAC) {
+        if (S.mode === "local" || t.local) damageTank(t, ZONE_DMG);
+      }
     }
   }
-  for (let r = 0; r < S.maze.rows; r++) {
-    for (let c = 0; c <= S.maze.cols; c++) {
-      if (r < r0 || r > r1 || c < c0 || c > c1 + 1) S.maze.V[r][c] = false;
-    }
-  }
-  for (let r = r0; r <= r1; r++) { S.maze.V[r][c0] = true; S.maze.V[r][c1 + 1] = true; }
-  for (let c = c0; c <= c1; c++) { S.maze.H[r0][c] = true; S.maze.H[r1 + 1][c] = true; }
-
-  const inSafe = (x, y) =>
-    x > c0 * CELL && x < (c1 + 1) * CELL && y > r0 * CELL && y < (r1 + 1) * CELL;
-  for (const t of S.tanks) {
-    if (t.dead || t.gone) continue;
-    if (!inSafe(t.x, t.y)) { killTank(t); continue; } // caught in the ring
-  }
-
-  // The shrink can wall survivors off from each other. Guarantee the
-  // arena stays connected: BFS the safe box, and if any live tank sits
-  // in a region cut off from the first, punch through the thinnest
-  // wall separating them until everyone shares one component.
-  reconnectSurvivors(c0, r0, c1, r1);
-
-  S.rects = wallRects(S.maze, CELL, WALL_T);
-
-  S.bullets = S.bullets.filter((b) => inSafe(b.x, b.y));
-  S.rockets = S.rockets.filter((k) => inSafe(k.x, k.y));
-  S.cannons = S.cannons.filter((k) => inSafe(k.x, k.y));
-  S.shraps = S.shraps.filter((k) => inSafe(k.x, k.y));
-  // Gear in the deleted ring is gone — and if we're the controller,
-  // erase it from the lobby too, or the next snapshot would rebuild
-  // it right where it was (the "reappearing crate" bug).
-  const doomedGear = S.gear.filter((g) => !inSafe(g.x, g.y));
-  S.gear = S.gear.filter((g) => inSafe(g.x, g.y));
-  if (S.mode === "online" && S.isController) {
-    for (const g of doomedGear) {
-      S.takenGear.set(g.key, performance.now()); // suppress local re-add
-      S.sendGearRemove?.(g.key);
-    }
-  } else {
-    for (const g of doomedGear) S.takenGear.set(g.key, performance.now());
-  }
-  sfx.boom(0.5);
-
-  // Schedule the next event: another shrink, or — if we've bottomed
-  // out — the 30-second fuse to the final all-map collapse.
-  if (canShrinkMore()) {
-    S.shrinkWarnAt = now + 25000;
-    S.shrinkCutAt = now + 30000;
-  } else {
-    S.finalCollapse = true;
-    S.shrinkWarnAt = now + 25000;
-    S.shrinkCutAt = now + 30000;
-  }
-  S.shrinkFlashTick = -1;
 }
 
 function pickGearSpot() {
   const { c0, r0, c1, r1 } = safeBox();
-  const cols = S.maze.cols;
-  const rows = S.maze.rows;
-  for (let tries = 0; tries < 25; tries++) {
-    const x = (c0 + Math.floor(Math.random() * (c1 - c0 + 1)) + 0.5) * CELL;
-    const y = (r0 + Math.floor(Math.random() * (r1 - r0 + 1)) + 0.5) * CELL;
+  const inside = S.maze.inside;
+  const cellInside = (c, r) =>
+    !inside || (r >= 0 && r < S.maze.rows && c >= 0 && c < S.maze.cols && inside[r][c]);
+  for (let tries = 0; tries < 30; tries++) {
+    const cc = c0 + Math.floor(Math.random() * (c1 - c0 + 1));
+    const rr = r0 + Math.floor(Math.random() * (r1 - r0 + 1));
+    if (!cellInside(cc, rr)) continue; // stay within the shape
+    const x = (cc + 0.5) * CELL;
+    const y = (rr + 0.5) * CELL;
     let clear = true;
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
@@ -1293,6 +1250,15 @@ function fireLaser(byId, x, y, a, now) {
     born: now, by: byId, head: 0, doneAt: 0,
   });
   sfx.laser();
+}
+
+// How many times the beam has reflected by distance d (0 = the first,
+// un-bounced segment; 1 after the first wall; etc).
+function beamBouncesAt(bm, d) {
+  for (let i = 1; i < bm.pts.length; i++) {
+    if (d <= bm.cum[i] || i === bm.pts.length - 1) return i - 1;
+  }
+  return 0;
 }
 
 // A point at distance d along a beam's polyline.
@@ -1327,11 +1293,22 @@ function stepBeams(now) {
         cut = true;
         break;
       }
+      // Track which tanks the beam is currently passing THROUGH so a
+      // single crossing = one hit, but a later crossing (after a
+      // bounce) hits again. bm.inside holds ids we're mid-crossing.
+      bm.inside = bm.inside ?? new Set();
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
-        if (t.id === bm.by && d < TANK_R * 2.6) continue;
-        if (tankHitPoint(t, p.x, p.y, r)) {
-          if (S.mode === "local" || t.local) killTank(t);
+        const selfMuzzle = t.id === bm.by && d < TANK_R * 2.6;
+        const touching = !selfMuzzle && tankHitPoint(t, p.x, p.y, r);
+        if (touching && !bm.inside.has(t.id)) {
+          // Just ENTERED the tank at this point along the path — one
+          // hit. 8 dmg fresh, −1 per bounce so far, floored at 1.
+          bm.inside.add(t.id);
+          const dmg = Math.max(1, DMG.laserBase - beamBouncesAt(bm, d));
+          if (S.mode === "local" || t.local) damageTank(t, dmg);
+        } else if (!touching && bm.inside.has(t.id)) {
+          bm.inside.delete(t.id); // exited — a later re-entry hits again
         }
       }
       if (d >= head) break;
@@ -1431,7 +1408,7 @@ function stepRockets(now, dt) {
         if (t.id === rk.by && age < ROCKET.ownerGraceMs) continue;
         if (tankHitPoint(t, rk.x, rk.y, r)) {
           alive = false;
-          if (S.mode === "local" || t.local) killTank(t);
+          if (S.mode === "local" || t.local) damageTank(t, DMG.rocket);
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3.5 });
           addFade(rk.x, rk.y, r * 1.4, now);
           break;
@@ -1508,6 +1485,19 @@ function spawnSnipe(byId, x, y, a, now) {
   });
 }
 
+// Damage a brick wall takes per weapon — the SAME numbers tanks take,
+// so a 6-HP wall behaves like a 6-HP tank. Laser here is its base 8
+// (a fresh, un-bounced beam one-shots the wall, as the design intends).
+const WALL_DMG = {
+  basic: DMG.basic,        // 2
+  mg: DMG.mg,              // 1
+  laser: DMG.laserBase,    // 8 → one hit
+  rocket: DMG.rocket,      // 5
+  cannon: DMG.cannonBall,  // 6 → one hit
+  shrapnel: DMG.shrapnel,  // 2
+  sniper: DMG.sniper,      // 4
+};
+
 // Point-vs-walls with damage. `dmgKey` selects the per-weapon value.
 // Returns true if the projectile should die (it hit a wall).
 function hitWall(x, y, r, dmgKey, now) {
@@ -1517,7 +1507,7 @@ function hitWall(x, y, r, dmgKey, now) {
     const lx = dx * ca + dy * sa;
     const ly = -dx * sa + dy * ca;
     if (Math.abs(lx) < w.hx + r && Math.abs(ly) < w.hy + r) {
-      w.hp -= WALL.dmg[dmgKey] ?? WALL.dmg.basic;
+      w.hp -= WALL_DMG[dmgKey] ?? WALL_DMG.basic;
       addFade(x, y, r * 1.3, now, "#b5623a"); // brick puff
       if (w.hp <= 0) { sfx.wallbreak?.(); }
       return true;
@@ -1589,7 +1579,7 @@ function stepSnipes(now, dt) {
       if (tankHitPoint(t, s.x, s.y, r)) {
         alive = false;
         addFade(s.x, s.y, r * 1.4, now);
-        if (S.mode === "local" || t.local) killTank(t);
+        if (S.mode === "local" || t.local) damageTank(t, DMG.sniper);
         break;
       }
     }
@@ -1636,7 +1626,7 @@ function stepCannons(now, dt) {
       if (t.dead || t.gone) continue;
       if (t.id === c.by && now - c.born < 200) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
-        if (S.mode === "local" || t.local) killTank(t);
+        if (S.mode === "local" || t.local) damageTank(t, DMG.cannonBall);
         explodeCannon(c, now);
         alive = false;
         break;
@@ -1691,7 +1681,7 @@ function stepShrapnel(now, dt) {
         if (tankHitPoint(t, sh.x, sh.y, r)) {
           alive = false;
           addFade(sh.x, sh.y, r * 1.2, now);
-          if (S.mode === "local" || t.local) killTank(t);
+          if (S.mode === "local" || t.local) damageTank(t, DMG.shrapnel);
           break;
         }
       }
@@ -1701,6 +1691,22 @@ function stepShrapnel(now, dt) {
   }
 
   S.shraps = survivors;
+}
+
+// Apply `amount` of damage to a tank. When HP runs out, it's killed.
+// Returns true if this hit destroyed it. Only the authoritative client
+// (local sim, or the tank's owner online) should call this so scores
+// stay consistent — callers already gate on (S.mode === "local" || t.local).
+function damageTank(t, amount) {
+  if (t.dead || t.gone) return false;
+  t.hp = (t.hp ?? TANK_HP) - amount;
+  t.lastHitAt = performance.now(); // for a brief damage flash
+  if (t.hp <= 0) {
+    killTank(t);
+    return true;
+  }
+  sfx.hit?.();
+  return false;
 }
 
 function killTank(t) {
@@ -1736,23 +1742,19 @@ function maybeEndRound(now) {
   if (w) {
     S.scores[w.id] = (S.scores[w.id] ?? 0) + 1;
     if (S.ranked && S.scores[w.id] >= (S.winTarget ?? 5)) {
-      // Ranked: first to 5 round wins takes the whole match.
       S.matchOver = true;
-      const who = S.roster.find((p) => p.id === w.id);
-      S.banner = {
-        text: `${(who?.name ?? COLOR_NAMES[w.color]).toUpperCase()} WINS THE MATCH`,
-        color: HULL[w.color],
-      };
-    } else {
-      S.banner = { text: `${COLOR_NAMES[w.color].toUpperCase()} WINS THE ROUND`, color: HULL[w.color] };
     }
-    // If the local human won the round, flash a gold "Victory".
+    // No "X wins" banner any more — the round just freezes. The only
+    // end-of-round headline is the personal one: gold "Victory" for the
+    // local human's win, black "Destroyed" (set on death) otherwise.
+    S.banner = { silent: true };
     if (isLocalHuman(w)) {
       S.personalMsg = { text: "Victory", color: "#ffd23f", born: now, kind: "win" };
     }
     sfx.roundEnd();
   } else {
-    S.banner = { text: "DRAW", color: "#eef1f6" };
+    // Everyone's out (a draw). Still freeze the round; no banner text.
+    S.banner = { silent: true };
     sfx.roundEnd();
   }
   S.roundOverAt = now;
@@ -2003,30 +2005,46 @@ function draw(now) {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, S.worldW, S.worldH);
 
+  // Shaped arenas: paint the cells OUTSIDE the silhouette with the
+  // page's dark background so only the shape reads as playable floor.
+  if (S.maze?.inside && S.mazeShape && S.mazeShape !== "rect") {
+    const inside = S.maze.inside;
+    ctx.fillStyle = "#0c0f16";
+    for (let r = 0; r < S.maze.rows; r++) {
+      for (let c = 0; c < S.maze.cols; c++) {
+        if (!inside[r][c]) ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+      }
+    }
+  }
+
   // Ranked shrink: the dead ring is simply gone — plain white canvas
   // where it used to be. Nothing to draw; the walls there were already
   // stripped from S.rects when the ring dropped.
 
-  ctx.fillStyle = "#808896";
-  for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
-
-  // The doomed zone pulses red through its final five seconds — the
-  // outer ring normally, or the WHOLE floor on the last collapse.
-  // Touch it and you're gone, so it reads at a hard 50% red.
-  if (flashActive(now)) {
+  // Ranked closing zone: cells already claimed glow a steady red; the
+  // layer currently being warned blinks. Both are painted per-cell (so
+  // any shape works) UNDER the walls, which stay drawn on top.
+  if (S.ranked && S.zoneDist) {
+    const zl = S.zoneLevel ?? 0;
+    const wl = S.zoneWarnLevel ?? -1;
     const blink = Math.sin(now / 130) * 0.5 + 0.5; // fast strobe
-    ctx.fillStyle = `rgba(255, 45, 40, ${0.32 + 0.25 * blink})`;
-    const L0 = S.shrinkLevel * CELL;
-    if (S.finalCollapse) {
-      ctx.fillRect(L0, L0, S.worldW - 2 * L0, S.worldH - 2 * L0);
-    } else {
-      const L1 = L0 + CELL;
-      ctx.fillRect(L0, L0, S.worldW - 2 * L0, CELL);                   // top
-      ctx.fillRect(L0, S.worldH - L1, S.worldW - 2 * L0, CELL);        // bottom
-      ctx.fillRect(L0, L1, CELL, S.worldH - 2 * L1);                   // left
-      ctx.fillRect(S.worldW - L1, L1, CELL, S.worldH - 2 * L1);        // right
+    for (let r = 0; r < S.maze.rows; r++) {
+      for (let c = 0; c < S.maze.cols; c++) {
+        const layer = S.zoneDist[r][c];
+        if (layer === Infinity) continue;
+        if (layer < zl) {
+          ctx.fillStyle = "rgba(200, 32, 30, 0.42)"; // permanently red
+          ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+        } else if (layer === wl) {
+          ctx.fillStyle = `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`; // warning
+          ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+        }
+      }
     }
   }
+
+  ctx.fillStyle = "#808896";
+  for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
 
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
   const pulse = Math.sin(now / 220) * 0.5 + 0.5;
@@ -2201,13 +2219,10 @@ function draw(now) {
     ctx.globalAlpha = 1;
   }
 
-  // Round result. If the LOCAL player won this round, the gold
-  // "Victory" message stands in for the generic "X WINS" banner — we
-  // still dim the field, but skip the banner's own text to avoid two
-  // overlapping headlines. Otherwise draw the banner normally.
-  const personalWin = S.personalMsg && S.personalMsg.kind === "win";
-  if (S.banner && !personalWin) drawBanner();
-  else if (S.banner && personalWin) {
+  // Round over: just dim the field (a silent freeze). The only
+  // headline is the personal "Victory"/"Destroyed" message — there are
+  // no "X wins the round" banners any more.
+  if (S.banner) {
     ctx.fillStyle = "rgba(10, 12, 16, .55)";
     ctx.fillRect(0, 0, S.worldW, S.worldH);
   }
@@ -2223,10 +2238,10 @@ function draw(now) {
   // Held-weapon readout: a chip OUTSIDE the canvas, bottom-right.
   // Shows the local human's own equipped weapon/ability, in local AND
   // online play. (In local hot-seat, that's the first non-bot tank.)
+  const myTank = S.mode === "online"
+    ? S.tanks.find((t) => t.id === S.myId)
+    : S.tanks.find((t) => !t.bot);
   if (weaponHudEl) {
-    const myTank = S.mode === "online"
-      ? S.tanks.find((t) => t.id === S.myId)
-      : S.tanks.find((t) => !t.bot);
     const w = myTank && !myTank.dead && !myTank.gone ? myTank.weapon : null;
     if (w) {
       weaponHudEl.hidden = false;
@@ -2237,21 +2252,46 @@ function draw(now) {
     }
   }
 
-  // The ranked shrink timer lives in the top bar, ticking down.
+  // Health readout: pips + number, bottom-left, for the local human's
+  // own tank. Rebuilt only when the value changes to avoid DOM churn.
+  if (healthHudEl) {
+    const alive = myTank && !myTank.dead && !myTank.gone;
+    const hp = alive ? Math.max(0, Math.ceil(myTank.hp ?? TANK_HP)) : 0;
+    if (!alive) {
+      healthHudEl.hidden = true;
+      healthHudEl._hp = undefined;
+    } else if (healthHudEl._hp !== hp) {
+      healthHudEl._hp = hp;
+      healthHudEl.hidden = false;
+      let pips = "";
+      for (let i = 0; i < TANK_HP; i++) {
+        pips += `<span class="hp-pip${i < hp ? "" : " spent"}"></span>`;
+      }
+      healthHudEl.innerHTML = `<span class="hp-pips">${pips}</span><span class="hp-num">${hp}/${TANK_HP}</span>`;
+    }
+  }
+
+  // The ranked zone timer lives in the top bar. It counts down to the
+  // next layer, flips to a red "CLOSING" flash while a layer blinks,
+  // and disappears once the whole map is red.
   if (shrinkEl) {
     if (S.ranked && !counting) {
-      shrinkEl.hidden = false;
-      if (S.shrinkCutAt === Infinity) {
-        shrinkEl.textContent = "";
+      const warning = (S.zoneWarnLevel ?? -1) >= 0;
+      if (warning) {
+        const left = Math.max(0, Math.ceil((S.zoneWarnUntil - now) / 1000));
+        shrinkEl.hidden = false;
+        shrinkEl.textContent = `⚠ ZONE CLOSING ${left}`;
+        shrinkEl.classList.add("warn");
+      } else if (S.zoneNextAt === Infinity) {
         shrinkEl.hidden = true;
+        shrinkEl.classList.remove("warn");
       } else {
-        const left = Math.max(0, Math.ceil((S.shrinkCutAt - now) / 1000));
+        const left = Math.max(0, Math.ceil((S.zoneNextAt - now) / 1000));
         const mm = Math.floor(left / 60);
         const ss = String(left % 60).padStart(2, "0");
-        shrinkEl.textContent = S.finalCollapse
-          ? `⚠ COLLAPSE ${mm}:${ss}`
-          : `SHRINK ${mm}:${ss}`;
-        shrinkEl.classList.toggle("warn", flashActive(now));
+        shrinkEl.hidden = false;
+        shrinkEl.textContent = `ZONE ${mm}:${ss}`;
+        shrinkEl.classList.remove("warn");
       }
     } else if (!S.ranked) {
       shrinkEl.hidden = true;
@@ -2378,6 +2418,16 @@ function drawTank(t, now) {
   ctx.fillStyle = hull;
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
 
+  // Damage flash: a quick white overlay right after taking a hit.
+  const sinceHit = now - (t.lastHitAt ?? -9999);
+  if (sinceHit < 160) {
+    ctx.save();
+    ctx.globalAlpha = 0.6 * (1 - sinceHit / 160);
+    ctx.fillStyle = "#ffffff";
+    rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+    ctx.restore();
+  }
+
   // Barrel sprite = barrel hitbox, swapping shape with the weapon.
   const wtype = t.weapon ?? "normal";
   drawBarrel(ctx, wtype, R, shade(hull, 0.35), shade(hull, 0.6));
@@ -2456,23 +2506,6 @@ function drawPersonalMsg(now) {
   ctx.fillStyle = m.color;
   ctx.fillText(m.text, S.worldW / 2, S.worldH / 2);
   ctx.restore();
-}
-
-function drawBanner() {
-  ctx.fillStyle = "rgba(10, 12, 16, .55)";
-  ctx.fillRect(0, 0, S.worldW, S.worldH);
-
-  let size = CELL * 0.75;
-  ctx.font = `${size}px "Black Ops One", system-ui, sans-serif`;
-  const w = ctx.measureText(S.banner.text).width;
-  if (w > S.worldW * 0.9) {
-    size *= (S.worldW * 0.9) / w;
-    ctx.font = `${size}px "Black Ops One", system-ui, sans-serif`;
-  }
-  ctx.fillStyle = S.banner.color;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(S.banner.text, S.worldW / 2, S.worldH / 2);
 }
 
 function rr(x, y, w, h, r) {

@@ -30,8 +30,8 @@ export const BARRELS = {
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
 export const LASER = {
-  previewBounces: 6, // aiming line reflects this many times
-  shotBounces: 9,    // the fired beam reflects this many times
+  previewBounces: 4, // aiming line reflects this many times
+  shotBounces: 7,    // the fired beam reflects this many times
   width: 0.9,        // beam half-thickness, × bullet radius
   beamSpeed: 9500,   // px/s — you can SEE it travel, but barely
   flashMs: 320,
@@ -62,22 +62,11 @@ export const WALL = {
   lifeMs: 10000,
   lengthCells: 0.5,  // half a cell long
   thickCells: 0.1067, // slab thickness (2/3 of the original 0.16)
-  // "health" is abstract; each weapon subtracts a share sized so the
-  // stated shot-counts destroy it. HP = 12 (LCM-friendly):
-  //   basic 3 shots → 4 each; fractal 4 → 3; MG 7 → ~1.72;
-  //   laser/cannon/rocket/sniper 1 → 12 (one-shot).
-  // HP = 84 (LCM of 3,4,7) so every shot-count divides evenly with
-  // integer damage — no floating-point rounding surprises.
-  hp: 84,
-  dmg: {
-    basic: 28,     // 84/3  → 3 basic shots
-    shrapnel: 21,  // 84/4  → 4 fractals
-    mg: 12,        // 84/7  → 7 MG rounds
-    laser: 84,     // one-shot
-    cannon: 84,
-    rocket: 84,
-    sniper: 84,
-  },
+  // The wall absorbs 6 points of damage — the same pool as a tank —
+  // and takes the SAME per-weapon damage values as a tank does. So a
+  // laser (8) or big cannon ball (6) shatters it in one hit, three
+  // basic shots (2 each) chip it down, six MG rounds do it, etc.
+  hp: 6,
 };
 
 export const MG = {
@@ -432,13 +421,13 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
 // rim AND the equipped-weapon label, so they always correspond.
 export const GEAR_RIM = {
   laser: "#e8452e",   // red
-  mg: "#e5a13c",      // amber
-  rocket: "#c65cff",  // violet
-  cannon: "#566072",  // steel
-  sniper: "#33c2b0",  // teal
-  boost: "#ffd23f",   // yellow
-  phase: "#b06bff",   // purple
-  wall: "#c8823c",    // brick orange
+  mg: "#ff8c1a",      // orange
+  rocket: "#2f7bff",  // blue
+  cannon: "#8a94a6",  // steel grey
+  sniper: "#18c29a",  // teal-green
+  boost: "#ffe11f",   // bright yellow
+  phase: "#c04bff",   // magenta-purple
+  wall: "#7a4a2a",    // dark brick brown
 };
 export const WEAPON_NAMES = {
   laser: "Laser",
