@@ -914,16 +914,34 @@ body {
 .notice .notice-x { opacity: .6; }
 
 .arena-wrap { position: relative; }
-.weapon-hud {
+/* Loadout readout, bottom-right of the arena: the enlarged icons of
+   your three equipped items (offense · defense · agility), each with
+   its activation control captioned beneath. */
+.loadout-hud {
   position: absolute;
   right: 10px;
   bottom: 8px;
-  font-family: "Black Ops One", system-ui;
-  font-size: clamp(.85rem, 2.4vw, 1.25rem);
-  letter-spacing: .04em;
-  padding: 2px 6px;
-  text-shadow: 0 2px 4px rgba(0,0,0,.6);
+  display: flex;
+  align-items: flex-end;
+  gap: clamp(6px, 1.2vw, 12px);
   pointer-events: none;
+}
+.loadout-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.loadout-icon {
+  width: clamp(40px, 6.5vw, 56px);
+  height: clamp(40px, 6.5vw, 56px);
+}
+.loadout-key {
+  font-family: "Black Ops One", system-ui;
+  font-size: clamp(.5rem, 1.1vw, .66rem);
+  letter-spacing: .06em;
+  color: #aab2c2;
+  text-shadow: 0 2px 4px rgba(0,0,0,.6);
   white-space: nowrap;
 }
 
