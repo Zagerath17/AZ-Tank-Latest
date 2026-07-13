@@ -42,15 +42,19 @@ Then open http://localhost:8080
 > ```json
 > {
 >   "rules": {
->     "lobbies": { ".read": true, ".write": true },
->     "users":   { ".read": true, ".write": true, ".indexOn": ["elo1", "elo4"] },
->     "uids":    { ".read": true, ".write": true },
->     "queue":   { ".read": true, ".write": true }
+>     "lobbies":     { ".read": true, ".write": true },
+>     "users":       { ".read": true, ".write": true, ".indexOn": ["elo1", "elo4"] },
+>     "uids":        { ".read": true, ".write": true },
+>     "queue":       { ".read": true, ".write": true },
+>     "leaderboard": { ".read": true, ".write": true }
 >   }
 > }
 > ```
 >
 > Without the `users`/`uids` rules, logging in shows "Permission denied".
+> The Top-50 leaderboard reads the world-readable `leaderboard` node, so
+> it keeps working even if you later lock `users` down to per-account
+> access — just keep `leaderboard` readable.
 >
 > **Accounts also need Email/Password sign-in enabled:** Firebase
 > console → Build → **Authentication** → Get started → Sign-in

@@ -36,7 +36,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.4</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -251,6 +251,7 @@
       </header>
       <div class="arena-wrap">
         <canvas id="arena"></canvas>
+        <span class="armour-hud" id="armour-hud" hidden></span>
         <span class="health-hud" id="health-hud" hidden></span>
         <div class="loadout-hud" id="loadout-hud" hidden>
           <div class="loadout-slot">
@@ -268,14 +269,18 @@
         </div>
       </div>
       <div class="touch-pad" id="touch-pad" hidden>
-        <div class="tp-group">
-          <button class="tp-btn" data-act="left" aria-label="Turn left">⟲</button>
-          <button class="tp-btn" data-act="right" aria-label="Turn right">⟳</button>
+        <div class="tp-stick" id="tp-move" aria-label="Move">
+          <span class="tp-stick-label">MOVE</span>
+          <div class="tp-knob"></div>
         </div>
-        <div class="tp-group">
-          <button class="tp-btn" data-act="down" aria-label="Reverse">▼</button>
-          <button class="tp-btn" data-act="up" aria-label="Forward">▲</button>
-          <button class="tp-btn tp-fire" data-act="shoot" aria-label="Fire">FIRE</button>
+        <div class="tp-fires">
+          <button class="tp-fire tp-off" data-fire="off" aria-label="Offense">✦</button>
+          <button class="tp-fire tp-def" data-fire="def" aria-label="Defense">▤</button>
+          <button class="tp-fire tp-agi" data-fire="agi" aria-label="Agility">➤</button>
+        </div>
+        <div class="tp-stick" id="tp-aim" aria-label="Aim">
+          <span class="tp-stick-label">AIM</span>
+          <div class="tp-knob"></div>
         </div>
       </div>
     </section>
