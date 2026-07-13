@@ -958,6 +958,33 @@ body {
   pointer-events: none;
   text-shadow: 0 2px 4px rgba(0,0,0,.6);
 }
+/* Armour pips sit just above the health row, bottom-left. */
+.armour-hud {
+  position: absolute;
+  left: 10px;
+  bottom: 34px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  pointer-events: none;
+  text-shadow: 0 2px 4px rgba(0,0,0,.6);
+}
+.armour-hud .ar-pips { display: flex; gap: 3px; }
+.armour-hud .ar-pip {
+  width: clamp(9px, 1.5vw, 14px);
+  height: clamp(9px, 1.5vw, 14px);
+  border-radius: 3px;
+  background: #4aa8ff;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.35), 0 0 6px rgba(74,168,255,.7);
+}
+.armour-hud .ar-pip.spent { background: rgba(120,170,220,.18); box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); }
+.armour-hud .ar-num {
+  font-family: "Black Ops One", system-ui;
+  font-size: clamp(.72rem, 1.9vw, 1rem);
+  color: #cfe6ff;
+  min-width: 2.2ch;
+}
 .health-hud .hp-pips { display: flex; gap: 3px; }
 .health-hud .hp-pip {
   width: clamp(9px, 1.5vw, 14px);
@@ -1023,44 +1050,77 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding-bottom: max(0px, env(safe-area-inset-bottom));
+  touch-action: none;
 }
-.tp-group { display: flex; gap: 12px; }
-.tp-btn {
-  width: 60px;
-  height: 60px;
+/* Analog thumb sticks: a fixed base ring with a draggable knob. */
+.tp-stick {
+  position: relative;
+  width: clamp(96px, 26vw, 128px);
+  height: clamp(96px, 26vw, 128px);
   border-radius: 50%;
-  font-family: "Chakra Petch", system-ui;
-  font-size: 1.4rem;
+  background: radial-gradient(circle at 50% 42%, #2a3140, #1c212c);
+  border: 1px solid var(--rivet);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.45), 0 3px 0 var(--shadow);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  flex: 0 0 auto;
+}
+.tp-stick-label {
+  position: absolute;
+  top: 8px; left: 0; right: 0;
+  text-align: center;
+  font-family: "Black Ops One", system-ui;
+  font-size: .56rem;
+  letter-spacing: .1em;
+  color: rgba(190, 198, 214, .5);
+  pointer-events: none;
+}
+.tp-knob {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 44%;
+  height: 44%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(#3a4356, #2a3140);
+  border: 1px solid var(--rivet);
+  box-shadow: 0 3px 0 var(--shadow), inset 0 1px 0 rgba(255,255,255,.08);
+  pointer-events: none;
+}
+#tp-aim { background: radial-gradient(circle at 50% 42%, #2f2a40, #201c2c); }
+#tp-aim .tp-knob { background: linear-gradient(#4a3a56, #342a40); }
+
+.tp-fires {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(6px, 1.6vh, 12px);
+  align-items: center;
+}
+.tp-fire {
+  width: clamp(52px, 14vw, 66px);
+  height: clamp(52px, 14vw, 66px);
+  border-radius: 50%;
+  font-family: "Black Ops One", system-ui;
+  font-size: 1.35rem;
   line-height: 1;
   color: var(--chalk);
   background: linear-gradient(#2a3140, #232936);
   border: 1px solid var(--rivet);
-  box-shadow: 0 4px 0 var(--shadow), inset 0 1px 0 rgba(255, 255, 255, .07);
+  box-shadow: 0 4px 0 var(--shadow), inset 0 1px 0 rgba(255,255,255,.07);
   cursor: pointer;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
-.tp-btn.held {
-  transform: translateY(3px);
-  box-shadow: 0 1px 0 var(--shadow);
-  border-color: var(--blue);
-  color: var(--blue);
-}
-.tp-fire {
-  width: 68px;
-  height: 68px;
-  font-family: "Black Ops One", system-ui;
-  font-size: .72rem;
-  letter-spacing: .06em;
-  color: var(--red);
-  border-color: #7a3a34;
-  background: linear-gradient(#3a2a2c, #2c2124);
-}
-.tp-fire.held { border-color: var(--red); color: var(--red); }
+.tp-off { color: #ff6a4d; border-color: #7a3a34; background: linear-gradient(#3a2a2c, #2c2124); }
+.tp-def { color: #c79a6a; border-color: #6a4a2a; background: linear-gradient(#33291f, #262019); }
+.tp-agi { color: #ffe11f; border-color: #7a6a1a; background: linear-gradient(#332f1a, #262214); }
+.tp-fire.held { transform: translateY(3px); box-shadow: 0 1px 0 var(--shadow); filter: brightness(1.35); }
 
 /* ---------- motion safety ---------- */
 @media (prefers-reduced-motion: reduce) {
