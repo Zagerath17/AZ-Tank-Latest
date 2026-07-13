@@ -19,8 +19,7 @@
 // screen, including mid-game.
 // ================================================================
 
-import { toast, COLOR_NAMES, tankSVG, showScreen, onEnter, onLeave } from "./main.js";
-import { PICKABLE } from "./palette.js";
+import { toast, tankSVG, showScreen, onEnter, onLeave } from "./main.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
 

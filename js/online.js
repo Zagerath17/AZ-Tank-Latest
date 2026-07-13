@@ -9,7 +9,7 @@
 //       [id]: {
 //         joinedAt: server timestamp,
 //         bot: "easy"|...|"impossible"  // only on host-added bots
-//         pos:   { x, y, a },           // streamed during the match
+//         pos:   { x, y, a, u },        // streamed during the match (u = turret aim)
 //         dead:  true,                  // this round
 //         gun:   "laser"|"mg"|"rocket"|"cannon", // equipped pickup
 //         shots: { [key]: {x, y, a, w?} }, // shots; w = special type

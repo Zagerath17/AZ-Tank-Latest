@@ -23,7 +23,7 @@
 //   equal:     ±10 / ±5 / ±2 flat by margin (spec silent — symmetric)
 // ================================================================
 
-import { toast, showScreen, onEnter, onLeave } from "./main.js";
+import { toast, onEnter, onLeave } from "./main.js";
 import { ensureFirebase, createRankedLobby } from "./online.js";
 import { getAccount } from "./social.js";
 

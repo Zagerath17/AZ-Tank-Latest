@@ -413,13 +413,12 @@ export function setEngine(active, localMoving, enemyMoving) {
     const t = ctx.currentTime;
     const LOUD = 1.2; // everything 20% louder than the old levels
     // Contributions: your engine full, enemy engines at 30% weight.
-    // idle bed is always present while active.
-    const idle = 0.018;
+    // Engines run ONLY while a tank is actually moving — no phantom
+    // always-on idle bed. Nobody driving → the sound fades to silence.
     const localRev = localMoving ? 0.05 : 0;
     const enemyRev = enemyMoving ? 0.05 * 0.3 : 0;
     const anyMoving = localMoving || enemyMoving;
-    // Take the loudest driver for pitch, sum the beds for volume.
-    const target = !active ? 0 : Math.max(idle, localRev + enemyRev) * LOUD;
+    const target = !active ? 0 : (localRev + enemyRev) * LOUD;
     const freq = anyMoving ? 72 : 52;
     engine.gain.gain.setTargetAtTime(target, t, 0.12);
     engine.o1.frequency.setTargetAtTime(freq, t, 0.18);

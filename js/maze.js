@@ -23,69 +23,91 @@ export function mulberry32(seed) {
 }
 
 // The shapes a maze region can take. "rect" is the full grid; the
-// others mask off cells so the playable area forms that silhouette.
+// others are real polygons (with diagonal edges) inscribed in the
+// grid. A cell is "inside" when its CENTRE falls in the polygon, so
+// cells straddling a diagonal edge are simply cut short — the angled
+// boundary wall runs through them.
 export const MAZE_SHAPES = ["rect", "triangle", "trapezoid", "hexagon", "octagon"];
 
-// Build a boolean mask [rows][cols]: true = the cell is INSIDE the
-// playable shape. Shapes are inscribed in the cols×rows grid.
+// Each silhouette as a convex polygon in fractional coords (0..1 across
+// the world box, y pointing down). Convex matters: any segment between
+// two interior points stays interior, so nothing (AI sight lines,
+// pathing) has to reason about the angled border.
+const OCT_CUT = 0.29;
+export const SHAPE_POLYS = {
+  triangle: [[0.5, 0], [1, 1], [0, 1]],
+  trapezoid: [[0.28, 0], [0.72, 0], [1, 1], [0, 1]],
+  hexagon: [[0.25, 0], [0.75, 0], [1, 0.5], [0.75, 1], [0.25, 1], [0, 0.5]],
+  octagon: [
+    [OCT_CUT, 0], [1 - OCT_CUT, 0], [1, OCT_CUT], [1, 1 - OCT_CUT],
+    [1 - OCT_CUT, 1], [OCT_CUT, 1], [0, 1 - OCT_CUT], [0, OCT_CUT],
+  ],
+};
+
+// Standard even-odd point-in-polygon test (poly in fractional coords).
+function pointInPoly(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if ((yi > py) !== (yj > py) &&
+        px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Build a boolean mask [rows][cols]: true = the cell's centre is INSIDE
+// the shape polygon. "rect" (or unknown) fills the whole grid.
 function shapeMask(cols, rows, shape) {
   const inside = Array.from({ length: rows }, () => Array(cols).fill(true));
-  if (shape === "rect" || !shape) return inside;
+  const poly = SHAPE_POLYS[shape];
+  if (!poly) return inside; // rect / unknown → full grid
 
-  const cx = (cols - 1) / 2;
-  const cy = (rows - 1) / 2;
-
-  const set = (test) => {
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) inside[r][c] = test(c, r);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      inside[r][c] = pointInPoly((c + 0.5) / cols, (r + 0.5) / rows, poly);
     }
-  };
+  }
+  // Convex shapes are always connected; this is just a safety net.
+  return keepMainComponent(inside, cols, rows);
+}
 
-  if (shape === "triangle") {
-    // Apex at top-center, base along the bottom row. A cell is in if
-    // it's within the widening triangle at its row.
-    set((c, r) => {
-      const frac = rows <= 1 ? 1 : r / (rows - 1); // 0 at top → 1 at base
-      const halfW = (frac * (cols - 1)) / 2;
-      return Math.abs(c - cx) <= halfW + 1e-6;
-    });
-  } else if (shape === "trapezoid") {
-    // Narrow top, wide bottom (top width ~45% of the base).
-    set((c, r) => {
-      const frac = rows <= 1 ? 1 : r / (rows - 1);
-      const topHalf = (cols - 1) * 0.22;
-      const baseHalf = (cols - 1) / 2;
-      const halfW = topHalf + (baseHalf - topHalf) * frac;
-      return Math.abs(c - cx) <= halfW + 1e-6;
-    });
-  } else if (shape === "hexagon") {
-    // Flat-top hexagon: full width in the middle band, chamfered
-    // corners top and bottom.
-    set((c, r) => {
-      const dy = Math.abs(r - cy) / (cy || 1);       // 0 center → 1 edge
-      const halfW = (cols - 1) / 2;
-      // Chamfer starts at 50% height; corners cut to ~50% width.
-      const cut = dy <= 0.5 ? 0 : (dy - 0.5) / 0.5 * (halfW * 0.5);
-      return Math.abs(c - cx) <= halfW - cut + 1e-6;
-    });
-  } else if (shape === "octagon") {
-    // Rectangle with the four corners chamfered at 45°.
-    set((c, r) => {
-      const dx = Math.abs(c - cx);
-      const dy = Math.abs(r - cy);
-      const hw = (cols - 1) / 2;
-      const hh = (rows - 1) / 2;
-      const cut = Math.min(hw, hh) * 0.5; // corner bite
-      // Outside the rect? never (we're within grid). Cut the corners:
-      return (dx - (hw - cut)) + (dy - (hh - cut)) <= cut + 1e-6
-        || dx <= hw - cut || dy <= hh - cut;
+// The shape polygon in WORLD coordinates (or null for rect), so callers
+// can draw the silhouette and build its boundary walls.
+export function shapePolygon(maze, cell) {
+  const poly = SHAPE_POLYS[maze.shape];
+  if (!poly) return null;
+  const W = maze.cols * cell, H = maze.rows * cell;
+  return poly.map(([fx, fy]) => [fx * W, fy * H]);
+}
+
+// The shape's diagonal/edge boundary as oriented wall slabs
+// { x, y, a, hx, hy } — the same shape the brick-wall collision already
+// understands. Each polygon edge becomes one slab, over-extended at its
+// ends by the wall thickness so neighbouring slabs overlap at every
+// vertex (no gaps for tanks or bullets to slip through). Empty for rect.
+export function boundaryWalls(maze, cell, t) {
+  const pts = shapePolygon(maze, cell);
+  if (!pts) return [];
+  const half = t / 2;
+  const walls = [];
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    walls.push({
+      x: (x1 + x2) / 2,
+      y: (y1 + y2) / 2,
+      a: Math.atan2(dy, dx),
+      hx: len / 2 + t,   // overlap corners
+      hy: half,
     });
   }
-
-  // Guarantee the mask is connected: keep only the component that
-  // contains the center-most inside cell (masks above are convex, so
-  // this is just a safety net).
-  return keepMainComponent(inside, cols, rows);
+  return walls;
 }
 
 // Flood-fill from a seed inside the mask; drop any stray islands.
@@ -137,7 +159,7 @@ export function generateMaze(cols, rows, rng, opts = {}) {
   for (let r = 0; r < rows && !start; r++) {
     for (let c = 0; c < cols && !start; c++) if (inside[r][c]) start = [c, r];
   }
-  if (!start) return { cols, rows, H, V, inside };
+  if (!start) return { cols, rows, H, V, inside, shape };
 
   const stack = [start];
   visited[start[1]][start[0]] = true;
@@ -205,7 +227,7 @@ export function generateMaze(cols, rows, rng, opts = {}) {
     }
   }
 
-  return { cols, rows, H, V, inside };
+  return { cols, rows, H, V, inside, shape };
 }
 
 // For a shrinking "zone", we need to know how many layers deep each
@@ -251,23 +273,27 @@ export function wallRects(maze, cell, t) {
   const rects = [];
   const half = t / 2;
   const inside = maze.inside;
+  // Shaped mazes get their border from the polygon boundary walls, so
+  // here we emit only walls BETWEEN two inside cells (interior maze).
+  // Rect mazes emit every standing wall that borders an inside cell —
+  // which includes the grid's outer edge, i.e. the arena wall.
+  const shaped = !!SHAPE_POLYS[maze.shape];
   const isIn = (c, r) =>
     !inside || (r >= 0 && r < maze.rows && c >= 0 && c < maze.cols && inside[r][c]);
+  const keep = (a, b) => (shaped ? a && b : a || b);
 
   for (let r = 0; r <= maze.rows; r++) {
     for (let c = 0; c < maze.cols; c++) {
-      // A horizontal wall (above row r) is relevant if either the cell
-      // above or below it is inside the shape.
-      if (maze.H[r][c] && (isIn(c, r) || isIn(c, r - 1))) {
+      // A horizontal wall (above row r) separates cell (c, r) and (c, r-1).
+      if (maze.H[r][c] && keep(isIn(c, r), isIn(c, r - 1))) {
         rects.push({ x: c * cell - half, y: r * cell - half, w: cell + t, h: t });
       }
     }
   }
   for (let r = 0; r < maze.rows; r++) {
     for (let c = 0; c <= maze.cols; c++) {
-      // A vertical wall (left of col c) is relevant if either the cell
-      // left or right of it is inside the shape.
-      if (maze.V[r][c] && (isIn(c, r) || isIn(c - 1, r))) {
+      // A vertical wall (left of col c) separates cell (c, r) and (c-1, r).
+      if (maze.V[r][c] && keep(isIn(c, r), isIn(c - 1, r))) {
         rects.push({ x: c * cell - half, y: r * cell - half, w: t, h: cell + t });
       }
     }

@@ -15,12 +15,12 @@
 import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
 import { COLORS, COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
-import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance } from "./maze.js";
+import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
-  laserPath, rocketSeekStep, stepShrap, bounceCircle, drawBarrel, drawGear,
-  GEAR_RIM, WEAPON_NAMES,
+  laserPath, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
+  WEAPON_CATEGORY,
 } from "./weapons.js";
 import { sfx, setEngine, startMusic, stopAll } from "./audio.js";
 
@@ -38,7 +38,8 @@ const REVERSE_SPEED = U * 1.45;
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
 
 const GEAR_R = 14;             // pickup grab radius (added to the tank's)
-const GEAR_MAX = 15;           // pickups on the field at once
+const GEAR_TYPE_MAX = 2;       // at most this many of any ONE ability on the map
+const GEAR_MAX = WEAPON_TYPES.length * GEAR_TYPE_MAX; // field cap = 2× the ability roster
 const GEAR_FIRST_MS = 3500;    // first pickup after round start
 const GEAR_EVERY_MS = 5500;    // then every 5.5–9 s
 
@@ -107,9 +108,16 @@ const MAZE_SHAPES_NONRECT = MAZE_SHAPES.filter((s) => s !== "rect");
 /* ---------- module state ---------- */
 
 let S = null;
-let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, weaponHudEl, healthHudEl;
+let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, loadoutHudEl, healthHudEl;
 const held = new Set();
 const touchHeld = new Set();
+// Turret aiming: the mouse position in WORLD coordinates, whether the
+// player has aimed at all yet (so we can fall back to hull-facing on
+// touch / before first move), and whether the fire button (LMB) is down.
+let mouseWorld = { x: 0, y: 0 };
+let hasMouseAim = false;
+let mouseFire = false;  // LMB — offense (special gun, else basic shots)
+let mouseDef = false;   // RMB — defense (wall)
 
 /* ================================================================
    Public API
@@ -120,7 +128,7 @@ export function initGame() {
   ctx = canvas.getContext("2d");
   exitBtn = document.getElementById("game-exit");
   shrinkEl = document.getElementById("game-shrink");
-  weaponHudEl = document.getElementById("weapon-hud");
+  loadoutHudEl = document.getElementById("loadout-hud");
   healthHudEl = document.getElementById("health-hud");
   touchPad = document.getElementById("touch-pad");
   scoreEl = document.getElementById("game-score");
@@ -142,6 +150,31 @@ export function initGame() {
     btn.addEventListener("pointerleave", off);
     btn.addEventListener("contextmenu", (e) => e.preventDefault());
   });
+
+  // Turret aim: track the mouse over the arena in WORLD space using the
+  // same view transform draw() lays down (stored on S.view each frame).
+  const toWorld = (e) => {
+    if (!S || !S.view) return;
+    const r = canvas.getBoundingClientRect();
+    const cx = e.clientX - r.left;
+    const cy = e.clientY - r.top;
+    mouseWorld.x = (cx - S.view.ox) / S.view.s;
+    mouseWorld.y = (cy - S.view.oy) / S.view.s;
+    hasMouseAim = true;
+  };
+  canvas.addEventListener("mousemove", toWorld);
+  // Left mouse button = FIRE (default). Right-click menu is suppressed
+  // over the arena so aiming near the edge never pops a context menu.
+  canvas.addEventListener("mousedown", (e) => {
+    toWorld(e);
+    if (e.button === 0) { mouseFire = true; e.preventDefault(); }
+    if (e.button === 2) { mouseDef = true; e.preventDefault(); }
+  });
+  window.addEventListener("mouseup", (e) => {
+    if (e.button === 0) mouseFire = false;
+    if (e.button === 2) mouseDef = false;
+  });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
 // specs: [{ color, bot: null | 'easy' | 'medium' | 'hard' }]
@@ -199,7 +232,7 @@ export function stopGame() {
   window.removeEventListener("blur", clearHeld);
   touchPad.hidden = true;
   if (scoreEl) scoreEl.innerHTML = "";
-  if (weaponHudEl) weaponHudEl.hidden = true;
+  if (loadoutHudEl) loadoutHudEl.hidden = true;
   if (healthHudEl) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
   S = null;
 }
@@ -276,7 +309,7 @@ export function onlineLobbyUpdate(lobby) {
     }
 
     if (!t.local) {
-      if (p.pos) { t.tx = p.pos.x; t.ty = p.pos.y; t.ta = p.pos.a; }
+      if (p.pos) { t.tx = p.pos.x; t.ty = p.pos.y; t.ta = p.pos.a; if (p.pos.u != null) t.tu = p.pos.u; }
       if (p.shots) {
         const seen = (S.seenShots[t.id] ??= new Set());
         for (const [key, sh] of Object.entries(p.shots)) {
@@ -339,6 +372,9 @@ function begin(opts) {
     shraps: [],
     snipes: [],
     walls: [],
+    rects: [],
+    diag: [],
+    polyWorld: null,
     beams: [],
     booms: [],
     seenShots: {},
@@ -354,6 +390,9 @@ function begin(opts) {
 
   held.clear();
   touchHeld.clear();
+  mouseFire = false;
+  mouseDef = false;
+  hasMouseAim = false;
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("keyup", onKeyup);
   window.addEventListener("blur", clearHeld);
@@ -388,9 +427,13 @@ function startRound(seed) {
     sizeIdx = lo + Math.floor(rng() * (MAZE_SIZES.length - lo));
   }
   const [cols, rows] = MAZE_SIZES[sizeIdx];
-  S.mazeShape = shape;
   S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.3 });
   S.rects = wallRects(S.maze, CELL, WALL_T);
+  // Shaped arenas: the angled silhouette edge, as oriented wall slabs
+  // (collision) plus the world-space polygon (for the floor + clip).
+  // Both are empty/null for a plain rectangle, so nothing changes there.
+  S.diag = boundaryWalls(S.maze, CELL, WALL_T);
+  S.polyWorld = shapePolygon(S.maze, CELL);
   S.worldW = cols * CELL;
   S.worldH = rows * CELL;
   S.bullets = [];
@@ -468,11 +511,16 @@ function startRound(seed) {
       ...spec,
       local: S.mode === "local" ? true : spec.id === S.myId,
       x, y, a, tx: x, ty: y, ta: a,
+      turret: a, tu: a, // barrel aim (world angle) + remote target
       dead: false,
       hp: TANK_HP, // baseline health; damage chips this down to 0
       gone: !S.present.has(spec.id),
       prevShoot: false,
-      weapon: null,
+      prevDef: false,
+      prevAgi: false,
+      weapon: null,   // OFFENSE slot (drives the barrel sprite + hitbox)
+      defense: null,  // DEFENSE slot (wall)
+      agility: null,  // AGILITY slot (boost / phase)
       mg: null,
       gunClearedAt: 0,
       ai: null,
@@ -506,6 +554,8 @@ function onKeyup(e) {
 function clearHeld() {
   held.clear();
   touchHeld.clear();
+  mouseFire = false;
+  mouseDef = false;
 }
 
 function isBoundCode(code) {
@@ -516,7 +566,10 @@ function isBoundCode(code) {
 }
 
 function readActions(tank, binds) {
-  const acts = { up: false, down: false, left: false, right: false, shoot: false };
+  const acts = {
+    up: false, down: false, left: false, right: false,
+    shoot: false, def: false, agi: false,
+  };
 
   // Local: strictly your SLOT's binds (colors are just paint now).
   // Online: your (only) tank answers to any slot's binds, so WASD
@@ -532,6 +585,13 @@ function readActions(tank, binds) {
   // Touch pad only ever drives the single local human tank.
   if (!tank.bot) {
     for (const a of touchHeld) acts[a] = true;
+    // Three activation controls, one per loadout category:
+    //   LMB   → offense (special gun if held, else the basic shot)
+    //   RMB   → defense (wall)
+    //   LShift → agility (boost / phase)
+    if (mouseFire) acts.shoot = true;
+    if (mouseDef) acts.def = true;
+    if (held.has("ShiftLeft")) acts.agi = true;
   }
   return acts;
 }
@@ -553,15 +613,16 @@ function frame(now) {
     if (t.dead || t.gone) continue;
     if (t.weapon === "laser") {
       const m = muzzlePoint(t, 1);
-      S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.a, S.rects, LASER.previewBounces) });
+      S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects, LASER.previewBounces) });
     } else if (t.weapon === "sniper") {
       // Straight line, no bounce, through walls, 3 cells long.
       const m = muzzlePoint(t, 1);
       const len = SNIPER.previewCells * CELL;
+      const aim = t.turret ?? t.a;
       S.sniperAims.push({
         by: t.id, color: HULL[t.color],
         x0: m.x, y0: m.y,
-        x1: m.x + Math.cos(t.a) * len, y1: m.y + Math.sin(t.a) * len,
+        x1: m.x + Math.cos(aim) * len, y1: m.y + Math.sin(aim) * len,
       });
     }
   }
@@ -618,7 +679,7 @@ function frame(now) {
     S.lastSend = now;
     for (const t of S.tanks) {
       if (t.local && !t.dead && !t.gone) {
-        S.sendPos?.(t.id, { x: +t.x.toFixed(1), y: +t.y.toFixed(1), a: +t.a.toFixed(3) });
+        S.sendPos?.(t.id, { x: +t.x.toFixed(1), y: +t.y.toFixed(1), a: +t.a.toFixed(3), u: +(t.turret ?? t.a).toFixed(3) });
       }
     }
   }
@@ -693,37 +754,11 @@ function stepTanks(now, dt) {
         t.trkR = (t.trkR ?? 0) + (v - w * half) * dt;
       }
 
-      // Kick up a faint dust puff behind a driving tank. While boosting
-      // the trail lasts 20% longer, reads much darker, DOUBLES the puff
-      // count, and throws yellow sparks.
+      // Kick up dust behind a driving tank (boost upgrades the trail —
+      // see emitDriveDust, which is shared with remote playback so
+      // every player sees the same effects).
       if (v !== 0 && now >= (t.dustAt ?? 0)) {
-        t.dustAt = now + 65 + Math.random() * 45;
-        const back = v > 0 ? -1 : 1;
-        const puffs = boosting ? 2 : 1; // boost dispenses double the dust
-        for (let p = 0; p < puffs; p++) {
-          S.dust.push({
-            x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
-            y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
-            vx: Math.cos(t.a) * back * 9 + (Math.random() - 0.5) * 8,
-            vy: Math.sin(t.a) * back * 9 + (Math.random() - 0.5) * 8,
-            born: now,
-            boost: boosting,
-          });
-        }
-        if (boosting) {
-          // A couple of bright yellow sparks riding inside the dust.
-          for (let k = 0; k < 2; k++) {
-            S.dust.push({
-              x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 8,
-              y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 8,
-              vx: Math.cos(t.a) * back * 12 + (Math.random() - 0.5) * 20,
-              vy: Math.sin(t.a) * back * 12 + (Math.random() - 0.5) * 20,
-              born: now,
-              spark: true,
-            });
-          }
-        }
-        while (S.dust.length > 400) S.dust.shift();
+        emitDriveDust(t, v > 0 ? -1 : 1, boosting, now);
       }
 
       if (v !== 0) {
@@ -737,7 +772,7 @@ function stepTanks(now, dt) {
           const minY = lo.r0 * CELL + TANK_RAD, maxY = (lo.r1 + 1) * CELL - TANK_RAD;
           t.x = Math.min(maxX, Math.max(minX, nx));
           t.y = Math.min(maxY, Math.max(minY, ny));
-        } else if (!tankHitsAnyWall(t, nx, ny, t.a)) {
+        } else if (!tankHitsAnyWall(t, nx, ny, t.a) && !tankHitsAnyDiag(t, nx, ny, t.a)) {
           t.x = nx;
           t.y = ny;
         }
@@ -753,8 +788,27 @@ function stepTanks(now, dt) {
         if (clear) t.ejecting = false;
       }
 
+      // ---- Turret aim (barrel points independently of the hull) ----
+      // Human: aim the barrel at the mouse. Bots: aim with the hull
+      // (their AI already turns the body onto the target), so the
+      // turret simply tracks the hull. Before the first mouse move —
+      // or on touch, where there's no pointer — fall back to hull.
+      if (t.bot) {
+        t.turret = t.a;
+      } else if (hasMouseAim) {
+        t.turret = Math.atan2(mouseWorld.y - t.y, mouseWorld.x - t.x);
+      } else {
+        t.turret = t.a;
+      }
+
+      // Three activation controls, edge-triggered (press, not hold):
+      // LMB → offense / basic gun, RMB → defense, LShift → agility.
       if (acts.shoot && !t.prevShoot && !phasing) tryFire(t, now);
       t.prevShoot = acts.shoot;
+      if (acts.def && !t.prevDef && !phasing && t.defense) fireDefense(t, now);
+      t.prevDef = acts.def;
+      if (acts.agi && !t.prevAgi && !phasing && t.agility) fireAgility(t, now);
+      t.prevAgi = acts.agi;
 
       // Machine gun: the trigger pull spins the barrel up (glowing
       // muzzle, half a second). Once hot it's manual — hold to spray
@@ -773,7 +827,7 @@ function stepTanks(now, dt) {
           } else if (now >= t.mgReadyAt && now >= (t.mgNext ?? 0)) {
             t.mgAmmo ??= MG.shots;
             const m = muzzlePoint(t, MG.r * BULLET_R);
-            const a = t.a + (Math.random() * 2 - 1) * MG.spread;
+            const a = (t.turret ?? t.a) + (Math.random() * 2 - 1) * MG.spread;
             spawnBullet(t.id, m.x, m.y, a, now, true);
             sendTypedShot(t, { w: "mini", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +a.toFixed(3) }, now);
             t.mgNext = now + MG.gapMs;
@@ -804,24 +858,28 @@ function stepTanks(now, dt) {
       t.x += (t.tx - t.x) * k;
       t.y += (t.ty - t.y) * k;
       t.a += angleDiff(t.a, t.ta) * k;
+      // Barrel aim glides toward the reported turret angle (its own
+      // channel, so a remote tank can face one way and aim another).
+      t.turret = (t.turret ?? t.a) + angleDiff(t.turret ?? t.a, t.tu ?? t.a) * k;
 
-      // Tracks + dust from the observed motion.
+      // Tracks + dust from the observed motion. Boost state arrives
+      // over the shot channel (t.boostUntil), so the upgraded trail —
+      // and any future drive effect — renders for everyone.
       const fwd = (t.x - ox) * Math.cos(t.a) + (t.y - oy) * Math.sin(t.a);
       const spin = angleDiff(oa, t.a);
       const half = TANK_R * 0.62;
       t.trkL = (t.trkL ?? 0) + fwd + spin * half;
       t.trkR = (t.trkR ?? 0) + fwd - spin * half;
+
+      // Their engine revs ONLY while they're actually observed moving
+      // (driving or turning) — never while parked.
+      if (Math.abs(fwd) > 20 * dt || Math.abs(spin) > 0.9 * dt) {
+        S.engineMovingEnemy = true;
+      }
+
       if (Math.abs(fwd) > 28 * dt && now >= (t.dustAt ?? 0)) {
-        t.dustAt = now + 70 + Math.random() * 45;
-        const back = fwd > 0 ? -1 : 1;
-        S.dust.push({
-          x: t.x + Math.cos(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
-          y: t.y + Math.sin(t.a) * TANK_R * back + (Math.random() - 0.5) * 6,
-          vx: Math.cos(t.a) * back * 9,
-          vy: Math.sin(t.a) * back * 9,
-          born: now,
-        });
-        if (S.dust.length > 260) S.dust.shift();
+        const boosting = now < (t.boostUntil ?? 0);
+        emitDriveDust(t, fwd > 0 ? -1 : 1, boosting, now);
       }
     }
   }
@@ -834,9 +892,12 @@ function stepTanks(now, dt) {
         separate(alive[i], alive[j]);
       }
     }
-    // Safety: being shoved must never push a tank inside a wall.
+    // Safety: being shoved must never push a tank inside a wall —
+    // EXCEPT a phasing tank, which is meant to sit inside walls freely
+    // (whole hull, not just the barrel). Only the outer boundary holds.
     for (const t of alive) {
       if (!t.local) continue;
+      if (now < (t.phaseUntil ?? 0)) continue; // phasing: don't eject
       for (const rect of S.rects) {
         const mtv = obbRectMTV(t.x, t.y, t.a, rect);
         if (mtv) {
@@ -847,7 +908,64 @@ function stepTanks(now, dt) {
       t.x = clamp(t.x, TANK_RAD, S.worldW - TANK_RAD);
       t.y = clamp(t.y, TANK_RAD, S.worldH - TANK_RAD);
     }
+    // The shaped arena's diagonal boundary contains EVERY local tank —
+    // phasing included — so no one can slip past the silhouette edge.
+    for (const t of alive) {
+      if (!t.local) continue;
+      for (const w of S.diag) {
+        const mtv = obbGenMTV(t.x, t.y, t.a, TANK_HL, TANK_HW, w.x, w.y, w.a, w.hx, w.hy);
+        if (mtv) {
+          t.x += mtv.nx * mtv.depth;
+          t.y += mtv.ny * mtv.depth;
+        }
+      }
+    }
   }
+}
+
+// Exhaust dust behind a driving tank — plus the boost trail. Shared
+// by the local sim AND remote playback, so this effect (and any
+// future drive animation added here) shows identically to all
+// players. `back` is -1 driving forward, +1 reversing.
+function emitDriveDust(t, back, boosting, now) {
+  // Boost pumps particles out at nearly double the rate.
+  t.dustAt = now + (boosting ? 34 + Math.random() * 24 : 65 + Math.random() * 45);
+  const bx = t.x + Math.cos(t.a) * TANK_R * back;
+  const by = t.y + Math.sin(t.a) * TANK_R * back;
+
+  // Boost: 4 puffs per emission (vs 1), thrown wider and harder.
+  const puffs = boosting ? 4 : 1;
+  const scat = boosting ? 11 : 6;
+  const kick = boosting ? 15 : 9;
+  for (let p = 0; p < puffs; p++) {
+    S.dust.push({
+      x: bx + (Math.random() - 0.5) * scat,
+      y: by + (Math.random() - 0.5) * scat,
+      vx: Math.cos(t.a) * back * kick + (Math.random() - 0.5) * (boosting ? 16 : 8),
+      vy: Math.sin(t.a) * back * kick + (Math.random() - 0.5) * (boosting ? 16 : 8),
+      born: now,
+      boost: boosting,
+    });
+  }
+
+  if (boosting) {
+    // A shower of hot sparks riding the trail: white-hot, yellow and
+    // orange flecks of mixed size, kicked out hard and scattering wide.
+    for (let k = 0; k < 5; k++) {
+      const heat = Math.random();
+      S.dust.push({
+        x: bx + (Math.random() - 0.5) * 10,
+        y: by + (Math.random() - 0.5) * 10,
+        vx: Math.cos(t.a) * back * (18 + Math.random() * 26) + (Math.random() - 0.5) * 46,
+        vy: Math.sin(t.a) * back * (18 + Math.random() * 26) + (Math.random() - 0.5) * 46,
+        born: now,
+        spark: true,
+        color: heat > 0.72 ? "#fff6cf" : heat > 0.38 ? "#ffd23f" : "#ff8a2a",
+        sz: 0.05 + Math.random() * 0.09,
+      });
+    }
+  }
+  while (S.dust.length > 600) S.dust.shift();
 }
 
 /* ---------- shooting ---------- */
@@ -857,9 +975,10 @@ function stepTanks(now, dt) {
 // projectile's radius (kept clear of the barrel tip).
 function muzzlePoint(t, projR) {
   const bl = BARRELS[t.weapon] ?? BARRELS.normal;
+  const aim = t.turret ?? t.a;
   const len = bl.len * TANK_R + projR + 2;
-  const tipX = t.x + Math.cos(t.a) * len;
-  const tipY = t.y + Math.sin(t.a) * len;
+  const tipX = t.x + Math.cos(aim) * len;
+  const tipY = t.y + Math.sin(aim) * len;
   const hit = segmentFirstHit(t.x, t.y, tipX, tipY, S.rects);
   const k = Math.min(1, Math.max(0.2, hit * 0.9));
   return { x: t.x + (tipX - t.x) * k, y: t.y + (tipY - t.y) * k };
@@ -903,7 +1022,7 @@ function tryFire(t, now) {
   if (t.weapon === "mg") return; // manual fire — handled in stepTanks
 
   if (t.weapon) {
-    fireSpecial(t, now);
+    fireOffense(t, now);
     return;
   }
 
@@ -914,58 +1033,73 @@ function tryFire(t, now) {
   t.basicNext = now + MAG_GAP;
   (t.basicMag ??= []).push(now);
   const m = muzzlePoint(t, BULLET_R);
-  spawnBullet(t.id, m.x, m.y, t.a, now);
-  sendTypedShot(t, { x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+  const aim = t.turret ?? t.a;
+  spawnBullet(t.id, m.x, m.y, aim, now);
+  sendTypedShot(t, { x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
 }
 
-function fireSpecial(t, now) {
+// OFFENSE (LMB): the special gun in the offense slot. Fires along the
+// turret; the slot clears when the gun is spent (sniper keeps its
+// barrel until both rounds are gone; the MG is handled in stepTanks).
+function fireOffense(t, now) {
   const w = t.weapon;
+  const aim = t.turret ?? t.a;
 
   if (w === "laser") {
     const m = muzzlePoint(t, 1);
-    fireLaser(t.id, m.x, m.y, t.a, now);
-    sendTypedShot(t, { w: "laser", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+    fireLaser(t.id, m.x, m.y, aim, now);
+    sendTypedShot(t, { w: "laser", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
   } else if (w === "rocket") {
     const m = muzzlePoint(t, ROCKET.r * BULLET_R);
-    spawnRocket(t.id, m.x, m.y, t.a, now);
-    sendTypedShot(t, { w: "rocket", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+    spawnRocket(t.id, m.x, m.y, aim, now);
+    sendTypedShot(t, { w: "rocket", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
   } else if (w === "cannon") {
     const m = muzzlePoint(t, CANNON.r * BULLET_R);
-    spawnCannon(t.id, m.x, m.y, t.a, now);
-    sendTypedShot(t, { w: "cannon", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+    spawnCannon(t.id, m.x, m.y, aim, now);
+    sendTypedShot(t, { w: "cannon", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
   } else if (w === "sniper") {
     // Two rounds per pickup; fire one, keep the barrel until spent.
     const m = muzzlePoint(t, BARRELS.sniper.len * BULLET_R);
-    spawnSnipe(t.id, m.x, m.y, t.a, now);
-    sendTypedShot(t, { w: "snipe", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +t.a.toFixed(3) }, now);
+    spawnSnipe(t.id, m.x, m.y, aim, now);
+    sendTypedShot(t, { w: "snipe", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
     t.snAmmo = (t.snAmmo ?? SNIPER.shots) - 1;
     if (t.snAmmo > 0) return; // keep the sniper until both rounds are gone
     t.snAmmo = null;
-  } else if (w === "boost") {
-    // Speed boost: activating it hands your basic gun straight back
-    // AND grants a temporary sprint. No projectile.
+  }
+
+  clearWeapon(t, now);
+}
+
+// DEFENSE (RMB): drop the brick wall just ahead of where you're aiming.
+function fireDefense(t, now) {
+  spawnWall(t, now);
+  sfx.wallup?.();
+  sendTypedShot(t, {
+    w: "wall",
+    x: +lastWallPos.x.toFixed(1), y: +lastWallPos.y.toFixed(1),
+    a: +(t.turret ?? t.a).toFixed(3),
+  }, now);
+  t.defense = null;
+}
+
+// AGILITY (LShift): boost or phase, whichever is in the slot.
+function fireAgility(t, now) {
+  if (t.agility === "boost") {
+    // Speed boost: activating it refills your basic gun AND grants a
+    // temporary sprint. No projectile.
     t.boostUntil = now + BOOST.durationMs;
     t.basicMag = []; // refill: basic attacks available immediately
     t.basicNext = 0;
     sfx.boost?.();
     sendTypedShot(t, { w: "boost" }, now);
-  } else if (w === "phase") {
+  } else if (t.agility === "phase") {
     // Phase: 2 s of intangibility. Can't shoot while active (handled
     // in the movement loop). Still vulnerable to everything.
     t.phaseUntil = now + PHASE.durationMs;
     sfx.phase?.();
     sendTypedShot(t, { w: "phase" }, now);
-  } else if (w === "wall") {
-    // Drop a temporary brick wall just ahead of the barrel.
-    spawnWall(t, now);
-    sfx.wallup?.();
-    sendTypedShot(t, {
-      w: "wall",
-      x: +lastWallPos.x.toFixed(1), y: +lastWallPos.y.toFixed(1), a: +t.a.toFixed(3),
-    }, now);
   }
-
-  clearWeapon(t, now);
+  t.agility = null;
 }
 
 // Online receive: one dispatcher for every shot type.
@@ -974,7 +1108,7 @@ function spawnShot(byId, sh, now = performance.now()) {
     case "snipe": spawnSnipe(byId, sh.x, sh.y, sh.a, now); break;
     case "boost": {
       const bt = S.tanks.find((x) => x.id === byId);
-      if (bt) { bt.boostUntil = now + BOOST.durationMs; }
+      if (bt) { bt.boostUntil = now + BOOST.durationMs; sfx.boost?.(); }
       break;
     }
     case "phase": {
@@ -1039,6 +1173,7 @@ function stepBullets(now, dt) {
       b.y += (b.vy * dt) / steps;
       if (hitWall(b.x, b.y, b.r ?? BULLET_R, b.mini ? "mg" : "basic", now)) { alive = false; break; }
       if (bounceCircle(b, S.rects, b.r ?? BULLET_R)) sfx.bounce();
+      if (bounceSlab(b, S.diag, b.r ?? BULLET_R)) sfx.bounce();
 
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
@@ -1081,30 +1216,50 @@ function stepGear(now) {
     S.gearNextAt = now + GEAR_EVERY_MS + Math.random() * 3500;
     const spot = pickGearSpot();
     if (spot) {
-      const type = WEAPON_TYPES[Math.floor(Math.random() * WEAPON_TYPES.length)];
-      const key = "g" + (S.gearSeq++) + Math.random().toString(36).slice(2, 6);
-      if (S.mode === "local") {
-        S.gear.push({ key, x: spot.x, y: spot.y, type, born: now });
-        sfx.gearSpawn();
-      } else S.sendGear?.(key, { x: spot.x, y: spot.y, type }); // arrives via snapshot
+      // Per-type cap: never more than GEAR_TYPE_MAX of any one ability
+      // on the field at once — spawn only from the types still open.
+      const counts = {};
+      for (const g of S.gear) counts[g.type] = (counts[g.type] ?? 0) + 1;
+      const open = WEAPON_TYPES.filter((w) => (counts[w] ?? 0) < GEAR_TYPE_MAX);
+      if (open.length) {
+        const type = open[Math.floor(Math.random() * open.length)];
+        const key = "g" + (S.gearSeq++) + Math.random().toString(36).slice(2, 6);
+        if (S.mode === "local") {
+          S.gear.push({ key, x: spot.x, y: spot.y, type, born: now });
+          sfx.gearSpawn();
+        } else S.sendGear?.(key, { x: spot.x, y: spot.y, type }); // arrives via snapshot
+      }
     }
   }
 
   // Pickups: each client claims gear for its OWN tanks (exact positions).
   for (let i = S.gear.length - 1; i >= 0; i--) {
     const g = S.gear[i];
+    const cat = WEAPON_CATEGORY[g.type] ?? "offense";
     for (const t of S.tanks) {
-      // One gun at a time: an armed tank can't grab another crate
-      // until its current weapon has been fired off.
-      if (!t.local || t.dead || t.gone || t.weapon) continue;
+      if (!t.local || t.dead || t.gone) continue;
+      // One item per category: the matching slot must be empty.
+      // (offense also stays locked until the current gun is fired off.)
+      const slotFull =
+        cat === "offense" ? t.weapon : cat === "defense" ? t.defense : t.agility;
+      if (slotFull) continue;
       const d2 = (t.x - g.x) ** 2 + (t.y - g.y) ** 2;
       if (d2 > (TANK_RAD + GEAR_R) ** 2) continue;
       S.gear.splice(i, 1);
       S.takenGear.set(g.key, now);
-      t.weapon = g.type; // barrel (sprite + hitbox) swaps immediately
-      if (g.type === "sniper") t.snAmmo = SNIPER.shots;
+      if (cat === "offense") {
+        t.weapon = g.type; // barrel (sprite + hitbox) swaps immediately
+        if (g.type === "sniper") t.snAmmo = SNIPER.shots;
+        // sendPickup atomically removes the crate AND announces the gun
+        // (the gun channel drives every remote client's barrel).
+        if (S.mode === "online") S.sendPickup?.(g.key, t.id, g.type);
+      } else {
+        if (cat === "defense") t.defense = g.type;
+        else t.agility = g.type;
+        // No barrel change → nothing to announce beyond the removal.
+        if (S.mode === "online") S.sendGearRemove?.(g.key);
+      }
       sfx.pickup();
-      if (S.mode === "online") S.sendPickup?.(g.key, t.id, g.type);
       break;
     }
   }
@@ -1395,6 +1550,7 @@ function stepRockets(now, dt) {
         rk.x += (rk.vx * dt) / steps;
         rk.y += (rk.vy * dt) / steps;
         bounceCircle(rk, S.rects, r);
+        bounceSlab(rk, S.diag, r);
       }
 
       if (hitWall(rk.x, rk.y, r, "rocket", now)) {
@@ -1445,13 +1601,14 @@ function stepRockets(now, dt) {
 // Where the last wall was placed (so the network payload matches).
 let lastWallPos = { x: 0, y: 0 };
 
-// Drop a brick wall a bit ahead of the tank, perpendicular to facing.
+// Drop a brick wall a bit ahead of the tank, perpendicular to the aim.
 function spawnWall(t, now) {
+  const aim = t.turret ?? t.a;
   const ahead = TANK_RAD + WALL.thickCells * CELL * 0.5 + 4;
-  const x = t.x + Math.cos(t.a) * ahead;
-  const y = t.y + Math.sin(t.a) * ahead;
+  const x = t.x + Math.cos(aim) * ahead;
+  const y = t.y + Math.sin(aim) * ahead;
   lastWallPos = { x, y };
-  addWall(t.id, x, y, t.a, now);
+  addWall(t.id, x, y, aim, now);
 }
 
 // Create the wall object. Its long axis is perpendicular to `a`
@@ -1525,33 +1682,16 @@ function stepWalls(now, dt) {
   const minX = lo.c0 * CELL + TANK_RAD, maxX = (lo.c1 + 1) * CELL - TANK_RAD;
   const minY = lo.r0 * CELL + TANK_RAD, maxY = (lo.r1 + 1) * CELL - TANK_RAD;
   for (const w of S.walls) {
-    const ca = Math.cos(w.a), sa = Math.sin(w.a);
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
       if (now < (t.phaseUntil ?? 0)) continue; // phasing tanks ignore it
-      // tank center in the wall's local frame
-      const dx = t.x - w.x, dy = t.y - w.y;
-      const lx = dx * ca + dy * sa;   // along length
-      const ly = -dx * sa + dy * ca;  // along thickness
-      const ox = w.hx + TANK_RAD;     // overlap extents (circle approx)
-      const oy = w.hy + TANK_RAD;
-      if (Math.abs(lx) < ox && Math.abs(ly) < oy) {
-        // Push out along whichever local axis needs the least travel.
-        // length axis unit = (ca, sa); thickness axis unit = (-sa, ca).
-        const pushL = ox - Math.abs(lx);
-        const pushT = oy - Math.abs(ly);
-        let nx, ny;
-        if (pushT <= pushL) {
-          const s = Math.sign(ly) || 1;
-          nx = t.x + (-sa) * (s * pushT);
-          ny = t.y + (ca) * (s * pushT);
-        } else {
-          const s = Math.sign(lx) || 1;
-          nx = t.x + (ca) * (s * pushL);
-          ny = t.y + (sa) * (s * pushL);
-        }
-        t.x = Math.min(maxX, Math.max(minX, nx));
-        t.y = Math.min(maxY, Math.max(minY, ny));
+      // Exact SAT between the tank's oriented body rectangle and the
+      // wall slab — the same rectangles that are drawn on screen, so
+      // tanks touch the bricks flush and slide along them cleanly.
+      const mtv = obbGenMTV(t.x, t.y, t.a, TANK_HL, TANK_HW, w.x, w.y, w.a, w.hx, w.hy);
+      if (mtv) {
+        t.x = Math.min(maxX, Math.max(minX, t.x + mtv.nx * mtv.depth));
+        t.y = Math.min(maxY, Math.max(minY, t.y + mtv.ny * mtv.depth));
         t.tx = t.x; t.ty = t.y;
       }
     }
@@ -1621,6 +1761,7 @@ function stepCannons(now, dt) {
     c.y += c.vy * dt;
     if (hitWall(c.x, c.y, r, "cannon", now)) { explodeCannon(c, now); continue; }
     bounceCircle(c, S.rects, r);
+    bounceSlab(c, S.diag, r);
 
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
@@ -1862,29 +2003,34 @@ function ejectFromWall(t, dt) {
   return dist <= step + 0.5; // reached it this frame → clear
 }
 
-// Does the tank (circle approx) overlap any player-built brick wall?
+// Does the tank's oriented body rectangle overlap any player-built
+// brick wall? Exact SAT — matches what's drawn.
 function tankInBrickWall(t, x, y) {
   for (const w of S.walls) {
-    const ca = Math.cos(w.a), sa = Math.sin(w.a);
-    const dx = x - w.x, dy = y - w.y;
-    const lx = dx * ca + dy * sa;
-    const ly = -dx * sa + dy * ca;
-    if (Math.abs(lx) < w.hx + TANK_RAD && Math.abs(ly) < w.hy + TANK_RAD) return true;
+    if (obbGenMTV(x, y, t.a, TANK_HL, TANK_HW, w.x, w.y, w.a, w.hx, w.hy)) return true;
+  }
+  return false;
+}
+
+// Does the tank's body overlap the shaped arena's diagonal boundary?
+// Empty (always false) for a plain rectangle.
+function tankHitsAnyDiag(t, x, y, a) {
+  for (const w of S.diag) {
+    if (obbGenMTV(x, y, a, TANK_HL, TANK_HW, w.x, w.y, w.a, w.hx, w.hy)) return true;
   }
   return false;
 }
 
 function tankHitsAnyWall(t, x, y, a) {
-  const bl = BARRELS[t?.weapon] ?? BARRELS.normal;
-  const off = (bl.len * TANK_R) / 2;
-  const bx = x + Math.cos(a) * off;
-  const by = y + Math.sin(a) * off;
-  const bhw = bl.hw * TANK_R;
-  const reach = Math.max(TANK_RAD, bl.len * TANK_R + 2);
+  // Only the hull body blocks movement/rotation. The barrel is now a
+  // free-spinning turret (aimed by the mouse), so it must NOT clunk the
+  // hull to a stop — a barrel poking a wall is cosmetic, and the muzzle
+  // is pulled back at fire time (see muzzlePoint) so nothing spawns
+  // through a wall.
+  const reach = TANK_RAD;
   for (const rc of S.rects) {
     if (!nearRect(x, y, rc, reach)) continue;
     if (obbHitsRect(x, y, a, rc)) return true;
-    if (obbHitsRect(bx, by, a, rc, off, bhw)) return true;
   }
   return false;
 }
@@ -1909,6 +2055,32 @@ function obbRectMTV(x, y, a, rc) {
   }
   // Push away from the wall's center.
   if ((x - rcx) * nx + (y - rcy) * ny < 0) { nx = -nx; ny = -ny; }
+  return { nx, ny, depth };
+}
+
+// Generic SAT MTV between two arbitrary oriented rectangles: rect A
+// (center ax,ay, angle aa, half-extents ahl×ahw) vs rect B. Returns
+// the push that moves A out of B (normal points B → A), or null if
+// they don't overlap. Used for tank vs player-built wall slabs — the
+// EXACT drawn rectangles, no inflated circle approximation.
+function obbGenMTV(axc, ayc, aa, ahl, ahw, bxc, byc, ba, bhl, bhw) {
+  const dx = axc - bxc;
+  const dy = ayc - byc;
+  const reach = Math.hypot(ahl, ahw) + Math.hypot(bhl, bhw);
+  if (dx * dx + dy * dy >= reach * reach) return null; // broadphase
+  const axes = [...obbAxes(aa), ...obbAxes(ba)];
+  let depth = Infinity;
+  let nx = 0;
+  let ny = 0;
+  for (const [ax, ay] of axes) {
+    const overlap =
+      obbProjR(aa, ax, ay, ahl, ahw) +
+      obbProjR(ba, ax, ay, bhl, bhw) -
+      Math.abs(dx * ax + dy * ay);
+    if (overlap <= 0) return null; // separating axis found
+    if (overlap < depth) { depth = overlap; nx = ax; ny = ay; }
+  }
+  if (dx * nx + dy * ny < 0) { nx = -nx; ny = -ny; }
   return { nx, ny, depth };
 }
 
@@ -1954,30 +2126,74 @@ function separate(a, b) {
 function tankHitPoint(t, x, y, r) {
   const dx = x - t.x;
   const dy = y - t.y;
-  const c = Math.cos(t.a);
-  const s = Math.sin(t.a);
-  const lx = dx * c + dy * s;   // along the barrel
-  const ly = -dx * s + dy * c;  // across
 
-  // Body.
-  let px = clamp(lx, -TANK_HL, TANK_HL);
-  let py = clamp(ly, -TANK_HW, TANK_HW);
-  let ox = lx - px;
-  let oy = ly - py;
-  if (ox * ox + oy * oy < r * r) return true;
+  // Body: the hull rectangle, in the hull's frame (angle t.a).
+  {
+    const c = Math.cos(t.a);
+    const s = Math.sin(t.a);
+    const lx = dx * c + dy * s;   // along the hull
+    const ly = -dx * s + dy * c;  // across
+    const px = clamp(lx, -TANK_HL, TANK_HL);
+    const py = clamp(ly, -TANK_HW, TANK_HW);
+    const ox = lx - px;
+    const oy = ly - py;
+    if (ox * ox + oy * oy < r * r) return true;
+  }
 
-  // Barrel (shape depends on the equipped weapon).
-  const bl = BARRELS[t.weapon] ?? BARRELS.normal;
-  px = clamp(lx, 0, bl.len * TANK_R);
-  py = clamp(ly, -bl.hw * TANK_R, bl.hw * TANK_R);
-  ox = lx - px;
-  oy = ly - py;
-  return ox * ox + oy * oy < r * r;
+  // Barrel: the barrel rectangle, in the TURRET's frame (it now aims
+  // independently of the hull, so its hitbox rotates with the mouse).
+  {
+    const aim = t.turret ?? t.a;
+    const c = Math.cos(aim);
+    const s = Math.sin(aim);
+    const lx = dx * c + dy * s;
+    const ly = -dx * s + dy * c;
+    const bl = BARRELS[t.weapon] ?? BARRELS.normal;
+    const px = clamp(lx, 0, bl.len * TANK_R);
+    const py = clamp(ly, -bl.hw * TANK_R, bl.hw * TANK_R);
+    const ox = lx - px;
+    const oy = ly - py;
+    if (ox * ox + oy * oy < r * r) return true;
+  }
+
+  return false;
 }
 
 /* ================================================================
    Rendering
    ================================================================ */
+
+// Trace a closed polygon path (world-space points) onto ctx.
+function tracePoly(pts) {
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+}
+
+// One loadout HUD slot: the equipped item's crate icon, enlarged —
+// drawn with the SAME painter as the floor pickups, so the HUD always
+// matches what you grabbed. An empty slot is a faint dashed socket.
+function drawLoadoutIcon(cv, type) {
+  const c2 = cv.getContext("2d");
+  const w = cv.width;
+  const h = cv.height;
+  c2.setTransform(1, 0, 0, 1, 0, 0);
+  c2.clearRect(0, 0, w, h);
+  if (!type) {
+    c2.strokeStyle = "rgba(170, 178, 194, 0.35)";
+    c2.lineWidth = Math.max(2, w * 0.03);
+    c2.setLineDash([w * 0.07, w * 0.06]);
+    c2.beginPath();
+    c2.arc(w / 2, h / 2, w * 0.36, 0, Math.PI * 2);
+    c2.stroke();
+    c2.setLineDash([]);
+    return;
+  }
+  // A static frame of the pickup crate: born long ago (no pop-in),
+  // now = 0 (no bob/pulse motion), centred and scaled to fill.
+  drawGear(c2, { type, x: w / 2, y: h / 2, born: -9999 }, w * 0.68, 0.5, 0);
+}
 
 function draw(now) {
   const cw = canvas.clientWidth;
@@ -1994,28 +2210,32 @@ function draw(now) {
 
   const pad = 8;
   const s = Math.min((cw - pad * 2) / S.worldW, (ch - pad * 2) / S.worldH);
+  const ox = (cw - S.worldW * s) / 2;
+  const oy = (ch - S.worldH * s) / 2;
+  // Remember the transform (CSS-pixel space) so pointer events can map
+  // mouse position back into world coordinates for turret aiming.
+  S.view = { s, ox, oy };
   ctx.save();
-  ctx.translate((cw - S.worldW * s) / 2, (ch - S.worldH * s) / 2);
+  ctx.translate(ox, oy);
   ctx.scale(s, s);
 
   // During the 3-2-1 the whole arena sits behind frosted glass.
   const counting = now < (S.freezeUntil ?? 0);
   if (counting && "filter" in ctx) ctx.filter = "blur(5px)";
 
+  // Floor. For a shaped arena, clip everything that follows (floor,
+  // zone tint, interior walls) to the silhouette polygon: the area
+  // outside simply shows the page background — no dark filler cells,
+  // and the angled edge reads clean. Rect arenas fill the whole box.
+  let clippedToShape = false;
+  if (S.polyWorld) {
+    ctx.save();
+    tracePoly(S.polyWorld);
+    ctx.clip();
+    clippedToShape = true;
+  }
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, S.worldW, S.worldH);
-
-  // Shaped arenas: paint the cells OUTSIDE the silhouette with the
-  // page's dark background so only the shape reads as playable floor.
-  if (S.maze?.inside && S.mazeShape && S.mazeShape !== "rect") {
-    const inside = S.maze.inside;
-    ctx.fillStyle = "#0c0f16";
-    for (let r = 0; r < S.maze.rows; r++) {
-      for (let c = 0; c < S.maze.cols; c++) {
-        if (!inside[r][c]) ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
-      }
-    }
-  }
 
   // Ranked shrink: the dead ring is simply gone — plain white canvas
   // where it used to be. Nothing to draw; the walls there were already
@@ -2046,6 +2266,20 @@ function draw(now) {
   ctx.fillStyle = "#808896";
   for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
 
+  // Shaped arena: lift the silhouette clip and draw the diagonal border
+  // slabs on top, at full thickness, in the same grey as the walls.
+  if (clippedToShape) {
+    ctx.restore();
+    ctx.fillStyle = "#808896";
+    for (const w of S.diag) {
+      ctx.save();
+      ctx.translate(w.x, w.y);
+      ctx.rotate(w.a);
+      ctx.fillRect(-w.hx, -w.hy, w.hx * 2, w.hy * 2);
+      ctx.restore();
+    }
+  }
+
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
   const pulse = Math.sin(now / 220) * 0.5 + 0.5;
   // Dust puffs drift and dissolve beneath everything that moves.
@@ -2057,10 +2291,19 @@ function draw(now) {
     const life = d.boost || d.spark ? BOOST_LIFE : DUST_LIFE;
     const k = (now - d.born) / life;
     if (d.spark) {
-      ctx.fillStyle = "#ffd23f";
-      ctx.globalAlpha = 0.9 * (1 - k);
+      const px = d.x + d.vx * k;
+      const py = d.y + d.vy * k;
+      const sz = TANK_R * ((d.sz ?? 0.08) + k * 0.05);
+      ctx.fillStyle = d.color ?? "#ffd23f";
+      // A soft glowing halo…
+      ctx.globalAlpha = 0.22 * (1 - k);
       ctx.beginPath();
-      ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.08 + k * 0.06), 0, Math.PI * 2);
+      ctx.arc(px, py, sz * 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      // …around the hot core.
+      ctx.globalAlpha = 0.95 * (1 - k);
+      ctx.beginPath();
+      ctx.arc(px, py, sz, 0, Math.PI * 2);
       ctx.fill();
     } else {
       ctx.fillStyle = d.boost ? "#646974" : "#8b93a3"; // boosted = 20% darker again
@@ -2235,20 +2478,31 @@ function draw(now) {
 
   ctx.restore();
 
-  // Held-weapon readout: a chip OUTSIDE the canvas, bottom-right.
-  // Shows the local human's own equipped weapon/ability, in local AND
-  // online play. (In local hot-seat, that's the first non-bot tank.)
+  // Loadout readout, bottom-right OUTSIDE the canvas: the enlarged
+  // icons of your three equipped items — offense (LMB), defense (RMB),
+  // agility (LShift). Redrawn only when the loadout actually changes.
   const myTank = S.mode === "online"
     ? S.tanks.find((t) => t.id === S.myId)
     : S.tanks.find((t) => !t.bot);
-  if (weaponHudEl) {
-    const w = myTank && !myTank.dead && !myTank.gone ? myTank.weapon : null;
-    if (w) {
-      weaponHudEl.hidden = false;
-      weaponHudEl.textContent = WEAPON_NAMES[w] ?? w;
-      weaponHudEl.style.color = GEAR_RIM[w] ?? "#eef1f6";
+  if (loadoutHudEl) {
+    const alive = myTank && !myTank.dead && !myTank.gone;
+    if (!alive) {
+      loadoutHudEl.hidden = true;
+      loadoutHudEl._sig = undefined;
     } else {
-      weaponHudEl.hidden = true;
+      const items = {
+        offense: myTank.weapon ?? null,
+        defense: myTank.defense ?? null,
+        agility: myTank.agility ?? null,
+      };
+      const sig = `${items.offense}|${items.defense}|${items.agility}`;
+      loadoutHudEl.hidden = false;
+      if (loadoutHudEl._sig !== sig) {
+        loadoutHudEl._sig = sig;
+        for (const cv of loadoutHudEl.querySelectorAll(".loadout-icon")) {
+          drawLoadoutIcon(cv, items[cv.dataset.cat]);
+        }
+      }
     }
   }
 
@@ -2428,8 +2682,13 @@ function drawTank(t, now) {
     ctx.restore();
   }
 
-  // Barrel sprite = barrel hitbox, swapping shape with the weapon.
+  // Barrel sprite = barrel hitbox, drawn in the TURRET's frame so it
+  // aims independently of the hull. We're already rotated by the hull
+  // angle, so rotate the extra delta onto the turret heading.
   const wtype = t.weapon ?? "normal";
+  const turret = t.turret ?? t.a;
+  ctx.save();
+  ctx.rotate(turret - t.a);
   drawBarrel(ctx, wtype, R, shade(hull, 0.35), shade(hull, 0.6));
 
   // Machine gun wind-up: the muzzle glows while it spins up.
@@ -2443,6 +2702,7 @@ function drawTank(t, now) {
     ctx.fill();
     ctx.globalAlpha = 1;
   }
+  ctx.restore();
 
   ctx.fillStyle = shade(hull, 0.42);
   ctx.beginPath();

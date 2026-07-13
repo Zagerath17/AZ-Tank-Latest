@@ -21,7 +21,7 @@
 // ================================================================
 
 import { segmentHitsAnyRect } from "./maze.js";
-import { ROCKET, SNIPER } from "./weapons.js";
+import { ROCKET, SNIPER, WEAPON_CATEGORY } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
@@ -119,12 +119,15 @@ export function botActions(t, world, dt, now) {
     pushUntil: 0, burstLeft: 0,
     dodgePt: null, dodgeHold: 0, gearKey: null,
     laserWaryOf: null, laserWaryUntil: 0,
-    abilityAt: null, abilityWant: false,
+    agiAt: null, agiWant: false, defAt: null, defWant: false,
     prevLos: false,
     vel: {},
   });
 
-  const acts = { up: false, down: false, left: false, right: false, shoot: false };
+  const acts = {
+    up: false, down: false, left: false, right: false,
+    shoot: false, def: false, agi: false,
+  };
   const cell = world.cell;
   const rBody = (world.tankR ?? cell * 0.23) * 1.05;
 
@@ -290,54 +293,60 @@ export function botActions(t, world, dt, now) {
   ai.prevLos = los;
 
   /* ---- 3b. tactical abilities: used with PURPOSE, never on grab ---- */
-  // These fire `acts.shoot` only when the situation calls for it, then
-  // return early (activating consumes the ability). A small reaction
-  // delay keeps it from looking robotic.
-  if (t.weapon === "boost" || t.weapon === "phase" || t.weapon === "wall") {
+  // Agility (boost/phase) and defense (wall) live in their own loadout
+  // slots with their own activation channels (acts.agi / acts.def), so
+  // each is decided independently — same want-conditions as ever, with
+  // a small human reaction delay so it never looks robotic.
+  {
     const threatSoon = ai.threat && ai.threat.impactAt && (ai.threat.impactAt - now) < 700;
-    if (ai.abilityAt == null) {
-      // Decide WHEN (and whether) to use it, once per pickup.
-      ai.abilityAt = 0;
-      ai.abilityWant = false;
+
+    // -- agility slot --
+    if (t.agility) {
+      let want = false;
+      if (t.agility === "boost") {
+        // Practical sprint: when there's distance to close on a target
+        // in sight, or when actively fleeing an incoming threat. Not
+        // when idling next to the enemy.
+        const chasing = los && dist > cell * 2.2;
+        const fleeing = !!ai.threat && dist < cell * 2.0;
+        want = chasing || fleeing;
+      } else if (t.agility === "phase") {
+        // Phase to escape a shot you can't dodge, or to slip through a
+        // wall toward a target you otherwise can't reach.
+        const wallBetween = los === false && dist < P.range * cell &&
+          segmentHitsAnyRect(t.x, t.y, target.x, target.y, world.rects);
+        want = threatSoon || (wallBetween && dist < cell * 3.5);
+      }
+      if (want && !ai.agiWant) {
+        ai.agiWant = true;
+        ai.agiAt = now + 250 + Math.random() * 350;
+      }
+      if (!want) ai.agiWant = false; // situation passed — reset
+      if (ai.agiWant && now >= ai.agiAt) {
+        ai.agiWant = false;
+        acts.agi = true;
+      }
+    } else {
+      ai.agiWant = false;
     }
 
-    let want = false;
-    if (t.weapon === "boost") {
-      // Practical sprint: when there's distance to close on a target
-      // in sight, or when actively fleeing an incoming threat. Not
-      // when idling next to the enemy.
-      const chasing = los && dist > cell * 2.2;
-      const fleeing = !!ai.threat && dist < cell * 2.0;
-      want = chasing || fleeing;
-    } else if (t.weapon === "phase") {
-      // Phase to escape a shot you can't dodge, or to slip through a
-      // wall toward a target you otherwise can't reach.
-      const trapped = threatSoon;
-      const wallBetween = los === false && dist < P.range * cell &&
-        segmentHitsAnyRect(t.x, t.y, target.x, target.y, world.rects);
-      want = trapped || (wallBetween && dist < cell * 3.5);
-    } else if (t.weapon === "wall") {
+    // -- defense slot --
+    if (t.defense === "wall") {
       // Drop a blocker when an enemy has a clear look at you at mid
       // range (screen the incoming fire), or to wall off a chaser.
-      want = los && dist > cell * 1.4 && dist < cell * 5;
+      const want = los && dist > cell * 1.4 && dist < cell * 5;
+      if (want && !ai.defWant) {
+        ai.defWant = true;
+        ai.defAt = now + 250 + Math.random() * 350;
+      }
+      if (!want) ai.defWant = false;
+      if (ai.defWant && now >= ai.defAt) {
+        ai.defWant = false;
+        acts.def = true;
+      }
+    } else {
+      ai.defWant = false;
     }
-
-    if (want && !ai.abilityWant) {
-      // Commit with a short human reaction delay (250–600 ms).
-      ai.abilityWant = true;
-      ai.abilityAt = now + 250 + Math.random() * 350;
-    }
-    if (!want) ai.abilityWant = false; // situation passed — reset
-
-    if (ai.abilityWant && now >= ai.abilityAt) {
-      ai.abilityWant = false;
-      ai.abilityAt = null;
-      acts.shoot = true;
-      return finish(ai, acts);
-    }
-  } else {
-    ai.abilityAt = null;
-    ai.abilityWant = false;
   }
 
   /* ---- 4. shooting ---- */
@@ -550,14 +559,18 @@ export function botActions(t, world, dt, now) {
   }
 
   if (!dodging && !hazardSteer && !combatSteered && !laserHold) {
-    // Bare barrel + a weapon crate on the floor? Worth a detour —
-    // and once a crate is CHOSEN, commit to it. Re-deciding between
-    // "get the gun" and "get the player" every repath freezes tanks
-    // halfway between the two.
+    // A crate on the floor for a loadout slot we haven't filled? Worth
+    // a detour — and once a crate is CHOSEN, commit to it. Re-deciding
+    // between "get the gear" and "get the player" every repath freezes
+    // tanks halfway between the two.
     let goal = target;
-    if (special) ai.gearKey = null;
-    if (!special && world.gear && world.gear.length) {
+    const slotOpen = (type) => {
+      const cat = WEAPON_CATEGORY[type] ?? "offense";
+      return cat === "offense" ? !t.weapon : cat === "defense" ? !t.defense : !t.agility;
+    };
+    if (world.gear && world.gear.length) {
       let g = ai.gearKey ? world.gear.find((it) => it.key === ai.gearKey) : null;
+      if (g && !slotOpen(g.type)) { g = null; ai.gearKey = null; } // slot filled meanwhile
       if (g && best < (cell * 1.6) ** 2) {
         g = null; // enemy is danger-close — drop the errand and fight
         ai.gearKey = null;
@@ -567,6 +580,7 @@ export function botActions(t, world, dt, now) {
         let gBest = Infinity;
         let cand = null;
         for (const it of world.gear) {
+          if (!slotOpen(it.type)) continue;
           const d = (it.x - t.x) ** 2 + (it.y - t.y) ** 2;
           if (d < gBest) { gBest = d; cand = it; }
         }
@@ -576,6 +590,8 @@ export function botActions(t, world, dt, now) {
         }
       }
       if (g) goal = g;
+    } else {
+      ai.gearKey = null;
     }
     navigate(t, ai, goal, world, P, rBody, now, acts);
   }

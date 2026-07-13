@@ -13,6 +13,20 @@ import { segmentHitsAnyRect } from "./maze.js";
 
 export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon", "sniper", "boost", "phase", "wall"];
 
+// Every pickup belongs to one loadout category. A tank holds at most
+// ONE item per category (offense / defense / agility), each with its
+// own activation control.
+export const WEAPON_CATEGORY = {
+  laser: "offense",
+  mg: "offense",
+  rocket: "offense",
+  cannon: "offense",
+  sniper: "offense",
+  wall: "defense",
+  boost: "agility",
+  phase: "agility",
+};
+
 // Barrel geometry in multiples of TANK_R. The barrel hitbox is the
 // rectangle from the hull center to len·R forward, hw·R half-wide —
 // exactly what's drawn.
@@ -46,7 +60,7 @@ export const SNIPER = {
 };
 
 export const BOOST = {
-  mult: 1.2,         // +20% move speed
+  mult: 1.4,         // +40% move speed
   durationMs: 6000,  // for six seconds
 };
 
@@ -201,6 +215,42 @@ export function bounceCircle(b, rects, r) {
       b.y += dir * oy;
       if ((dir < 0 && b.vy > 0) || (dir > 0 && b.vy < 0)) { b.vy = -b.vy; bounced = true; }
     }
+  }
+  return bounced;
+}
+
+// Reflect a projectile (circle radius r) off oriented wall slabs
+// { x, y, a, hx, hy } — the diagonal arena boundary. Works in each
+// slab's local frame (x along the edge, y = surface normal), pushing
+// out and flipping the velocity component on whichever local axis is
+// shallower, then rotating the correction back to world space.
+export function bounceSlab(b, slabs, r) {
+  let bounced = false;
+  for (const w of slabs) {
+    const ca = Math.cos(w.a), sa = Math.sin(w.a);
+    const dx = b.x - w.x, dy = b.y - w.y;
+    const lx = dx * ca + dy * sa;    // along the edge
+    const ly = -dx * sa + dy * ca;   // across (normal)
+    const ox = w.hx + r - Math.abs(lx);
+    if (ox <= 0) continue;
+    const oy = w.hy + r - Math.abs(ly);
+    if (oy <= 0) continue;
+    let lvx = b.vx * ca + b.vy * sa;
+    let lvy = -b.vx * sa + b.vy * ca;
+    let nlx = lx, nly = ly;
+    if (oy < ox) {
+      const dir = ly < 0 ? -1 : 1;
+      nly = ly + dir * oy;
+      if ((dir < 0 && lvy > 0) || (dir > 0 && lvy < 0)) { lvy = -lvy; bounced = true; }
+    } else {
+      const dir = lx < 0 ? -1 : 1;
+      nlx = lx + dir * ox;
+      if ((dir < 0 && lvx > 0) || (dir > 0 && lvx < 0)) { lvx = -lvx; bounced = true; }
+    }
+    b.x = w.x + nlx * ca - nly * sa;
+    b.y = w.y + nlx * sa + nly * ca;
+    b.vx = lvx * ca - lvy * sa;
+    b.vy = lvx * sa + lvy * ca;
   }
   return bounced;
 }
@@ -429,17 +479,6 @@ export const GEAR_RIM = {
   phase: "#c04bff",   // magenta-purple
   wall: "#7a4a2a",    // dark brick brown
 };
-export const WEAPON_NAMES = {
-  laser: "Laser",
-  mg: "Machine Gun",
-  rocket: "Homing Rocket",
-  cannon: "Cannon",
-  sniper: "Sniper",
-  boost: "Speed Boost",
-  phase: "Phase",
-  wall: "Wall",
-};
-
 function easeOutBack(t) {
   const c1 = 1.70158;
   const c3 = c1 + 1;

@@ -17,7 +17,6 @@
 import { tankSVG } from "./main.js";
 import { ensureFirebase } from "./online.js";
 import { getAccount } from "./social.js";
-import { rankBadge } from "./ranked.js";
 
 // Fetch my record vs one opponent key → { w, l }.
 async function recordVs(f, oppKey) {
