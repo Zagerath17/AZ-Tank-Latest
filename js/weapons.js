@@ -11,7 +11,7 @@
 
 import { segmentHitsAnyRect } from "./maze.js";
 
-export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon", "sniper", "boost", "phase", "wall"];
+export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon", "sniper", "mortar", "boost", "phase", "wall", "armour", "heal", "mud"];
 
 // Every pickup belongs to one loadout category. A tank holds at most
 // ONE item per category (offense / defense / agility), each with its
@@ -22,7 +22,11 @@ export const WEAPON_CATEGORY = {
   rocket: "offense",
   cannon: "offense",
   sniper: "offense",
+  mortar: "offense",
   wall: "defense",
+  armour: "defense",
+  heal: "defense",
+  mud: "defense",
   boost: "agility",
   phase: "agility",
 };
@@ -37,9 +41,13 @@ export const BARRELS = {
   mg:     { len: 1.45, hw: 0.36 },
   rocket: { len: 1.3,  hw: 0.44 },
   cannon: { len: 1.2,  hw: 0.52 },
+  mortar: { len: 0.95, hw: 0.46 },
   boost:  { len: 1.5,  hw: 0.31 },
   phase:  { len: 1.5,  hw: 0.31 },
   wall:   { len: 1.5,  hw: 0.31 },
+  armour: { len: 1.5,  hw: 0.31 },
+  heal:   { len: 1.5,  hw: 0.31 },
+  mud:    { len: 1.5,  hw: 0.31 },
 };
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
@@ -65,8 +73,46 @@ export const BOOST = {
 };
 
 export const PHASE = {
-  durationMs: 2000,  // two seconds of intangibility
+  durationMs: 1500,  // 1.5 seconds of intangibility
   opacity: 0.5,      // half-transparent while phasing
+};
+
+// Armour: a 4-point shield that soaks damage before your health, for
+// 20 s. Shows as a blue glow around the tank.
+export const ARMOUR = {
+  hp: 4,
+  durationMs: 20000,
+};
+
+// Healing station: a green pad ~1 cell across. A tank must stay inside
+// for a full 3 s to bank 1 HP; the pad lives 9 s (so 3 HP max). Heals
+// ANY tank standing in it.
+export const HEAL = {
+  radiusCells: 0.5,   // ~1 cell diameter
+  durationMs: 9000,
+  tickMs: 3000,       // 3 s inside per HP
+  tickGraceMs: 60,    // absorbs the one-frame boundary so 9 s → the full 3 HP
+  healPerHp: 1,
+};
+
+// Mud pit: an irregular puddle ~1 cell across dropped behind the hull.
+// Any tank inside moves 20% slower. Dries up after a while.
+export const MUD = {
+  radiusCells: 0.55,
+  slow: 0.8,          // 20% slow-down
+  lifeMs: 15000,
+};
+
+// Mortar: indirect fire. The shot is aimed at the mouse, snapped to
+// the centre of that cell (max reach rangeCells), arcs high over
+// everything, and lands after msPerCell of flight per cell of
+// distance. A pulsing red marker warns the landing cell; impact
+// throws a dark smoke cloud over it. Damage rings live in game code
+// (they're sized off the tank/cell constants).
+export const MORTAR = {
+  rangeCells: 5,      // "going out 5 cells takes 5 seconds"
+  msPerCell: 1000,    // flight time per cell of distance
+  cloudMs: 1100,      // the dark cloud lingers this long
 };
 
 // A temporary brick wall the player drops. It BLOCKS movement and
@@ -85,7 +131,7 @@ export const WALL = {
 
 export const MG = {
   windupMs: 500,     // barrel spin-up on the first trigger pull
-  shots: 16,         // total balls per pickup — hold or tap to fire
+  shots: 26,         // total balls per pickup — hold or tap to fire
   gapMs: 90,         // minimum gap between balls while holding
   spread: 0.07,      // radians of random scatter per ball
   r: 0.5,            // × bullet radius — "half sized balls"
@@ -458,6 +504,20 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
       rrect(L * 0.78, -W, L * 0.22, W * 2, W * 0.25);
       break;
 
+    case "mortar": {
+      // A stubby, wide launch tube: reinforced base ring, then the
+      // tube, with a dark open bore at the muzzle (it lobs, not shoots).
+      ctx.fillStyle = cDark;
+      rrect(0, -W, L * 0.32, W * 2, W * 0.3); // base collar
+      ctx.fillStyle = cMain;
+      rrect(L * 0.22, -W * 0.86, L * 0.78, W * 1.72, W * 0.5);
+      ctx.fillStyle = "#1c212c"; // open bore
+      ctx.beginPath();
+      ctx.ellipse(L * 0.92, 0, W * 0.34, W * 0.66, 0, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+
     default:
       ctx.fillStyle = cMain;
       rrect(0, -W, L, W * 2, W * 0.55);
@@ -478,6 +538,10 @@ export const GEAR_RIM = {
   boost: "#ffe11f",   // bright yellow
   phase: "#c04bff",   // magenta-purple
   wall: "#7a4a2a",    // dark brick brown
+  armour: "#4aa8ff",  // armour blue
+  heal: "#2fbf5f",    // healing green
+  mud: "#6b4a2a",     // muddy brown
+  mortar: "#8a8f3c",  // olive drab
 };
 function easeOutBack(t) {
   const c1 = 1.70158;
@@ -708,6 +772,77 @@ export function drawGear(ctx, g, R, pulse, now = 0) {
           ctx.stroke();
         }
       }
+      break;
+    }
+    case "mortar": {
+      // A tilted launch tube lobbing a dashed arc onto a landing dot.
+      ctx.save();
+      ctx.rotate(-0.5);
+      ctx.fillStyle = rim;
+      rrect(-R * 0.36, -R * 0.1, R * 0.34, R * 0.2, R * 0.05);
+      ctx.restore();
+      ctx.strokeStyle = rim;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([R * 0.07, R * 0.06]);
+      ctx.beginPath();
+      ctx.arc(R * 0.02, R * 0.34, R * 0.42, -Math.PI * 0.82, -Math.PI * 0.18);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#e8452e"; // the landing marker
+      ctx.beginPath();
+      ctx.arc(R * 0.34, R * 0.22, R * 0.09, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    case "armour": {
+      // A shield crest.
+      ctx.fillStyle = rim;
+      ctx.beginPath();
+      ctx.moveTo(0, -R * 0.34);
+      ctx.lineTo(R * 0.3, -R * 0.2);
+      ctx.lineTo(R * 0.3, R * 0.05);
+      ctx.quadraticCurveTo(R * 0.3, R * 0.3, 0, R * 0.4);
+      ctx.quadraticCurveTo(-R * 0.3, R * 0.3, -R * 0.3, R * 0.05);
+      ctx.lineTo(-R * 0.3, -R * 0.2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "#eaf4ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -R * 0.18);
+      ctx.lineTo(0, R * 0.22);
+      ctx.moveTo(-R * 0.16, R * 0.02);
+      ctx.lineTo(R * 0.16, R * 0.02);
+      ctx.stroke();
+      break;
+    }
+    case "heal": {
+      // A rounded medical cross.
+      ctx.fillStyle = rim;
+      const a = R * 0.12, b = R * 0.34;
+      rrect(-a, -b, a * 2, b * 2, R * 0.05);
+      rrect(-b, -a, b * 2, a * 2, R * 0.05);
+      break;
+    }
+    case "mud": {
+      // A muddy puddle with a couple of ripple rings.
+      ctx.fillStyle = rim;
+      ctx.beginPath();
+      const N = 10;
+      for (let i = 0; i <= N; i++) {
+        const ang = (i / N) * Math.PI * 2;
+        const rr2 = R * (0.3 + 0.08 * Math.sin(ang * 3 + 1.1));
+        const px = Math.cos(ang) * rr2;
+        const py = Math.sin(ang) * rr2 * 0.7 + R * 0.05;
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(30, 18, 10, 0.45)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.ellipse(-R * 0.05, R * 0.02, R * 0.12, R * 0.08, 0, 0, Math.PI * 2);
+      ctx.stroke();
       break;
     }
   }

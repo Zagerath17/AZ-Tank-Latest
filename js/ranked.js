@@ -26,6 +26,7 @@
 import { toast, onEnter, onLeave } from "./main.js";
 import { ensureFirebase, createRankedLobby } from "./online.js";
 import { getAccount } from "./social.js";
+import { isConfigured } from "./firebase-config.js";
 
 export const DEFAULT_ELO = 500;
 
@@ -129,7 +130,15 @@ export async function applyMatchResult(mode, placements) {
   if (after == null) return;
   try {
     const f = await ensureFirebase();
-    await f.set(f.ref(f.db, `users/${acc.key}/${MODES[mode].eloField}`), after);
+    // Atomically bump the private rating AND the public leaderboard
+    // mirror (world-readable), so the Top-50 works without granting
+    // read access to every user's full profile.
+    await f.update(f.ref(f.db), {
+      [`users/${acc.key}/${MODES[mode].eloField}`]: after,
+      [`leaderboard/${MODES[mode].eloField}/${acc.key}`]: {
+        name: acc.name ?? acc.key, elo: after,
+      },
+    });
     const d = after - before;
     toast(`${d >= 0 ? "+" : ""}${d} Elo — ${rankOf(after).name} ${after}`, 5000);
   } catch (e) { /* rating survives to the next match */ }
@@ -259,31 +268,64 @@ async function matchmakerTick(f, acc, mode) {
 
 /* ---------- leaderboards ---------- */
 
+// Collect {key,name,elo} rows for the active mode. Preferred source is
+// the public `/leaderboard/{mode}` mirror (world-readable, so it works
+// under normal "own-data-only" rules). If that's empty or unreadable we
+// fall back to enumerating `/users` (for setups that allow it).
+async function loadBoardRows(f, M) {
+  const rows = [];
+  try {
+    const snap = await f.get(f.ref(f.db, `leaderboard/${M.eloField}`));
+    snap.forEach((c) => {
+      const v = c.val();
+      if (typeof v?.elo === "number") rows.push({ key: c.key, name: v.name ?? c.key, elo: v.elo });
+    });
+  } catch (e) { /* mirror unreadable — try /users below */ }
+
+  if (rows.length === 0) {
+    const snap = await f.get(f.ref(f.db, "users")); // may throw → surfaced by caller
+    snap.forEach((c) => {
+      const v = c.val();
+      if (typeof v?.[M.eloField] === "number") {
+        rows.push({ key: c.key, name: v.name ?? c.key, elo: v[M.eloField] });
+      }
+    });
+  }
+  return rows;
+}
+
 async function renderLeaderboard() {
   const host = document.getElementById("ranked-board");
   const meLine = document.getElementById("ranked-me");
   const acc = getAccount();
   const M = MODES[activeMode];
+
+  if (!isConfigured) {
+    host.innerHTML = `<li class="hint">Leaderboards need a Firebase project — see the README ("Firebase setup").</li>`;
+    return;
+  }
+
   try {
     const f = await ensureFirebase();
-    // Index-free: pull every profile once and rank on the client. This
-    // works whether or not the .indexOn rule is set, so the board can
-    // never throw a false "connection" error over a missing index.
-    const snap = await f.get(f.ref(f.db, "users"));
-    const all = [];
-    snap.forEach((c) => {
-      const v = c.val();
-      if (typeof v?.[M.eloField] === "number") {
-        all.push({ key: c.key, name: v.name ?? c.key, elo: v[M.eloField] });
-      }
-    });
-    all.sort((a, b) => b.elo - a.elo);
-    const rows = all.slice(0, 50);
+    const all = await loadBoardRows(f, M);
 
     let myElo = null;
     let myPos = null;
     if (acc) {
       myElo = (await fetchMyElo(activeMode)) ?? DEFAULT_ELO;
+      // Seed/refresh our own public mirror entry so a logged-in player
+      // always appears on the board (self-write only). Best effort.
+      f.set(f.ref(f.db, `leaderboard/${M.eloField}/${acc.key}`), {
+        name: acc.name ?? acc.key, elo: myElo,
+      }).catch(() => {});
+      if (!all.some((r) => r.key === acc.key)) {
+        all.push({ key: acc.key, name: acc.name ?? acc.key, elo: myElo });
+      }
+    }
+
+    all.sort((a, b) => b.elo - a.elo);
+    const rows = all.slice(0, 50);
+    if (acc) {
       const idx = all.findIndex((r) => r.key === acc.key);
       myPos = idx >= 0 ? idx + 1 : null;
     }
@@ -315,10 +357,14 @@ async function renderLeaderboard() {
       }
     }
   } catch (e) {
-    host.innerHTML = `<li class="hint">Couldn't reach the leaderboard right now. Pull to refresh in a moment.</li>`;
+    // Surface a short reason (helps diagnose a rules/config problem)
+    // instead of a blanket "connection" message.
+    const why = /permission|denied/i.test(String(e?.message || e))
+      ? "the database rules don't allow reading the leaderboard (see README)"
+      : "couldn't reach the leaderboard right now — try again in a moment";
+    host.innerHTML = `<li class="hint">${why}.</li>`;
     const badge = document.getElementById("ranked-mybadge");
     if (badge && acc) {
-      // We still know our own rating locally even if the board failed.
       const solo = (await fetchMyElo(activeMode).catch(() => DEFAULT_ELO)) ?? DEFAULT_ELO;
       badge.innerHTML = `${rankBadge(solo, 34)} <b>${rankOf(solo).name}</b> · ${solo} Elo (${M.label})`;
     } else if (badge) {

@@ -19,6 +19,7 @@ import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ring
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
+  ARMOUR, HEAL, MUD, MORTAR,
   laserPath, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
   WEAPON_CATEGORY,
 } from "./weapons.js";
@@ -36,6 +37,7 @@ const TANK_RAD = Math.hypot(TANK_HL, TANK_HW); // bounding radius (broadphase / 
 const MOVE_SPEED = U * 2.1;
 const REVERSE_SPEED = U * 1.45;
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
+const TURRET_TURN_SPEED = TURN_SPEED * 1.2; // turret slews 20% faster than the hull
 
 const GEAR_R = 14;             // pickup grab radius (added to the tank's)
 const GEAR_TYPE_MAX = 2;       // at most this many of any ONE ability on the map
@@ -108,9 +110,8 @@ const MAZE_SHAPES_NONRECT = MAZE_SHAPES.filter((s) => s !== "rect");
 /* ---------- module state ---------- */
 
 let S = null;
-let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, loadoutHudEl, healthHudEl;
+let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, loadoutHudEl, healthHudEl, armourHudEl;
 const held = new Set();
-const touchHeld = new Set();
 // Turret aiming: the mouse position in WORLD coordinates, whether the
 // player has aimed at all yet (so we can fall back to hull-facing on
 // touch / before first move), and whether the fire button (LMB) is down.
@@ -118,6 +119,13 @@ let mouseWorld = { x: 0, y: 0 };
 let hasMouseAim = false;
 let mouseFire = false;  // LMB — offense (special gun, else basic shots)
 let mouseDef = false;   // RMB — defense (wall)
+// Mobile: left stick drives the hull (moveVec, components in [-1,1]),
+// right stick aims the turret (touchAim = world angle, held after
+// release once engaged), and three buttons trigger the categories.
+let moveVec = { x: 0, y: 0 };
+let touchAim = 0;
+let touchAimActive = false;
+let touchFire = false, touchDef = false, touchAgi = false;
 
 /* ================================================================
    Public API
@@ -130,6 +138,7 @@ export function initGame() {
   shrinkEl = document.getElementById("game-shrink");
   loadoutHudEl = document.getElementById("loadout-hud");
   healthHudEl = document.getElementById("health-hud");
+  armourHudEl = document.getElementById("armour-hud");
   touchPad = document.getElementById("touch-pad");
   scoreEl = document.getElementById("game-score");
 
@@ -140,14 +149,72 @@ export function initGame() {
     else showScreen("screen-local");
   });
 
-  touchPad.querySelectorAll(".tp-btn").forEach((btn) => {
-    const act = btn.dataset.act;
-    const on = (e) => { e.preventDefault(); touchHeld.add(act); btn.classList.add("held"); };
-    const off = () => { touchHeld.delete(act); btn.classList.remove("held"); };
-    btn.addEventListener("pointerdown", on);
+  // Mobile controls: two analog sticks + three category fire buttons.
+  // Each stick tracks its own pointer id, so both thumbs work at once.
+  const setupStick = (el, onMove, onEnd) => {
+    let pid = null;
+    const knob = el.querySelector(".tp-knob");
+    const update = (e) => {
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const rad = r.width / 2;
+      let dx = (e.clientX - cx) / rad;
+      let dy = (e.clientY - cy) / rad;
+      const mag = Math.hypot(dx, dy);
+      if (mag > 1) { dx /= mag; dy /= mag; } // clamp to the ring
+      knob.style.transform =
+        `translate(calc(-50% + ${dx * rad * 0.62}px), calc(-50% + ${dy * rad * 0.62}px))`;
+      onMove(dx, dy);
+    };
+    el.addEventListener("pointerdown", (e) => {
+      if (pid !== null) return;
+      pid = e.pointerId;
+      el.setPointerCapture(pid);
+      e.preventDefault();
+      update(e);
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (e.pointerId !== pid) return;
+      update(e);
+    });
+    const release = (e) => {
+      if (e.pointerId !== pid) return;
+      pid = null;
+      knob.style.transform = "translate(-50%, -50%)";
+      onEnd();
+    };
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointercancel", release);
+  };
+
+  const moveStick = document.getElementById("tp-move");
+  const aimStick = document.getElementById("tp-aim");
+  if (moveStick) {
+    setupStick(moveStick,
+      (dx, dy) => { moveVec.x = dx; moveVec.y = dy; },
+      () => { moveVec.x = 0; moveVec.y = 0; });
+  }
+  if (aimStick) {
+    setupStick(aimStick,
+      (dx, dy) => {
+        if (Math.hypot(dx, dy) > 0.3) { touchAim = Math.atan2(dy, dx); touchAimActive = true; }
+      },
+      () => { /* hold last aim on release */ });
+  }
+
+  touchPad.querySelectorAll(".tp-fire").forEach((btn) => {
+    const which = btn.dataset.fire; // off | def | agi
+    const set = (v) => {
+      if (which === "off") touchFire = v;
+      else if (which === "def") touchDef = v;
+      else touchAgi = v;
+      btn.classList.toggle("held", v);
+    };
+    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); btn.setPointerCapture(e.pointerId); set(true); });
+    const off = () => set(false);
     btn.addEventListener("pointerup", off);
     btn.addEventListener("pointercancel", off);
-    btn.addEventListener("pointerleave", off);
     btn.addEventListener("contextmenu", (e) => e.preventDefault());
   });
 
@@ -233,6 +300,7 @@ export function stopGame() {
   touchPad.hidden = true;
   if (scoreEl) scoreEl.innerHTML = "";
   if (loadoutHudEl) loadoutHudEl.hidden = true;
+  if (armourHudEl) armourHudEl.hidden = true;
   if (healthHudEl) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
   S = null;
 }
@@ -372,6 +440,9 @@ function begin(opts) {
     shraps: [],
     snipes: [],
     walls: [],
+    healZones: [],
+    mudPits: [],
+    mortars: [],
     rects: [],
     diag: [],
     polyWorld: null,
@@ -389,10 +460,12 @@ function begin(opts) {
   startRound(opts.seed);
 
   held.clear();
-  touchHeld.clear();
   mouseFire = false;
   mouseDef = false;
   hasMouseAim = false;
+  moveVec.x = 0; moveVec.y = 0;
+  touchAim = 0; touchAimActive = false;
+  touchFire = false; touchDef = false; touchAgi = false;
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("keyup", onKeyup);
   window.addEventListener("blur", clearHeld);
@@ -427,7 +500,9 @@ function startRound(seed) {
     sizeIdx = lo + Math.floor(rng() * (MAZE_SIZES.length - lo));
   }
   const [cols, rows] = MAZE_SIZES[sizeIdx];
-  S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.3 });
+  // braid 0.1: roughly a third of the previous loopiness — fewer open
+  // cross-connections, so corridors read as corridors.
+  S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.1 });
   S.rects = wallRects(S.maze, CELL, WALL_T);
   // Shaped arenas: the angled silhouette edge, as oriented wall slabs
   // (collision) plus the world-space polygon (for the floor + clip).
@@ -466,6 +541,11 @@ function startRound(seed) {
   S.shraps = [];
   S.snipes = [];
   S.walls = [];
+  S.healZones = [];
+  S.mudPits = [];
+  S.mortars = [];
+  S.mortarClouds = [];
+  S.mortarAim = null;
   S.beams = [];
   S.booms = [];
   S.seenShots = {};
@@ -514,6 +594,8 @@ function startRound(seed) {
       turret: a, tu: a, // barrel aim (world angle) + remote target
       dead: false,
       hp: TANK_HP, // baseline health; damage chips this down to 0
+      armour: 0, armourUntil: 0, // shield HP + expiry (blue glow)
+      healInMs: 0,               // continuous time inside a heal pad
       gone: !S.present.has(spec.id),
       prevShoot: false,
       prevDef: false,
@@ -553,9 +635,11 @@ function onKeyup(e) {
 
 function clearHeld() {
   held.clear();
-  touchHeld.clear();
   mouseFire = false;
   mouseDef = false;
+  moveVec.x = 0; moveVec.y = 0;
+  touchAim = 0; touchAimActive = false;
+  touchFire = false; touchDef = false; touchAgi = false;
 }
 
 function isBoundCode(code) {
@@ -584,14 +668,19 @@ function readActions(tank, binds) {
 
   // Touch pad only ever drives the single local human tank.
   if (!tank.bot) {
-    for (const a of touchHeld) acts[a] = true;
+    // Left stick → hull (thresholded so a centred stick is neutral).
+    const DZ = 0.28;
+    if (moveVec.y < -DZ) acts.up = true;
+    if (moveVec.y > DZ) acts.down = true;
+    if (moveVec.x < -DZ) acts.left = true;
+    if (moveVec.x > DZ) acts.right = true;
     // Three activation controls, one per loadout category:
-    //   LMB   → offense (special gun if held, else the basic shot)
-    //   RMB   → defense (wall)
-    //   LShift → agility (boost / phase)
-    if (mouseFire) acts.shoot = true;
-    if (mouseDef) acts.def = true;
-    if (held.has("ShiftLeft")) acts.agi = true;
+    //   LMB / offense button  → offense (special gun, else basic shot)
+    //   RMB / defense button  → defense (wall)
+    //   LShift / agility button → agility (boost / phase)
+    if (mouseFire || touchFire) acts.shoot = true;
+    if (mouseDef || touchDef) acts.def = true;
+    if (held.has("ShiftLeft") || touchAgi) acts.agi = true;
   }
   return acts;
 }
@@ -609,6 +698,7 @@ function frame(now) {
   // dodged by bots) and the hazard list bots treat as bullets.
   S.laserPaths = [];
   S.sniperAims = [];
+  S.mortarAim = null;
   for (const t of S.tanks) {
     if (t.dead || t.gone) continue;
     if (t.weapon === "laser") {
@@ -624,6 +714,11 @@ function frame(now) {
         x0: m.x, y0: m.y,
         x1: m.x + Math.cos(aim) * len, y1: m.y + Math.sin(aim) * len,
       });
+    } else if (t.weapon === "mortar" && !t.bot && t.local) {
+      // The shooter's own targeting reticle — where the shell will land
+      // if fired now. Only shown to the shooter (the in-flight red dot
+      // is what warns everyone else).
+      S.mortarAim = mortarTarget(t);
     }
   }
   // Bots treat every projectile as a bullet to dodge: minis, cannon
@@ -717,6 +812,7 @@ function stepTanks(now, dt) {
             magGap: MAG_GAP,
             magRegen: MAG_REGEN,
             moveSpeed: MOVE_SPEED,
+            maxHp: TANK_HP,
           }, dt, now)
         : readActions(t, binds);
       const mul = t.bot ? AI_PARAMS[t.bot] : NO_MUL;
@@ -733,8 +829,12 @@ function stepTanks(now, dt) {
       let v = 0;
       const boosting = now < (t.boostUntil ?? 0);
       const boostMul = boosting ? BOOST.mult : 1;
-      if (acts.up) v += MOVE_SPEED * mul.speed * boostMul;
-      if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul;
+      // Mud pit: any tank standing in one moves 20% slower.
+      const inMud = S.mudPits.some((m) =>
+        now - m.born < MUD.lifeMs && (t.x - m.x) ** 2 + (t.y - m.y) ** 2 < m.r * m.r);
+      const mudMul = inMud ? MUD.slow : 1;
+      if (acts.up) v += MOVE_SPEED * mul.speed * boostMul * mudMul;
+      if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul;
 
       // The engine is "running" whenever the tank drives OR turns in
       // place — a stationary spin still spins the treads.
@@ -789,16 +889,22 @@ function stepTanks(now, dt) {
       }
 
       // ---- Turret aim (barrel points independently of the hull) ----
-      // Human: aim the barrel at the mouse. Bots: aim with the hull
-      // (their AI already turns the body onto the target), so the
-      // turret simply tracks the hull. Before the first mouse move —
-      // or on touch, where there's no pointer — fall back to hull.
+      // Human: slew the barrel toward the mouse, capped at 20% above
+      // the hull's turn speed (so it can out-track the body but isn't
+      // an instant-snap). Bots aim with the hull (their AI already
+      // turns the body onto the target), so the turret tracks it.
+      // Before the first mouse move — or on touch, where the aim comes
+      // from the right stick — fall back appropriately.
       if (t.bot) {
         t.turret = t.a;
-      } else if (hasMouseAim) {
-        t.turret = Math.atan2(mouseWorld.y - t.y, mouseWorld.x - t.x);
       } else {
-        t.turret = t.a;
+        const aimTarget = hasMouseAim
+          ? Math.atan2(mouseWorld.y - t.y, mouseWorld.x - t.x)
+          : (touchAimActive ? touchAim : t.a);
+        const cur = t.turret ?? t.a;
+        const step = TURRET_TURN_SPEED * dt;
+        const d = angleDiff(cur, aimTarget);
+        t.turret = cur + Math.max(-step, Math.min(step, d));
       }
 
       // Three activation controls, edge-triggered (press, not hold):
@@ -1065,20 +1171,136 @@ function fireOffense(t, now) {
     t.snAmmo = (t.snAmmo ?? SNIPER.shots) - 1;
     if (t.snAmmo > 0) return; // keep the sniper until both rounds are gone
     t.snAmmo = null;
+  } else if (w === "mortar") {
+    // Indirect fire: aim at the mouse (or, for bots, their target),
+    // snap to the CENTRE of that cell, and clamp the target to within
+    // MORTAR.rangeCells of the tank. The shell arcs up and comes down
+    // there after msPerCell per cell of travel.
+    const tgt = mortarTarget(t);
+    launchMortar(t.id, t.x, t.y, tgt.x, tgt.y, now);
+    sendTypedShot(t, {
+      w: "mortar",
+      x0: +t.x.toFixed(1), y0: +t.y.toFixed(1),
+      x: +tgt.x.toFixed(1), y: +tgt.y.toFixed(1),
+    }, now);
   }
 
   clearWeapon(t, now);
 }
 
-// DEFENSE (RMB): drop the brick wall just ahead of where you're aiming.
+// Where a tank's mortar would land: the mouse cell for the human, the
+// nearest enemy for a bot — snapped to that cell's centre and clamped
+// to within MORTAR.rangeCells of the tank.
+function mortarTarget(t) {
+  let ax, ay;
+  if (t.bot) {
+    let best = Infinity, e = null;
+    for (const o of S.tanks) {
+      if (o === t || o.dead || o.gone) continue;
+      const d = (o.x - t.x) ** 2 + (o.y - t.y) ** 2;
+      if (d < best) { best = d; e = o; }
+    }
+    if (e) { ax = e.x; ay = e.y; }
+    else { ax = t.x + Math.cos(t.turret ?? t.a) * CELL * 3; ay = t.y + Math.sin(t.turret ?? t.a) * CELL * 3; }
+  } else if (hasMouseAim) {
+    ax = mouseWorld.x; ay = mouseWorld.y;
+  } else if (touchAimActive) {
+    ax = t.x + Math.cos(touchAim) * CELL * 3; ay = t.y + Math.sin(touchAim) * CELL * 3;
+  } else {
+    ax = t.x + Math.cos(t.turret ?? t.a) * CELL * 3; ay = t.y + Math.sin(t.turret ?? t.a) * CELL * 3;
+  }
+  // Clamp to reach, then lock onto the cell centre.
+  const maxR = MORTAR.rangeCells * CELL;
+  let dx = ax - t.x, dy = ay - t.y;
+  const d = Math.hypot(dx, dy);
+  if (d > maxR) { dx *= maxR / d; dy *= maxR / d; ax = t.x + dx; ay = t.y + dy; }
+  ax = Math.max(0, Math.min(S.worldW - 1, ax));
+  ay = Math.max(0, Math.min(S.worldH - 1, ay));
+  const cx = (Math.floor(ax / CELL) + 0.5) * CELL;
+  const cy = (Math.floor(ay / CELL) + 0.5) * CELL;
+  return { x: cx, y: cy };
+}
+
+// Launch an arcing shell from (x0,y0) toward the locked cell (tx,ty).
+// Flight time scales with distance: MORTAR.msPerCell per cell.
+function launchMortar(byId, x0, y0, tx, ty, now) {
+  const distCells = Math.hypot(tx - x0, ty - y0) / CELL;
+  const flightMs = Math.max(400, distCells * MORTAR.msPerCell);
+  S.mortars.push({ by: byId, x0, y0, x: tx, y: ty, born: now, landAt: now + flightMs });
+  sfx.cannon?.(); // a heavy launch thump
+}
+
+// Concentric damage rings, from the impact centre outward. Radii are
+// fractions of a cell; the whole blast is a 1-cell-diameter circle.
+const MORTAR_RINGS = [
+  { r: 0.11, dmg: 8 }, // core (~half a tank across): full hit
+  { r: 0.24, dmg: 6 },
+  { r: 0.37, dmg: 3 },
+  { r: 0.50, dmg: 1 }, // outer edge of the 1-cell circle
+];
+
+function detonateMortar(m, now) {
+  sfx.boom?.();
+  // The dark smoke cloud covering the cell.
+  (S.mortarClouds ??= []).push({ x: m.x, y: m.y, born: now, seed: (Math.random() * 1e9) | 0 });
+  addFade(m.x, m.y, CELL * 0.4, now);
+  // Damage rings — each tank takes the amount of the nearest band it's
+  // within (applied by the authoritative client to its own tanks).
+  for (const t of S.tanks) {
+    if (t.dead || t.gone) continue;
+    if (!(S.mode === "local" || t.local)) continue;
+    const d = Math.hypot(t.x - m.x, t.y - m.y);
+    let dmg = 0;
+    for (const ring of MORTAR_RINGS) {
+      if (d <= ring.r * CELL) { dmg = ring.dmg; break; }
+    }
+    if (dmg > 0) damageTank(t, dmg);
+  }
+}
+
+function stepMortars(now) {
+  if (!S.mortars.length) return;
+  const survivors = [];
+  for (const m of S.mortars) {
+    if (now >= m.landAt) detonateMortar(m, now);
+    else survivors.push(m);
+  }
+  S.mortars = survivors;
+}
+
+// DEFENSE (RMB): wall / armour / heal pad / mud pit, whichever is held.
 function fireDefense(t, now) {
-  spawnWall(t, now);
-  sfx.wallup?.();
-  sendTypedShot(t, {
-    w: "wall",
-    x: +lastWallPos.x.toFixed(1), y: +lastWallPos.y.toFixed(1),
-    a: +(t.turret ?? t.a).toFixed(3),
-  }, now);
+  const kind = t.defense;
+  if (kind === "wall") {
+    spawnWall(t, now);
+    sfx.wallup?.();
+    sendTypedShot(t, {
+      w: "wall",
+      x: +lastWallPos.x.toFixed(1), y: +lastWallPos.y.toFixed(1),
+      a: +(t.turret ?? t.a).toFixed(3),
+    }, now);
+  } else if (kind === "armour") {
+    // Shield: 4 HP that soak damage before health, for 20 s.
+    t.armour = ARMOUR.hp;
+    t.armourUntil = now + ARMOUR.durationMs;
+    sfx.pickup?.();
+    sendTypedShot(t, { w: "armour" }, now);
+  } else if (kind === "heal") {
+    // Green healing pad dropped on the spot.
+    addHealZone(t.x, t.y, now);
+    sfx.pickup?.();
+    sendTypedShot(t, { w: "heal", x: +t.x.toFixed(1), y: +t.y.toFixed(1) }, now);
+  } else if (kind === "mud") {
+    // Muddy puddle dropped just behind the hull. A shared seed makes
+    // every client draw the same blob.
+    const back = t.a + Math.PI;
+    const mx = t.x + Math.cos(back) * (TANK_RAD + MUD.radiusCells * CELL * 0.5);
+    const my = t.y + Math.sin(back) * (TANK_RAD + MUD.radiusCells * CELL * 0.5);
+    const seed = (Math.random() * 1e9) | 0;
+    addMudPit(mx, my, seed, now);
+    sfx.wallup?.();
+    sendTypedShot(t, { w: "mud", x: +mx.toFixed(1), y: +my.toFixed(1), s: seed }, now);
+  }
   t.defense = null;
 }
 
@@ -1121,6 +1343,14 @@ function spawnShot(byId, sh, now = performance.now()) {
       addWall(byId, sh.x, sh.y, sh.a, now);
       break;
     }
+    case "armour": {
+      const at = S.tanks.find((x) => x.id === byId);
+      if (at) { at.armour = ARMOUR.hp; at.armourUntil = now + ARMOUR.durationMs; }
+      break;
+    }
+    case "heal": addHealZone(sh.x, sh.y, now); break;
+    case "mud": addMudPit(sh.x, sh.y, sh.s ?? 1, now); break;
+    case "mortar": launchMortar(byId, sh.x0, sh.y0, sh.x, sh.y, now); break;
     case "detonate": {
       // Command detonation from the owner: burst their airborne ball.
       const ball = S.cannons.find((c) => c.by === byId);
@@ -1205,9 +1435,44 @@ function stepSpecials(now, dt) {
   stepShrapnel(now, dt);
   stepSnipes(now, dt);
   stepWalls(now, dt);
+  stepHeal(now, dt);
+  stepMortars(now);
   stepBeams(now);
   S.beams = S.beams.filter((bm) => !bm.doneAt || now - bm.doneAt < LASER.flashMs);
   S.booms = S.booms.filter((bo) => now - bo.born < 320);
+  S.mudPits = S.mudPits.filter((m) => now - m.born < MUD.lifeMs);
+  if (S.mortarClouds) S.mortarClouds = S.mortarClouds.filter((c) => now - c.born < MORTAR.cloudMs);
+}
+
+// Healing pads: a tank must be CONTINUOUSLY inside for HEAL.tickMs to
+// bank 1 HP. Ticks are processed before expiring the pad, so a tank
+// present for the pad's whole life banks the full 3 HP. Only the
+// authoritative client heals its own tanks (each heals its own).
+function stepHeal(now, dt) {
+  const active = S.healZones.filter((z) => now - z.born < HEAL.durationMs);
+  for (const t of S.tanks) {
+    if (!t.local || t.dead || t.gone) continue;
+    const inside = active.some((z) => (t.x - z.x) ** 2 + (t.y - z.y) ** 2 < z.r * z.r);
+    if (inside) {
+      t.healInMs = (t.healInMs ?? 0) + dt * 1000;
+      while (t.healInMs >= HEAL.tickMs - HEAL.tickGraceMs) {
+        t.healInMs -= HEAL.tickMs;
+        if ((t.hp ?? TANK_HP) < TANK_HP) {
+          t.hp = Math.min(TANK_HP, (t.hp ?? TANK_HP) + HEAL.healPerHp);
+          addHealPop(t.x, t.y, now);
+          sfx.pickup?.();
+        }
+      }
+    } else {
+      t.healInMs = 0; // left the pad — presence resets
+    }
+  }
+  S.healZones = active;
+}
+
+// A small green "+HP" rising pop when a heal tick lands.
+function addHealPop(x, y, now) {
+  (S.healPops ??= []).push({ x, y, born: now });
 }
 
 function stepGear(now) {
@@ -1287,24 +1552,36 @@ function inRedZone(x, y) {
   return cellLayerAt(x, y) < (S.zoneLevel ?? 0);
 }
 
-// Is that cell currently BLINKING as the next-to-fall layer?
-function inWarnZone(x, y) {
-  return (S.zoneWarnLevel ?? -1) >= 0 && cellLayerAt(x, y) === S.zoneWarnLevel;
-}
-
-// Fraction of the tank's body sitting inside red cells, sampled over a
-// small grid of points across its footprint. Used to gate damage at
-// the ">30% inside" threshold.
-function redOverlapFrac(t) {
+// How many damage TICKS a tank takes from the red zone this pulse, or 0
+// if it's not far enough into the red. Damage escalates with depth: a
+// cell deals (zoneLevel − its layer) ticks, so each new layer that
+// falls makes every already-red ring one tick deadlier — the further
+// out (toward the edge) you are, the harder it bites. The tank is
+// charged for the DEEPEST red cell under its footprint.
+function redZoneTicks(t) {
   const R = TANK_RAD * 0.9;
+  const zl = S.zoneLevel ?? 0;
+  let minLayer = Infinity;
   let inside = 0, total = 0;
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       total++;
-      if (inRedZone(t.x + dx * R, t.y + dy * R)) inside++;
+      const L = cellLayerAt(t.x + dx * R, t.y + dy * R);
+      if (L < zl) { inside++; if (L < minLayer) minLayer = L; }
     }
   }
-  return inside / total;
+  const fullyClosed = zl > S.zoneMaxLayer;
+  if (fullyClosed) {
+    // No safe corner left — everyone's charged, by the deepest red cell
+    // they occupy (centre = least, edge = most).
+    if (minLayer === Infinity) minLayer = cellLayerAt(t.x, t.y);
+    if (!Number.isFinite(minLayer)) minLayer = zl - 1;
+    return Math.max(1, zl - minLayer);
+  }
+  if (inside / total > ZONE_INSIDE_FRAC && Number.isFinite(minLayer)) {
+    return Math.max(1, zl - minLayer);
+  }
+  return 0;
 }
 
 // The creeping zone. Every ZONE_PERIOD a new outer layer is claimed:
@@ -1350,17 +1627,13 @@ function stepShrink(now) {
     }
   }
 
-  // --- red-zone damage tick ---
+  // --- red-zone damage tick (escalates with depth) ---
   if (now >= (S.zoneDamageAt ?? 0)) {
     S.zoneDamageAt = now + ZONE_DMG_PERIOD;
-    const fullyClosed = (S.zoneLevel ?? 0) > S.zoneMaxLayer;
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
-      // Once the entire map is red, everyone left takes damage no
-      // matter where they stand (no safe corner remains).
-      if (fullyClosed || redOverlapFrac(t) > ZONE_INSIDE_FRAC) {
-        if (S.mode === "local" || t.local) damageTank(t, ZONE_DMG);
-      }
+      const ticks = redZoneTicks(t);
+      if (ticks > 0 && (S.mode === "local" || t.local)) damageTank(t, ticks * ZONE_DMG);
     }
   }
 }
@@ -1626,6 +1899,26 @@ function addWall(byId, x, y, a, now) {
   });
 }
 
+// A green healing pad. Heals any tank that stays inside it (see stepHeal).
+function addHealZone(x, y, now) {
+  S.healZones.push({ x, y, born: now, r: HEAL.radiusCells * CELL });
+}
+
+// A muddy puddle that slows any tank inside it. `seed` drives the
+// irregular blob outline so every client draws the same shape.
+function addMudPit(x, y, seed, now) {
+  const rng = mulberry32(seed >>> 0);
+  const R = MUD.radiusCells * CELL;
+  const N = 11;
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const ang = (i / N) * Math.PI * 2;
+    const rr = R * (0.72 + rng() * 0.5);          // jittered radius
+    pts.push([Math.cos(ang) * rr, Math.sin(ang) * rr * 0.82]); // squashed
+  }
+  S.mudPits.push({ x, y, r: R, born: now, pts });
+}
+
 function spawnSnipe(byId, x, y, a, now) {
   sfx.snipe?.();
   const speed = BULLET_SPEED * SNIPER.speed;
@@ -1840,8 +2133,18 @@ function stepShrapnel(now, dt) {
 // stay consistent — callers already gate on (S.mode === "local" || t.local).
 function damageTank(t, amount) {
   if (t.dead || t.gone) return false;
-  t.hp = (t.hp ?? TANK_HP) - amount;
-  t.lastHitAt = performance.now(); // for a brief damage flash
+  const now = performance.now();
+  let dmg = amount;
+  // Armour shield soaks damage first, while it's active.
+  if (now < (t.armourUntil ?? 0) && (t.armour ?? 0) > 0) {
+    const soak = Math.min(t.armour, dmg);
+    t.armour -= soak;
+    dmg -= soak;
+    if (t.armour <= 0) t.armourUntil = 0; // shield spent
+  }
+  t.lastHitAt = now; // for a brief damage flash
+  if (dmg <= 0) { sfx.hit?.(); return false; } // fully absorbed
+  t.hp = (t.hp ?? TANK_HP) - dmg;
   if (t.hp <= 0) {
     killTank(t);
     return true;
@@ -2242,23 +2545,37 @@ function draw(now) {
   // stripped from S.rects when the ring dropped.
 
   // Ranked closing zone: cells already claimed glow a steady red; the
-  // layer currently being warned blinks. Both are painted per-cell (so
-  // any shape works) UNDER the walls, which stay drawn on top.
+  // layer currently being warned blinks. Painted per-cell UNDER the
+  // walls. On shaped arenas the diagonal cuts through boundary cells,
+  // so an outside cell can still hold a thin interior sliver — we paint
+  // those bordering-outside cells too (the polygon clip trims the rest)
+  // to avoid white gaps hugging the angled edge.
   if (S.ranked && S.zoneDist) {
     const zl = S.zoneLevel ?? 0;
     const wl = S.zoneWarnLevel ?? -1;
     const blink = Math.sin(now / 130) * 0.5 + 0.5; // fast strobe
-    for (let r = 0; r < S.maze.rows; r++) {
-      for (let c = 0; c < S.maze.cols; c++) {
-        const layer = S.zoneDist[r][c];
-        if (layer === Infinity) continue;
-        if (layer < zl) {
-          ctx.fillStyle = "rgba(200, 32, 30, 0.42)"; // permanently red
-          ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
-        } else if (layer === wl) {
-          ctx.fillStyle = `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`; // warning
-          ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+    const rows = S.maze.rows, cols = S.maze.cols;
+    // Classify each cell: 2 = claimed red, 1 = warning, 0 = none.
+    // Outside cells inherit the strongest state of an inside neighbour
+    // (red beats warning), so the sliver they contain matches the ring.
+    const stateAt = (r, c) => {
+      const L = S.zoneDist[r]?.[c];
+      if (L == null || L === Infinity) return 0;
+      if (L < zl) return 2;
+      if (L === wl) return 1;
+      return 0;
+    };
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        let st = stateAt(r, c);
+        if (st === 0 && (S.zoneDist[r][c] === Infinity)) {
+          // Outside cell — inherit from inside neighbours.
+          st = Math.max(stateAt(r - 1, c), stateAt(r + 1, c), stateAt(r, c - 1), stateAt(r, c + 1));
         }
+        if (st === 2) ctx.fillStyle = "rgba(200, 32, 30, 0.42)";
+        else if (st === 1) ctx.fillStyle = `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`;
+        else continue;
+        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
       }
     }
   }
@@ -2267,17 +2584,18 @@ function draw(now) {
   for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
 
   // Shaped arena: lift the silhouette clip and draw the diagonal border
-  // slabs on top, at full thickness, in the same grey as the walls.
+  // as ONE stroked polygon (round joins), so the corners connect
+  // smoothly instead of showing a seam between separate edge slabs.
+  // The stroke is centred on the polygon with the wall thickness, so it
+  // lines up exactly with the slab collision.
   if (clippedToShape) {
     ctx.restore();
-    ctx.fillStyle = "#808896";
-    for (const w of S.diag) {
-      ctx.save();
-      ctx.translate(w.x, w.y);
-      ctx.rotate(w.a);
-      ctx.fillRect(-w.hx, -w.hy, w.hx * 2, w.hy * 2);
-      ctx.restore();
-    }
+    ctx.strokeStyle = "#808896";
+    ctx.lineWidth = WALL_T;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    tracePoly(S.polyWorld);
+    ctx.stroke();
   }
 
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
@@ -2315,6 +2633,30 @@ function draw(now) {
   }
   ctx.globalAlpha = 1;
 
+  // Ground defense effects, under walls/tanks: mud puddles then heal pads.
+  for (const m of S.mudPits) drawMudPit(m, now);
+  for (const z of S.healZones) drawHealZone(z, now);
+
+  // Mortar: impact smoke clouds, in-flight landing markers, and the
+  // shooter's own aiming reticle — all on the ground, under the tanks.
+  if (S.mortarClouds) for (const c of S.mortarClouds) drawMortarCloud(c, now);
+  for (const m of S.mortars) drawMortarMarker(m, now);
+  if (S.mortarAim) drawMortarReticle(S.mortarAim, now);
+  // Rising "+HP" pops when a heal tick lands.
+  if (S.healPops) {
+    S.healPops = S.healPops.filter((p) => now - p.born < 700);
+    for (const p of S.healPops) {
+      const k = (now - p.born) / 700;
+      ctx.save();
+      ctx.globalAlpha = 1 - k;
+      ctx.fillStyle = "#8cf0ad";
+      ctx.font = `bold ${Math.round(TANK_R * 0.7)}px "Black Ops One", system-ui`;
+      ctx.textAlign = "center";
+      ctx.fillText("+1", p.x, p.y - TANK_R - k * 22);
+      ctx.restore();
+    }
+  }
+
   for (const w of S.walls) drawWall(w, now);
   for (const g of S.gear) drawGear(ctx, g, TANK_R, pulse, now);
 
@@ -2322,6 +2664,9 @@ function draw(now) {
   for (const L of S.laserPaths ?? []) drawLaserPreview(L);
   for (const A of S.sniperAims ?? []) drawSniperAim(A);
   for (const t of S.tanks) if (!t.dead && !t.gone) drawTank(t, now);
+
+  // Lofted mortar shells fly ABOVE everything (they're up in the air).
+  for (const m of S.mortars) drawMortarShell(m, now);
 
   ctx.fillStyle = "#20242c";
   for (const b of S.bullets) {
@@ -2506,6 +2851,25 @@ function draw(now) {
     }
   }
 
+  // Armour readout: blue pips above health, shown only while the shield
+  // is up. Rebuilt only when the count changes.
+  if (armourHudEl) {
+    const alive = myTank && !myTank.dead && !myTank.gone;
+    const ar = alive && now < (myTank.armourUntil ?? 0) ? Math.max(0, Math.ceil(myTank.armour ?? 0)) : 0;
+    if (ar <= 0) {
+      armourHudEl.hidden = true;
+      armourHudEl._ar = undefined;
+    } else if (armourHudEl._ar !== ar) {
+      armourHudEl._ar = ar;
+      armourHudEl.hidden = false;
+      let pips = "";
+      for (let i = 0; i < ARMOUR.hp; i++) {
+        pips += `<span class="ar-pip${i < ar ? "" : " spent"}"></span>`;
+      }
+      armourHudEl.innerHTML = `<span class="ar-pips">${pips}</span><span class="ar-num">${ar}</span>`;
+    }
+  }
+
   // Health readout: pips + number, bottom-left, for the local human's
   // own tank. Rebuilt only when the value changes to avoid DOM churn.
   if (healthHudEl) {
@@ -2606,6 +2970,185 @@ function drawSniperAim(A) {
   ctx.globalAlpha = 1;
 }
 
+// The shooter's own aiming reticle: a crosshair ringing the target cell.
+function drawMortarReticle(a, now) {
+  const pulse = 0.5 + 0.5 * Math.sin(now / 160);
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.strokeStyle = `rgba(232, 69, 46, ${0.55 + 0.35 * pulse})`;
+  ctx.lineWidth = 2;
+  const r = TANK_R * 1.1;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  for (const [sx, sy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+    ctx.moveTo(sx * r * 0.55, sy * r * 0.55);
+    ctx.lineTo(sx * r * 1.35, sy * r * 1.35);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// In-flight landing marker: a tank-sized pulsing red dot in the target
+// cell — the warning enemies react to. Vanishes when the shell lands.
+function drawMortarMarker(m, now) {
+  const pulse = 0.5 + 0.5 * Math.sin(now / 130);
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  ctx.globalAlpha = 0.3 + 0.25 * pulse;
+  ctx.fillStyle = "#e8452e";
+  ctx.beginPath();
+  ctx.arc(0, 0, TANK_R * (1.0 + 0.12 * pulse), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = "#ff5a3c";
+  ctx.beginPath();
+  ctx.arc(0, 0, TANK_R * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// The arcing shell: rises high and falls onto the target. Top-down, so
+// "height" is a vertical screen offset with a ground shadow beneath.
+function drawMortarShell(m, now) {
+  const p = Math.max(0, Math.min(1, (now - m.born) / (m.landAt - m.born)));
+  const gx = m.x0 + (m.x - m.x0) * p;   // ground position
+  const gy = m.y0 + (m.y - m.y0) * p;
+  const arc = Math.sin(Math.PI * p);    // 0→1→0
+  const lift = arc * CELL * 2.6;        // peak height ~2.6 cells
+  // Shadow that tightens as the shell nears the ground.
+  ctx.save();
+  ctx.globalAlpha = 0.18 + 0.22 * (1 - arc);
+  ctx.fillStyle = "#000";
+  ctx.beginPath();
+  ctx.ellipse(gx, gy, TANK_R * (0.55 - 0.2 * arc), TANK_R * (0.34 - 0.12 * arc), 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // The shell itself, lofted.
+  const sx = gx, sy = gy - lift;
+  ctx.save();
+  ctx.fillStyle = "#2a2f24";
+  ctx.beginPath();
+  ctx.arc(sx, sy, TANK_R * 0.42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#8a8f3c";  // olive nose cap
+  ctx.beginPath();
+  ctx.arc(sx, sy - TANK_R * 0.14, TANK_R * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  // Fins hint.
+  ctx.strokeStyle = "#4a4f2c";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(sx - TANK_R * 0.42, sy);
+  ctx.lineTo(sx + TANK_R * 0.42, sy);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// The dark smoke cloud left by an impact, covering the cell.
+function drawMortarCloud(c, now) {
+  const age = now - c.born;
+  const p = age / MORTAR.cloudMs;
+  const grow = 0.5 + 0.5 * Math.min(1, p * 3);
+  const fade = Math.max(0, 1 - p);
+  const R = CELL * 0.5 * grow;
+  const rng = mulberry32(c.seed >>> 0);
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.globalAlpha = 0.72 * fade;
+  // A few overlapping dark puffs for a smoky, non-circular blob.
+  for (let i = 0; i < 7; i++) {
+    const ang = (i / 7) * Math.PI * 2 + rng() * 0.6;
+    const rr = R * (0.35 + rng() * 0.5);
+    const px = Math.cos(ang) * R * 0.4;
+    const py = Math.sin(ang) * R * 0.4;
+    const g = ctx.createRadialGradient(px, py, 0, px, py, rr);
+    g.addColorStop(0, "rgba(20, 20, 24, 0.9)");
+    g.addColorStop(1, "rgba(20, 20, 24, 0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(px, py, rr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// A muddy puddle: an irregular squashed blob with a couple of ripples.
+function drawMudPit(m, now) {
+  const age = now - m.born;
+  const k = Math.min(1, age / 300);                 // pop-in
+  const fade = Math.min(1, (MUD.lifeMs - age) / 1200); // dry-up fade
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  ctx.globalAlpha = Math.max(0, Math.min(1, fade));
+  ctx.scale(k, k);
+  // Wet shadow rim.
+  ctx.fillStyle = "rgba(38, 24, 12, 0.55)";
+  tracePts(m.pts, 1.06);
+  ctx.fill();
+  // Mud body.
+  ctx.fillStyle = "#5c4326";
+  tracePts(m.pts, 1);
+  ctx.fill();
+  // A lighter sheen patch + a ripple.
+  ctx.fillStyle = "rgba(120, 92, 54, 0.5)";
+  ctx.beginPath();
+  ctx.ellipse(-m.r * 0.12, -m.r * 0.08, m.r * 0.28, m.r * 0.18, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(30, 18, 10, 0.4)";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(m.r * 0.1, m.r * 0.12, m.r * 0.16, m.r * 0.1, 0.3, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function tracePts(pts, s) {
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0] * s, pts[0][1] * s);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * s, pts[i][1] * s);
+  ctx.closePath();
+}
+
+// A green healing pad: a soft filled disc with a breathing ring and a
+// medical cross, plus a countdown-thinning outline as it expires.
+function drawHealZone(z, now) {
+  const age = now - z.born;
+  const life = 1 - age / HEAL.durationMs;
+  const pop = Math.min(1, age / 260);
+  const pulse = 0.5 + 0.5 * Math.sin(now / 260);
+  ctx.save();
+  ctx.translate(z.x, z.y);
+  ctx.scale(pop, pop);
+  // Filled glow.
+  const g = ctx.createRadialGradient(0, 0, z.r * 0.2, 0, 0, z.r);
+  g.addColorStop(0, "rgba(60, 210, 120, 0.34)");
+  g.addColorStop(1, "rgba(60, 210, 120, 0.04)");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(0, 0, z.r, 0, Math.PI * 2);
+  ctx.fill();
+  // Breathing ring.
+  ctx.strokeStyle = `rgba(58, 200, 110, ${0.5 + 0.35 * pulse})`;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, z.r * (0.86 + 0.06 * pulse), 0, Math.PI * 2);
+  ctx.stroke();
+  // Remaining-life arc.
+  ctx.strokeStyle = "rgba(230, 255, 238, 0.6)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, z.r * 0.96, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0, life));
+  ctx.stroke();
+  // Cross.
+  ctx.fillStyle = "rgba(235, 255, 240, 0.9)";
+  const a = z.r * 0.1, b = z.r * 0.26;
+  ctx.fillRect(-a, -b, a * 2, b * 2);
+  ctx.fillRect(-b, -a, b * 2, a * 2);
+  ctx.restore();
+}
+
 function drawWall(w, now) {
   ctx.save();
   ctx.translate(w.x, w.y);
@@ -2645,6 +3188,22 @@ function drawTank(t, now) {
   if (now < (t.phaseUntil ?? 0)) ctx.globalAlpha = PHASE.opacity;
   ctx.translate(t.x, t.y);
   ctx.rotate(t.a);
+
+  // Armour shield: a pulsing blue halo around the hull while active.
+  if (now < (t.armourUntil ?? 0) && (t.armour ?? 0) > 0) {
+    const pulse = 0.5 + 0.5 * Math.sin(now / 180);
+    ctx.save();
+    ctx.rotate(-t.a); // keep the halo upright (circle, but cheap safety)
+    const g = ctx.createRadialGradient(0, 0, R * 0.85, 0, 0, R * 1.75);
+    g.addColorStop(0, "rgba(74, 168, 255, 0)");
+    g.addColorStop(0.6, `rgba(74, 168, 255, ${0.32 + 0.2 * pulse})`);
+    g.addColorStop(1, "rgba(74, 168, 255, 0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 1.75, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 
   // Treads with scrolling links — the phases come from each track's
   // actual ground speed (they counter-rotate in a zero-point turn).

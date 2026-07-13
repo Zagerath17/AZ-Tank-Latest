@@ -21,7 +21,7 @@
 // ================================================================
 
 import { segmentHitsAnyRect } from "./maze.js";
-import { ROCKET, SNIPER, WEAPON_CATEGORY } from "./weapons.js";
+import { ROCKET, SNIPER, MORTAR, WEAPON_CATEGORY } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
@@ -331,10 +331,20 @@ export function botActions(t, world, dt, now) {
     }
 
     // -- defense slot --
-    if (t.defense === "wall") {
-      // Drop a blocker when an enemy has a clear look at you at mid
-      // range (screen the incoming fire), or to wall off a chaser.
-      const want = los && dist > cell * 1.4 && dist < cell * 5;
+    if (t.defense) {
+      let want = false;
+      if (t.defense === "wall" || t.defense === "mud") {
+        // Screen/impede an enemy that has a clear look at you at mid
+        // range (a wall blocks fire; mud drops behind to slow a chaser).
+        want = los && dist > cell * 1.4 && dist < cell * 5;
+      } else if (t.defense === "armour") {
+        // Shield up the moment a fight is on or a shot is inbound.
+        want = los || threatSoon;
+      } else if (t.defense === "heal") {
+        // Drop a healing pad when hurt and not in immediate danger, so
+        // it can stand on it and recover.
+        want = (t.hp ?? world.maxHp ?? 6) < (world.maxHp ?? 6) && !threatSoon && dist > cell * 2;
+      }
       if (want && !ai.defWant) {
         ai.defWant = true;
         ai.defAt = now + 250 + Math.random() * 350;
@@ -467,7 +477,8 @@ export function botActions(t, world, dt, now) {
     const aligned = Math.abs(angleDiff(t.a, wantW)) < P.aimTol;
     // The sniper's own range caps where its round actually reaches;
     // otherwise use the tier's effective fire range.
-    const fireRangeCells = t.weapon === "sniper" ? SNIPER.rangeCells : P.fireRange;
+    const fireRangeCells = t.weapon === "sniper" ? SNIPER.rangeCells
+      : t.weapon === "mortar" ? MORTAR.rangeCells : P.fireRange;
     const inFireRange = dist <= fireRangeCells * cell;
     const mediumHold = t.bot === "medium" && dodging; // medium can't multitask
     if (special === "mg") {
