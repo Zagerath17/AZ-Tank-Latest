@@ -31,22 +31,22 @@
       <nav class="menu-grid">
         <button class="btn btn-big" data-go="screen-ranked">Ranked</button>
         <button class="btn btn-big" data-go="screen-online">Custom</button>
-        <button class="btn btn-big" data-go="screen-local">Local</button>
+        <button class="btn btn-big" data-go="screen-local">Offline</button>
         <button class="btn btn-big" data-go="screen-social">Social</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.3</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
-    <!-- ============ LOCAL ============ -->
-    <section class="screen" id="screen-local" aria-label="Local battle setup">
+    <!-- ============ OFFLINE ============ -->
+    <section class="screen" id="screen-local" aria-label="Offline battle setup">
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
-        <h2>Local battle</h2>
+        <h2>Offline</h2>
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
       </header>
-      <p class="hint">Press a tank's <b>shoot</b> key to join — or tap its card.</p>
+      <p class="hint"><b>WASD</b> to drive · <b>mouse</b> to aim · <b>LMB</b> offense · <b>RMB</b> defense · <b>Shift</b> agility. Add bots to battle.</p>
       <div class="slots" id="local-slots"></div>
       <p class="hint" id="local-hint"></p>
       <button class="btn btn-big btn-go" id="local-start" disabled>Start battle</button>
@@ -138,7 +138,7 @@
         <button class="btn tab-btn" id="tab-audio" type="button">Audio</button>
       </div>
       <div id="panel-controls">
-        <p class="hint">Tap a key to rebind it, then press the new key. Esc cancels. These apply to local battles.</p>
+        <p class="hint">Offline: <b>drive</b> with the keys below (Player 1), <b>aim</b> with the mouse. Activations: <b>LMB</b> = offense/fire, <b>RMB</b> = defense, <b>LShift</b> = agility. Tap a key to rebind it, then press the new key. Esc cancels.</p>
         <div class="binds" id="binds"></div>
         <button class="btn" id="binds-reset">Reset to defaults</button>
       </div>
@@ -252,7 +252,20 @@
       <div class="arena-wrap">
         <canvas id="arena"></canvas>
         <span class="health-hud" id="health-hud" hidden></span>
-        <span class="weapon-hud" id="weapon-hud" hidden></span>
+        <div class="loadout-hud" id="loadout-hud" hidden>
+          <div class="loadout-slot">
+            <canvas class="loadout-icon" data-cat="offense" width="112" height="112"></canvas>
+            <span class="loadout-key">LMB</span>
+          </div>
+          <div class="loadout-slot">
+            <canvas class="loadout-icon" data-cat="defense" width="112" height="112"></canvas>
+            <span class="loadout-key">RMB</span>
+          </div>
+          <div class="loadout-slot">
+            <canvas class="loadout-icon" data-cat="agility" width="112" height="112"></canvas>
+            <span class="loadout-key">SHIFT</span>
+          </div>
+        </div>
       </div>
       <div class="touch-pad" id="touch-pad" hidden>
         <div class="tp-group">

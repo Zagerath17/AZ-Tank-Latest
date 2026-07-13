@@ -110,14 +110,30 @@ root. Every push to `main` auto-deploys.
 
 ## Default controls (rebindable in Settings)
 
-| Tank | Forward | Reverse | Left | Right | Shoot |
-|---|---|---|---|---|---|
-| 🔴 Red | W | S | A | D | Space |
-| 🟢 Green | ↑ | ↓ | ← | → | Enter |
-| 🔵 Blue | I | K | J | L | O |
-| 🟡 Yellow | T | G | F | H | Y |
+Offline is **you vs the AI**. You drive the **hull** and aim the
+**turret** independently:
 
-On phones (no keyboard), players tap a tank's card to join local play.
+| Action | Control |
+|---|---|
+| Drive hull (fwd / rev / turn) | **W S A D** |
+| Aim turret | **Mouse** |
+| Offense (special gun, else basic shot) | **Left-click** (Space also fires) |
+| Defense (wall) | **Right-click** |
+| Agility (boost / phase) | **Left Shift** |
+
+Pickups are split into three loadout categories — **offense** (sniper,
+cannon, laser, machine gun, homing rocket), **defense** (wall) and
+**agility** (boost, phase) — and a tank holds ONE item per category at
+a time. Your three equipped items show as enlarged icons in the
+bottom-right of the arena, each captioned with its activation control.
+
+The hull turns with A/D while the barrel tracks your cursor, so you can
+strafe past a wall while keeping your gun trained on a target. Online
+opponents' turret angles are streamed alongside their position, so
+everyone sees where everyone else is aiming.
+
+On phones (no mouse), the turret tracks the hull and the on-screen FIRE
+button shoots straight ahead.
 
 ## How online lobbies work
 
@@ -229,4 +245,4 @@ netlify.toml          Netlify config (no build step)
   reports its own shots and death; the host's client also drives the
   bots and pushes each new round's seed. If the host leaves, the
   next player takes over automatically.
-- **Phone controls**: ⟲ ⟳ turn, ▲ ▼ drive, FIRE shoots.
+- **Phone controls**: ⟲ ⟳ turn, ▲ ▼ drive, FIRE shoots straight ahead (the turret tracks the hull when there's no mouse).
