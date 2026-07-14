@@ -25,10 +25,11 @@
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, tankSVG } from "./main.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
-import { startOnlineGame, onlineLobbyUpdate, stopGame } from "./game.js";
+import { startOnlineGame, onlineLobbyUpdate, stopGame, rankedInProgress, getMatchStats } from "./game.js";
 import * as social from "./social.js";
 import { rankBadge, applyMatchResult } from "./ranked.js";
 import { showVersus, recordResult } from "./versus.js";
+import { showRankedResults } from "./results.js";
 import { startChat, stopChat, updateChatColors } from "./chat.js";
 import { AI_LEVELS } from "./ai.js";
 
@@ -168,7 +169,7 @@ async function myEloOrNull(f, field) {
 
 // Ranked lobbies are made by the matchmaker, never by hand: the
 // maker becomes host, everyone auto-starts once assembled.
-export async function createRankedLobby(mode, expect) {
+export async function createRankedLobby(mode, expect, teams = null) {
   const f = await ensureFirebase();
   for (let attempt = 0; attempt < 25; attempt++) {
     const code = String(Math.floor(1000 + Math.random() * 9000));
@@ -180,14 +181,15 @@ export async function createRankedLobby(mode, expect) {
       hostId: myId(),
       state: "waiting",
       ranked: true,
-      rankedMode: mode, // "1v1" | "4p"
+      rankedMode: mode, // "1v1" | "2v2"
       expect,
+      teams: teams ?? null, // 2v2: { [ukey]: 0|1 }
       players: { [myId()]: {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
         e1: await myEloOrNull(f, "elo1"),
-        e4: await myEloOrNull(f, "elo4"),
+        e2: await myEloOrNull(f, "elo2v2"),
       } },
     });
     await enterLobby(code);
@@ -252,7 +254,7 @@ async function createLobby() {
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
         e1: await myEloOrNull(f, "elo1"),
-        e4: await myEloOrNull(f, "elo4"),
+        e2: await myEloOrNull(f, "elo2v2"),
       } },
     });
     await enterLobby(code);
@@ -277,7 +279,7 @@ export async function joinLobby(code) {
       name: social.getAccount()?.name ?? null,
       ukey: social.getAccount()?.key ?? null,
       e1: await myEloOrNull(f, "elo1"),
-      e4: await myEloOrNull(f, "elo4"),
+      e2: await myEloOrNull(f, "elo2v2"),
     });
   }
   await enterLobby(code);
@@ -319,6 +321,48 @@ async function leaveLobby() {
   if (current?.versusPoll) clearInterval(current.versusPoll);
   if (current?.versusCountdown) clearInterval(current.versusCountdown);
   const c = current;
+
+  // ABORT PENALTY: bailing on a live ranked match books a maximum loss
+  // — a 0:3 scoreline for me. In 1v1 the opponent's own client turns my
+  // exit into their 3:0 win; in 2v2 my three tablemates keep playing
+  // (the abandoned player is now in a 1v2) and I'm dropped from their
+  // final tally. Computed BEFORE I remove myself, best-effort.
+  if (c && c.ranked && !c.rankedSettled && rankedInProgress() && c.rankedInfo) {
+    c.rankedSettled = true;
+    const acc = social.getAccount();
+    const me = acc ? c.rankedInfo.find((r) => r.key === acc.key) : null;
+    if (me) {
+      const abortStats = getMatchStats(); // grab before stopGame() clears S
+      const merged = c.rankedInfo.map((r) => ({
+        ...r,
+        score: c.rMode === "1v1"
+          ? (r.key === acc.key ? 0 : 3)
+          : ((r.team ?? 0) === (me.team ?? 0) ? 0 : 3), // my team lost 0:3
+      }));
+      Promise.allSettled([
+        applyMatchResult(c.rMode, merged),
+        recordResult(c.rMode, merged.map((m) => ({ id: m.id, key: m.key, score: m.score, team: m.team }))),
+      ]).then(async ([res]) => {
+        // Publish my abort result + damage/kill ledger so the players
+        // who stay and finish still see my contribution and my loss.
+        try {
+          const f = await ensureFirebase();
+          const stats = abortStats;
+          const updates = {};
+          const r = res?.value;
+          if (r) updates[`lobbies/${c.code}/results/${r.key}`] =
+            { name: r.name, before: r.before, after: r.after, delta: r.delta, team: me.team ?? null };
+          if (stats) {
+            updates[`lobbies/${c.code}/damageLog/${stats.myId}`] = stats.dmgBy ?? {};
+            updates[`lobbies/${c.code}/killLog/${stats.myId}`] = stats.killsBy ?? {};
+          }
+          if (Object.keys(updates).length) await f.update(f.ref(f.db), updates);
+        } catch (e) { /* best-effort */ }
+      });
+      toast("Abandoned a ranked match — counted as a loss.", 5000);
+    }
+  }
+
   stopGame(); // no-op if we weren't mid-match
   if (!c) { showScreen("screen-online"); return; }
 
@@ -516,7 +560,8 @@ function enterVersus(code, lobby) {
   const roster = entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
     id, name: p.name ?? null, color: resolved[id], ukey: p.ukey ?? null, bot: p.bot ?? null,
   }));
-  showVersus(roster, me, lobby.rankedMode ?? "4p");
+  showVersus(roster, me, lobby.rankedMode ?? "1v1",
+    lobby.teams ?? null, current?.playersCache ?? []);
   showScreen("screen-versus");
 
   // Announce readiness (informational — the shared clock, not this
@@ -578,35 +623,76 @@ function beginOnlineGame(code, lobby) {
   current.inGame = true;
   social.setStatus("round");
 
-  const rMode = lobby.rankedMode ?? "4p";
+  const rMode = lobby.rankedMode ?? "1v1";
+  // 2v2: the lobby carries teams { ukey: 0|1 } — remap to player ids.
+  const teamsById = lobby.ranked && rMode === "2v2" && lobby.teams
+    ? Object.fromEntries(entries
+        .filter(([, p]) => p.ukey != null && lobby.teams[p.ukey] != null)
+        .map(([id, p]) => [id, lobby.teams[p.ukey]]))
+    : null;
   const rankedInfo = lobby.ranked
     ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
         id,
         key: p.ukey ?? null,
-        elo: (rMode === "1v1" ? p.e1 : p.e4) ?? 500,
+        elo: (rMode === "1v1" ? p.e1 : p.e2) ?? 500,
+        team: teamsById ? (teamsById[id] ?? 0) : null,
       }))
     : null;
 
+  // Remember the ranked context so an abort (leaving mid-match) can
+  // book the penalty. rankedSettled flips true the moment the result
+  // is decided normally, so leaveLobby won't double-charge.
+  if (current) {
+    current.ranked = !!lobby.ranked;
+    current.rMode = rMode;
+    current.rankedInfo = rankedInfo;
+    current.rankedSettled = false;
+  }
+
   startOnlineGame({
     ranked: !!lobby.ranked,
-    winTarget: lobby.ranked ? (rMode === "1v1" ? 3 : 5) : null,
+    serverNow, // shared match clock (device clock + Firebase offset)
+    teams: teamsById,
+    winTarget: lobby.ranked ? 3 : null, // both ladders: first to 3
     casualPlayers: !lobby.ranked ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
       id, key: p.ukey ?? null,
     })) : null,
-    onRankedEnd: (placements) => {
+    onRankedEnd: (placements, myStats = null) => {
       // Everyone computes identically and writes only their OWN elo.
       if (!rankedInfo) return;
+      if (current) current.rankedSettled = true; // decided — no abort charge
       const merged = placements.map((pl) => ({
-        ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000 }),
+        ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000, team: null }),
+        color: (roster.find((r) => r.id === pl.id) ?? {}).color ?? "slate",
         score: pl.score,
       }));
-      Promise.allSettled([
-        applyMatchResult(rMode, merged),
-        recordResult(rMode, merged.map((m) => ({ id: m.id, key: m.key, score: m.score }))),
-      ]).finally(() => {
-        leaveLobby();
-        showScreen("screen-ranked");
-      });
+      const savedCode = code;
+      const myKey = social.getAccount()?.key ?? null;
+      (async () => {
+        const [myRes] = await Promise.allSettled([
+          applyMatchResult(rMode, merged),
+          recordResult(rMode, merged.map((m) => ({ id: m.id, key: m.key, score: m.score, team: m.team }))),
+        ]);
+        // Publish my Elo change + my damage/kill ledger so every
+        // finisher's results screen can total the match up.
+        try {
+          const f = await ensureFirebase();
+          const meRow = merged.find((m) => m.key === myKey);
+          const updates = {};
+          const r = myRes?.value;
+          if (r && meRow) {
+            updates[`lobbies/${savedCode}/results/${r.key}`] =
+              { name: r.name, before: r.before, after: r.after, delta: r.delta, team: meRow.team ?? null };
+          }
+          if (myStats) {
+            updates[`lobbies/${savedCode}/damageLog/${myStats.myId}`] = myStats.dmgBy ?? {};
+            updates[`lobbies/${savedCode}/killLog/${myStats.myId}`] = myStats.killsBy ?? {};
+          }
+          if (Object.keys(updates).length) await f.update(f.ref(f.db), updates);
+        } catch (e) { /* results are best-effort */ }
+        showRankedResults(savedCode, rMode, merged, myKey,
+          () => { leaveLobby(); showScreen("screen-ranked"); });
+      })();
     },
     roundN: lobby.round.n,
     seed: lobby.round.seed,
@@ -647,7 +733,10 @@ function beginOnlineGame(code, lobby) {
       fb.update(current.lobbyRef, updates).catch(() => {});
     },
     onExit: () => {
-      if (current?.isHost) endMatchForAll();
+      // Ranked: exiting is an ABORT — always leave (host included), so
+      // the penalty path in leaveLobby runs. Casual: the host resets
+      // the lobby for everyone; others just leave.
+      if (!lobby.ranked && current?.isHost) endMatchForAll();
       else leaveLobby();
     },
   });
@@ -778,7 +867,7 @@ function renderLobby(code, lobby) {
         <span class="lobby-name">${(() => {
           // 4-player ranked lobbies show the 4p rating; everywhere
           // else (casual + 1v1) shows the 1v1 rating.
-          const e = lobby.ranked && lobby.rankedMode === "4p" ? p.e4 : p.e1;
+          const e = lobby.ranked && lobby.rankedMode === "2v2" ? p.e2 : p.e1;
           return typeof e === "number" ? rankBadge(e, 16) : "";
         })()} ${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>

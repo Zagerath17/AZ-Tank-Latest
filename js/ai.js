@@ -21,7 +21,7 @@
 // ================================================================
 
 import { segmentHitsAnyRect } from "./maze.js";
-import { ROCKET, SNIPER, MORTAR, WEAPON_CATEGORY } from "./weapons.js";
+import { ROCKET, SNIPER, MORTAR, LASER, laserPath, WEAPON_CATEGORY } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
@@ -90,14 +90,6 @@ export const AI_PARAMS = {
 
 // Escape maneuvers tried when jammed; a wedged rectangle may have
 // only ONE free action, so we cycle (with randomness → no livelock).
-const ESCAPES = [
-  { down: true, left: true },
-  { down: true, right: true },
-  { up: true, right: true },
-  { up: true, left: true },
-  { down: true },
-];
-
 /* ================================================================
    Main driver
    ================================================================ */
@@ -147,12 +139,17 @@ export function botActions(t, world, dt, now) {
   const sureShotsOnly = !special && ammo <= P.reserve;
 
   /* ---- 1. escape mode ---- */
+  // A purposeful un-jam: reverse straight out of the snag (or drive out
+  // if the rear is blocked) while turning toward whichever side has
+  // room — far more reliable than thrashing through fixed patterns.
   if (now < ai.revUntil) {
-    const esc = ESCAPES[ai.escMode % ESCAPES.length];
-    if (esc.up) acts.up = true;
-    if (esc.down) acts.down = true;
-    if (esc.left) acts.left = true;
-    if (esc.right) acts.right = true;
+    if (ai.escBack) acts.down = true;
+    else if (ai.escFwd) acts.up = true;
+    else acts.down = true; // wedged both ways — keep trying to back off
+    if (ai.escTurnRight) acts.right = true;
+    else acts.left = true;
+    ai.wantedMove = acts.up || acts.down;
+    ai.wantedTurn = true;
     return acts;
   }
 
@@ -165,10 +162,19 @@ export function botActions(t, world, dt, now) {
   ai.stuckT = moveStuck || turnStuck ? ai.stuckT + dt : 0;
   if (ai.stuckT > 0.42) { // corners get un-stuck FAST
     ai.stuckT = 0;
-    const progressed = (t.x - ai.jamX) ** 2 + (t.y - ai.jamY) ** 2 > (cell * 0.4) ** 2;
-    ai.escMode = progressed ? Math.floor(Math.random() * ESCAPES.length) : ai.escMode + 1;
+    const a = t.a;
+    const probe = (ang, dist) => corridorClear(
+      t.x, t.y, t.x + Math.cos(ang) * dist, t.y + Math.sin(ang) * dist, world.rects, rBody);
+    const reach = cell * 0.7;
+    ai.escBack = probe(a + Math.PI, reach);          // rear clear?
+    ai.escFwd = !ai.escBack && probe(a, reach);       // else front?
+    const leftOpen = probe(a - Math.PI / 2, reach);
+    const rightOpen = probe(a + Math.PI / 2, reach);
+    ai.escTurnRight = rightOpen && !leftOpen ? true
+      : leftOpen && !rightOpen ? false
+      : Math.random() < 0.5;                           // both/neither → pick one
     ai.jamX = t.x; ai.jamY = t.y;
-    ai.revUntil = now + 350 + Math.random() * 350;
+    ai.revUntil = now + 300 + Math.random() * 250;
     ai.repathAt = 0;
   }
 
@@ -271,6 +277,46 @@ export function botActions(t, world, dt, now) {
   if (!target) return finish(ai, acts);
 
   const dist = Math.sqrt(best);
+
+  // ---- Mortar: indirect fire that arcs over walls. Aim at where the
+  // target will BE when the shell lands, not where it is now: the
+  // flight time scales with distance (MORTAR.msPerCell per cell), so we
+  // solve the intercept by iterating a couple of times. Prediction
+  // quality scales with the tier's `lead`; weaker bots also scatter the
+  // landing and fire less often. No line of sight or hull alignment is
+  // needed — that's the whole point of a mortar.
+  if (t.weapon === "mortar") {
+    const tv = ai.vel[target.id];
+    const secPerCell = MORTAR.msPerCell / 1000;
+    const tvSpeed = tv ? Math.hypot(tv.vx, tv.vy) : 0;
+    // Lead steady movers fully; barely lead erratic weavers (their
+    // weave centre is the best guess). Weaker tiers lead less.
+    const lead = tv ? (P.lead ?? 0) * (0.2 + 0.8 * (tv.stab ?? 1)) : 0;
+    let ax = target.x, ay = target.y;
+    if (lead > 0 && tvSpeed > 25) {
+      for (let k = 0; k < 3; k++) {
+        const ft = (Math.hypot(ax - t.x, ay - t.y) / cell) * secPerCell;
+        ax = target.x + tv.vx * ft * lead;
+        ay = target.y + tv.vy * ft * lead;
+      }
+    }
+    // Miss budget: weaker aim (low lead, high wobble) sprays wider.
+    const miss = ((1 - Math.min(1, P.lead ?? 0)) * 0.8 + (P.aimErr ?? 0) * 3) * cell;
+    ax += (Math.random() * 2 - 1) * miss;
+    ay += (Math.random() * 2 - 1) * miss;
+    t.mortarAim = { x: ax, y: ay };
+
+    // Lob when the target is within reach, after a per-tier reload
+    // cadence and a probability gate.
+    const inReach = dist <= (MORTAR.rangeCells - 0.25) * cell;
+    if (inReach && now >= (ai.mortarAt ?? 0) && Math.random() < (P.fireProb ?? 0.9)) {
+      ai.mortarAt = now + (P.cooldown ?? 1.2) * 1000 + 500;
+      acts.shoot = true;
+    }
+  } else {
+    t.mortarAim = null;
+  }
+
   const los =
     dist < P.range * cell &&
     !segmentHitsAnyRect(t.x, t.y, target.x, target.y, world.rects);
@@ -366,7 +412,11 @@ export function botActions(t, world, dt, now) {
   }
 
   let combatSteered = false;
-  if (shotLos) {
+  // Laser aiming uses the beam's reflections: even with no direct line
+  // of sight, a bank angle onto the target counts as a shot.
+  const laserAim = (t.weapon === "laser" && !dodging)
+    ? bestLaserAngle(t, target, world) : null;
+  if (shotLos || laserAim != null) {
     // Aim point: lead the target by its tracked velocity (per tier).
     const tv = ai.vel[target.id];
     let aimX = target.x;
@@ -384,7 +434,9 @@ export function botActions(t, world, dt, now) {
       }
     }
 
-    const wantW = Math.atan2(aimY - t.y, aimX - t.x) + ai.wobble;
+    const wantW = laserAim != null
+      ? laserAim // aim straight down the (possibly reflected) beam
+      : Math.atan2(aimY - t.y, aimX - t.x) + ai.wobble;
 
     // Combat movement (when not busy dodging): hold the standoff
     // band — advance when far, KITE backward when the enemy pushes
@@ -485,12 +537,13 @@ export function botActions(t, world, dt, now) {
       // The MG is manual now: HOLD the trigger while the sight is on.
       if (aligned && inFireRange && !mediumHold) acts.shoot = true;
     } else if (aligned && inFireRange && !mediumHold && canFire && now >= ai.fireAt) {
-      if (special) {
+      if (special && special !== "mortar") {
         // Pickup weapons fire on a clean look — no ricochet trace
         // needed. Exception: the cannon's shrapnel comes back through
         // walls, so it wants room. The sniper shoots through walls and
         // only hits tanks, so a clean look isn't even required — but
-        // aligned+inFireRange here already implies a decent angle.
+        // aligned+inFireRange here already implies a decent angle. The
+        // mortar is handled separately (indirect fire, no alignment).
         if (special !== "cannon" || dist > cell * 1.3) {
           ai.fireAt = now + 650;
           acts.shoot = true;
@@ -720,9 +773,15 @@ function steerTo(t, px, py, acts, world, rBody, allowReverse = true, revThresh =
   }
   if (err > 0.04) acts.right = true;
   else if (err < -0.04) acts.left = true;
-  if (Math.abs(err) < 0.55) {
-    if (rev) acts.down = true;
-    else acts.up = true;
+  // Commit to moving through the turn: drive whenever we're roughly
+  // pointed the right way (wider cone than before), so the bot flows
+  // around corners instead of stopping dead to aim at every waypoint.
+  // Reversing keeps the tighter cone — backing up at an angle is how
+  // tanks clip corners.
+  if (rev) {
+    if (Math.abs(err) < 0.5) acts.down = true;
+  } else if (Math.abs(err) < 0.95) {
+    acts.up = true;
   }
 }
 
@@ -895,6 +954,50 @@ function dodgeSteer(t, threat, world, rBody, acts, now, ai) {
   } else {
     steerTo(t, t.x + bvx * Df, t.y + bvy * Df, acts, world, rBody, false);
   }
+}
+
+// Best angle to hit `target` with the LASER, direct or off bounces.
+// Scans a fan of aim angles, casts the REAL reflected beam (walls +
+// boundary slabs) for each, and returns the angle whose beam passes
+// closest to the target (within a tank radius) — preferring the least
+// hull turn. Returns null if no angle connects. This is how bots aim
+// the laser around corners instead of only straight.
+function bestLaserAngle(t, target, world) {
+  const rects = world.rects ?? [];
+  const slabs = world.diag ?? [];
+  const bounces = LASER.shotBounces ?? 4;
+  const muz = world.muzzle ?? 27;
+  const hitR = (world.tankR ?? 22) * 0.85;
+  const baseA = Math.atan2(target.y - t.y, target.x - t.x);
+  const N = 72;
+  let best = null, bestScore = Infinity;
+  for (let i = 0; i <= N; i++) {
+    const a = baseA + (i / N - 0.5) * Math.PI * 1.4; // scan ±126°
+    const mx = t.x + Math.cos(a) * muz;
+    const my = t.y + Math.sin(a) * muz;
+    const pts = laserPath(mx, my, a, rects, bounces, slabs);
+    let miss = Infinity;
+    for (let s = 0; s < pts.length - 1; s++) {
+      const d = segPointDist(pts[s], pts[s + 1], target.x, target.y);
+      if (d < miss) miss = d;
+    }
+    if (miss < hitR) {
+      const score = miss + Math.abs(angleDiff(t.a, a)) * 10; // mostly hit, slight turn pref
+      if (score < bestScore) { bestScore = score; best = a; }
+    }
+  }
+  return best;
+}
+
+// Distance from point (px,py) to segment a→b.
+function segPointDist(a, b, px, py) {
+  const vx = b.x - a.x, vy = b.y - a.y;
+  const wx = px - a.x, wy = py - a.y;
+  const len2 = vx * vx + vy * vy || 1e-9;
+  let tt = (wx * vx + wy * vy) / len2;
+  tt = tt < 0 ? 0 : tt > 1 ? 1 : tt;
+  const cx = a.x + vx * tt, cy = a.y + vy * tt;
+  return Math.hypot(px - cx, py - cy);
 }
 
 // Trace the shot we're about to take along our CURRENT heading.
@@ -1167,9 +1270,13 @@ function corridorClear(x1, y1, x2, y2, rects, r) {
   return true;
 }
 
-// BFS through the maze's open walls (unique path — perfect maze).
+// BFS through the maze's open walls, kept strictly inside the arena
+// silhouette so a route never hugs a sealed boundary the hull can't
+// actually cross.
 function bfsPath(maze, from, to) {
   const key = (c, r) => r * maze.cols + c;
+  const isIn = (c, r) =>
+    !maze.inside || (r >= 0 && r < maze.rows && c >= 0 && c < maze.cols && maze.inside[r][c]);
   const prev = new Map([[key(from.c, from.r), -1]]);
   const queue = [[from.c, from.r]];
   let qi = 0;
@@ -1178,10 +1285,10 @@ function bfsPath(maze, from, to) {
     const [c, r] = queue[qi++];
     if (c === to.c && r === to.r) break;
     const steps = [];
-    if (!maze.H[r][c]) steps.push([c, r - 1]);
-    if (!maze.H[r + 1][c]) steps.push([c, r + 1]);
-    if (!maze.V[r][c]) steps.push([c - 1, r]);
-    if (!maze.V[r][c + 1]) steps.push([c + 1, r]);
+    if (!maze.H[r][c] && isIn(c, r - 1)) steps.push([c, r - 1]);
+    if (!maze.H[r + 1][c] && isIn(c, r + 1)) steps.push([c, r + 1]);
+    if (!maze.V[r][c] && isIn(c - 1, r)) steps.push([c - 1, r]);
+    if (!maze.V[r][c + 1] && isIn(c + 1, r)) steps.push([c + 1, r]);
     for (const [nc, nr] of steps) {
       const k = key(nc, nr);
       if (!prev.has(k)) {

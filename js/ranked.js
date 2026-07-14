@@ -1,26 +1,30 @@
 // ================================================================
-// ranked.js — two ladders (1v1 and 4-player), Elo, matchmaking.
+// ranked.js — two ladders (1v1 and 2v2 teams), Elo, matchmaking.
 //
 //   users/{key}/elo1        — 1v1 rating   (default 500, Copper)
-//   users/{key}/elo4        — 4-player rating (default 500)
+//   users/{key}/elo2v2      — 2v2 rating   (default 500)
 //   queue/1v1/{key}         — { at, elo, name } while searching
-//   queue/4p/{key}          —           »
+//   queue/2v2/{leaderKey}   — { at, elo (TEAM MEAN), name, duo,
+//                               members: [{key,name,elo}×2] }
 //   queue/*/{key}/match     — lobby code, written by the matchmaker
+//   duos/{code}             — the 2-player team party:
+//                             { createdAt, leader, members{key:{name,elo,at}},
+//                               match: lobbyCode|null }
 //
-// Matches are STRICT size (2 or 4) and only pair players within
-// ±100 Elo. The oldest queued player acts as matchmaker: it scans
-// the queue in join order for any anchor whose ±100 window holds a
-// full match, then takes the earliest joiners from that window.
-//
-// 4-player scoring (percent of the |mean − mine| gap):
-//   mean above me:  1st +20%   2nd +10%   3rd +5%    4th −15%
-//   mean below me:  1st +10%   2nd +5%    3rd +1%    4th −20%
-//   mean equal:     1st +10    2nd +5     3rd +2     4th −6   (flat)
+// 1v1 queues are individuals. 2v2 queues are TEAMS: you party up in a
+// duo (max 2), the leader queues the team, and the matchmaker pairs
+// two duos whose MEAN Elo is within ±100. All four then join the same
+// lobby; the lobby carries teams{ukey:0|1}.
 //
 // 1v1 (best-of — first to 3 round wins; percent of |gap|):
 //   underdog:  3:0 +20%  3:1 +10%  3:2 +5%  | 2:3 −2%  1:3 −5%  0:3 −10%
 //   favorite:  3:0 +10%  3:1 +5%   3:2 +1%  | 2:3 −3%  1:3 −10% 0:3 −20%
 //   equal:     ±10 / ±5 / ±2 flat by margin (spec silent — symmetric)
+//
+// 2v2 uses the SAME tables, computed on the TEAM MEANS (my team's mean
+// vs the enemy team's mean decides underdog/favorite and the gap); the
+// resulting delta is applied to each member's own rating. Winning is
+// team-wide: if your teammate is the last one standing, you both won.
 // ================================================================
 
 import { toast, onEnter, onLeave } from "./main.js";
@@ -30,9 +34,13 @@ import { isConfigured } from "./firebase-config.js";
 
 export const DEFAULT_ELO = 500;
 
+// Global multiplier on every rating change — the ladder moves fast.
+export const ELO_SCALE = 3;
+
 export const MODES = {
   "1v1": { label: "1v1", eloField: "elo1", queuePath: "queue/1v1", size: 2, winTarget: 3 },
-  "4p": { label: "FFA", eloField: "elo4", queuePath: "queue/4p", size: 4, winTarget: 5 },
+  // 2v2: a queue ENTRY is a whole team (duo); two entries make a match.
+  "2v2": { label: "2v2", eloField: "elo2v2", queuePath: "queue/2v2", size: 2, team: true, winTarget: 3 },
 };
 
 const TIERS = [
@@ -72,28 +80,24 @@ export async function fetchMyElo(mode) {
 
 /* ---------- Elo math (deterministic on every client) ---------- */
 
-// 4-player: placements = [{ key, elo, score }]. Ties share the better
-// placement. Returns my new elo (or null if I'm not in it).
-export function computeMyNewElo4(placements, myKey) {
-  const sorted = [...placements].sort((a, b) => b.score - a.score);
-  // placement index with ties sharing the best slot
-  const placeOf = new Map();
-  sorted.forEach((p, i) => {
-    const tiedWith = sorted.findIndex((q) => q.score === p.score);
-    placeOf.set(p.key, tiedWith);
-  });
-  const me = placements.find((p) => p.key === myKey);
-  if (!me) return null;
-  const myElo = me.elo ?? DEFAULT_ELO;
-  const mean = placements.reduce((s, p) => s + (p.elo ?? DEFAULT_ELO), 0) / placements.length;
-  const gap = Math.abs(mean - myElo);
-  const place = placeOf.get(myKey); // 0..3
-
-  let delta;
-  if (mean > myElo) delta = [0.2, 0.1, 0.05, -0.15][place] * gap;
-  else if (mean < myElo) delta = [0.1, 0.05, 0.01, -0.2][place] * gap;
-  else delta = [10, 5, 2, -6][place];
-  return Math.max(0, Math.round(myElo + delta));
+// 2v2: the 1v1 tables computed on TEAM MEANS. myMean vs oppMean picks
+// underdog/favorite and sets the gap; the delta lands on each member's
+// OWN rating. Scores are the round wins of each TEAM (both teammates
+// carry the same score).
+export function computeMyNewElo2v2(myElo, myMean, oppMean, myScore, oppScore) {
+  const gap = Math.abs(oppMean - myMean);
+  const won = myScore > oppScore;
+  const margin = Math.min(2, won ? oppScore : myScore); // 0, 1, or 2
+  let pct;
+  if (myMean < oppMean) {
+    pct = won ? [0.2, 0.1, 0.05][margin] : [-0.1, -0.05, -0.02][margin];
+  } else if (myMean > oppMean) {
+    pct = won ? [0.1, 0.05, 0.01][margin] : [-0.2, -0.1, -0.03][margin];
+  } else {
+    const flat = won ? [10, 5, 2][margin] : [-10, -5, -2][margin];
+    return Math.max(0, Math.round(myElo + flat * ELO_SCALE));
+  }
+  return Math.max(0, Math.round(myElo + pct * gap * ELO_SCALE));
 }
 
 // 1v1: myScore / oppScore are round wins (first to 3).
@@ -108,9 +112,9 @@ export function computeMyNewElo1v1(myElo, oppElo, myScore, oppScore) {
     pct = won ? [0.1, 0.05, 0.01][margin] : [-0.2, -0.1, -0.03][margin];
   } else {
     const flat = won ? [10, 5, 2][margin] : [-10, -5, -2][margin];
-    return Math.max(0, Math.round(myElo + flat));
+    return Math.max(0, Math.round(myElo + flat * ELO_SCALE));
   }
-  return Math.max(0, Math.round(myElo + pct * gap));
+  return Math.max(0, Math.round(myElo + pct * gap * ELO_SCALE));
 }
 
 export async function applyMatchResult(mode, placements) {
@@ -125,9 +129,18 @@ export async function applyMatchResult(mode, placements) {
     if (!opp) return;
     after = computeMyNewElo1v1(before, opp.elo ?? DEFAULT_ELO, me.score, opp.score);
   } else {
-    after = computeMyNewElo4(placements, acc.key);
+    // 2v2: placements carry team (0|1). Compute both team means; my
+    // delta comes from the 1v1 tables on those means, applied to my
+    // own rating. My team's score is any teammate's score (lockstep).
+    const mine = placements.filter((p) => (p.team ?? 0) === (me.team ?? 0));
+    const theirs = placements.filter((p) => (p.team ?? 0) !== (me.team ?? 0));
+    if (!theirs.length) return;
+    const mean = (arr) => arr.reduce((s, p) => s + (p.elo ?? DEFAULT_ELO), 0) / arr.length;
+    const myScore = Math.max(...mine.map((p) => p.score ?? 0));
+    const oppScore = Math.max(...theirs.map((p) => p.score ?? 0));
+    after = computeMyNewElo2v2(before, mean(mine), mean(theirs), myScore, oppScore);
   }
-  if (after == null) return;
+  if (after == null) return null;
   try {
     const f = await ensureFirebase();
     // Atomically bump the private rating AND the public leaderboard
@@ -139,9 +152,8 @@ export async function applyMatchResult(mode, placements) {
         name: acc.name ?? acc.key, elo: after,
       },
     });
-    const d = after - before;
-    toast(`${d >= 0 ? "+" : ""}${d} Elo — ${rankOf(after).name} ${after}`, 5000);
   } catch (e) { /* rating survives to the next match */ }
+  return { key: acc.key, name: acc.name ?? acc.key, before, after, delta: after - before };
 }
 
 /* ---------- matchmaking queue ---------- */
@@ -151,11 +163,181 @@ let queued = false;
 let queueTimer = 0;
 let matchUnsub = null;
 
+/* ---------- the 2v2 duo (team party) ---------- */
+// duos/{code}: { createdAt, leader, members{key:{name,elo,at}}, match }
+let duo = null;        // { code, leader, members: [{key,name,elo}] }
+let duoUnsub = null;
+let duoJoining = false;
+
+function isDuoLeader() {
+  const acc = getAccount();
+  return !!(duo && acc && duo.leader === acc.key);
+}
+
+async function createDuo() {
+  const acc = getAccount();
+  if (!acc) { toast("Log in to make a team."); return; }
+  if (duo) return;
+  const f = await ensureFirebase();
+  const elo = (await fetchMyElo("2v2")) ?? DEFAULT_ELO;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    const ref = f.ref(f.db, `duos/${code}`);
+    const existing = await f.get(ref);
+    if (existing.exists()) continue;
+    await f.set(ref, {
+      createdAt: f.serverTimestamp(),
+      leader: acc.key,
+      members: { [acc.key]: { name: acc.name, elo, at: f.serverTimestamp() } },
+      match: null,
+    });
+    watchDuo(code);
+    return;
+  }
+  toast("Couldn't find a free team code.");
+}
+
+async function joinDuo(code) {
+  const acc = getAccount();
+  if (!acc) { toast("Log in to join a team."); return; }
+  if (duo) return;
+  code = String(code || "").trim();
+  if (!/^\d{4}$/.test(code)) { toast("Team codes are 4 digits."); return; }
+  const f = await ensureFirebase();
+  const ref = f.ref(f.db, `duos/${code}`);
+  const snap = await f.get(ref);
+  const v = snap.val();
+  if (!v) { toast("No team with that code."); return; }
+  if (Object.keys(v.members ?? {}).length >= 2 && !v.members?.[acc.key]) {
+    toast("That team is already full (2 max)."); return;
+  }
+  const elo = (await fetchMyElo("2v2")) ?? DEFAULT_ELO;
+  await f.set(f.ref(f.db, `duos/${code}/members/${acc.key}`), {
+    name: acc.name, elo, at: f.serverTimestamp(),
+  });
+  watchDuo(code);
+}
+
+function watchDuo(code) {
+  ensureFirebase().then((f) => {
+    if (duoUnsub) { try { duoUnsub(); } catch (e) {} }
+    duoUnsub = f.onValue(f.ref(f.db, `duos/${code}`), async (snap) => {
+      const v = snap.val();
+      const acc = getAccount();
+      if (!v || !acc || !v.members?.[acc.key]) {
+        // Team dissolved (or we were removed).
+        duo = null;
+        if (duoUnsub) { try { duoUnsub(); } catch (e) {} duoUnsub = null; }
+        if (queued) leaveQueue();
+        renderDuoPanel();
+        return;
+      }
+      duo = {
+        code,
+        leader: v.leader,
+        members: Object.entries(v.members).map(([key, m]) => ({
+          key, name: m.name ?? key, elo: m.elo ?? DEFAULT_ELO,
+        })),
+      };
+      renderDuoPanel();
+      // Matchmade! Everyone in the duo joins the same lobby.
+      if (v.match && !duoJoining) {
+        duoJoining = true;
+        if (queued) await stopQueueing("2v2", isDuoLeader());
+        try {
+          const { joinLobby } = await import("./online.js");
+          await joinLobby(String(v.match));
+          toast("Match found!");
+        } catch (e) {
+          toast(e?.message ?? "Match fell apart — try again.");
+          setQueueUI("idle");
+        } finally {
+          duoJoining = false;
+          // Clear the flag so the duo can queue again later.
+          if (isDuoLeader()) {
+            try { f.set(f.ref(f.db, `duos/${code}/match`), null); } catch (e) {}
+          }
+        }
+      }
+    });
+  }).catch(() => {});
+}
+
+async function leaveDuo() {
+  const acc = getAccount();
+  if (!duo || !acc) return;
+  if (queued) await leaveQueue();
+  try {
+    const f = await ensureFirebase();
+    if (isDuoLeader()) {
+      await f.remove(f.ref(f.db, `duos/${duo.code}`)); // leader leaving dissolves it
+    } else {
+      await f.remove(f.ref(f.db, `duos/${duo.code}/members/${acc.key}`));
+    }
+  } catch (e) {}
+  if (duoUnsub) { try { duoUnsub(); } catch (e) {} duoUnsub = null; }
+  duo = null;
+  renderDuoPanel();
+}
+
+function renderDuoPanel() {
+  const panel = document.getElementById("duo-panel");
+  if (!panel) return;
+  panel.hidden = activeMode !== "2v2";
+  if (panel.hidden) return;
+  const members = document.getElementById("duo-members");
+  const codeEl = document.getElementById("duo-code");
+  const createBtn = document.getElementById("duo-create");
+  const joinRow = document.getElementById("duo-join-row");
+  const leaveBtn = document.getElementById("duo-leave");
+  const acc = getAccount();
+
+  if (!duo) {
+    codeEl.textContent = "";
+    members.innerHTML = acc
+      ? `<span class="hint">Party up: create a team and share the code, or join your teammate's.</span>`
+      : `<span class="hint">Log in from the title screen to build a team.</span>`;
+    createBtn.hidden = !acc;
+    joinRow.hidden = !acc;
+    leaveBtn.hidden = true;
+  } else {
+    codeEl.textContent = `Team code: ${duo.code}`;
+    members.innerHTML = duo.members
+      .map((m) => `<span class="duo-member">${rankBadge(m.elo, 16)} ${m.name}${m.key === duo.leader ? " ★" : ""}</span>`)
+      .join("");
+    createBtn.hidden = true;
+    joinRow.hidden = true;
+    leaveBtn.hidden = false;
+  }
+  setQueueUI(queued ? "queued" : "idle");
+}
+
 function setQueueUI(state, extra = "") {
   const btn = document.getElementById("ranked-queue");
   const status = document.getElementById("ranked-status");
   if (!btn) return;
   const M = MODES[activeMode];
+  if (M.team) {
+    // 2v2: only a full duo can search, and only its leader drives it.
+    const full = duo && duo.members.length === 2;
+    if (state === "idle") {
+      btn.textContent = "FIND 2v2 MATCH";
+      btn.disabled = !full || !isDuoLeader();
+      status.textContent = extra || (!duo
+        ? "Team up (2 players) to queue. Teams are paired by MEAN Elo, within ±100."
+        : !full
+          ? `Waiting for your teammate — share code ${duo.code}.`
+          : isDuoLeader()
+            ? "Team ready. Find a match!"
+            : "Team ready — your leader (★) starts the search.");
+    } else {
+      btn.textContent = "CANCEL";
+      btn.disabled = !isDuoLeader();
+      status.textContent = extra || "Searching for an enemy duo…";
+    }
+    return;
+  }
+  btn.disabled = false;
   if (state === "idle") {
     btn.textContent = `FIND ${M.label.toUpperCase()} MATCH`;
     status.textContent = extra || `${M.size} players · first to ${M.winTarget} round wins · pairs within ±100 Elo.`;
@@ -171,30 +353,50 @@ export async function joinQueue() {
   if (queued) return leaveQueue();
   const mode = activeMode;
   const M = MODES[mode];
+
+  // 2v2: the LEADER queues the whole team, under their own key.
+  if (M.team) {
+    if (!duo || duo.members.length !== 2) { toast("You need a teammate first."); return; }
+    if (!isDuoLeader()) { toast("Only the team leader (★) can queue."); return; }
+  }
+
   try {
     const f = await ensureFirebase();
-    const elo = (await fetchMyElo(mode)) ?? DEFAULT_ELO;
-    await f.set(f.ref(f.db, `${M.queuePath}/${acc.key}`), {
-      at: f.serverTimestamp(),
-      elo,
-      name: acc.name,
-    });
+    let entry;
+    if (M.team) {
+      const mean = duo.members.reduce((s, m) => s + m.elo, 0) / duo.members.length;
+      entry = {
+        at: f.serverTimestamp(),
+        elo: Math.round(mean),          // matched on the TEAM MEAN
+        name: acc.name,
+        duo: duo.code,
+        members: duo.members.map((m) => ({ key: m.key, name: m.name, elo: m.elo })),
+      };
+    } else {
+      const elo = (await fetchMyElo(mode)) ?? DEFAULT_ELO;
+      entry = { at: f.serverTimestamp(), elo, name: acc.name };
+    }
+    await f.set(f.ref(f.db, `${M.queuePath}/${acc.key}`), entry);
     queued = true;
     setQueueUI("queued");
 
-    matchUnsub = f.onValue(f.ref(f.db, `${M.queuePath}/${acc.key}/match`), async (snap) => {
-      const code = snap.val();
-      if (!code) return;
-      await stopQueueing(mode, false);
-      try {
-        const { joinLobby } = await import("./online.js");
-        await joinLobby(String(code));
-        toast("Match found!");
-      } catch (e) {
-        toast(e?.message ?? "Match fell apart — try again.");
-        setQueueUI("idle");
-      }
-    });
+    // 1v1 learns its match code via the queue entry. 2v2 members all
+    // learn it via the duo node instead (the matchmaker writes both).
+    if (!M.team) {
+      matchUnsub = f.onValue(f.ref(f.db, `${M.queuePath}/${acc.key}/match`), async (snap) => {
+        const code = snap.val();
+        if (!code) return;
+        await stopQueueing(mode, false);
+        try {
+          const { joinLobby } = await import("./online.js");
+          await joinLobby(String(code));
+          toast("Match found!");
+        } catch (e) {
+          toast(e?.message ?? "Match fell apart — try again.");
+          setQueueUI("idle");
+        }
+      });
+    }
 
     queueTimer = setInterval(() => matchmakerTick(f, acc, mode).catch(() => {}), 2500);
   } catch (e) {
@@ -229,7 +431,9 @@ async function matchmakerTick(f, acc, mode) {
     .sort((a, b) => (a[1].at - b[1].at) || (a[0] < b[0] ? -1 : 1));
 
   const waiting = q.filter(([, v]) => !v.match);
-  setQueueUI("queued", `Searching… ${waiting.length} in the ${M.label} queue`);
+  setQueueUI("queued", M.team
+    ? `Searching… ${waiting.length} team${waiting.length === 1 ? "" : "s"} in the ${M.label} queue`
+    : `Searching… ${waiting.length} in the ${M.label} queue`);
   if (!waiting.length || waiting[0][0] !== acc.key) return; // not my job
 
   const now = Date.now();
@@ -237,23 +441,34 @@ async function matchmakerTick(f, acc, mode) {
     if (now - v.at > 90000) f.remove(f.ref(f.db, `${M.queuePath}/${k}`)).catch(() => {});
   }
 
-  // Strict size + ±100 Elo: scan anchors in join order; the first
-  // whose window holds a full match wins; earliest joiners fill it.
+  // Strict size + ±100 Elo (team mean for 2v2): scan anchors in join
+  // order; the first whose window holds a full match wins; earliest
+  // joiners fill it.
   let party = null;
   for (const anchor of waiting) {
     const win = waiting.filter(([, v]) => Math.abs(v.elo - anchor[1].elo) <= 100);
     if (win.length >= M.size) { party = win.slice(0, M.size); break; }
   }
-  if (!party || !party.some(([k]) => k === acc.key)) {
-    // A match may form that excludes the matchmaker — allowed. But
-    // the maker must be IN the lobby it creates (it becomes host),
-    // so only form matches that include ourselves; a future maker
-    // (once we're matched away) handles the rest.
-    if (!party) return;
-    // Party excludes me: promote its earliest member by writing a
-    // hint is overkill — simplest correct behavior: skip; that
-    // party's own oldest member becomes matchmaker within 2.5 s of
-    // us leaving the front (or stays until sizes shift).
+  if (!party || !party.some(([k]) => k === acc.key)) return; // see 1v1 note
+
+  if (M.team) {
+    // Two duos found. Build the team map (ukey → 0|1), create the
+    // 4-player lobby with it, then flag BOTH duo nodes so all four
+    // members join.
+    const teams = {};
+    party.forEach(([, v], ti) => {
+      for (const m of v.members ?? []) teams[m.key] = ti;
+    });
+    const code = await createRankedLobby(mode, 4, teams);
+    const updates = {};
+    for (const [, v] of party) {
+      if (v.duo) updates[`duos/${v.duo}/match`] = code;
+    }
+    for (const [k] of party) {
+      updates[`${M.queuePath}/${k}`] = null; // clear both queue entries
+    }
+    await f.update(f.ref(f.db), updates);
+    await stopQueueing(mode, false); // entry already cleared above
     return;
   }
 
@@ -378,21 +593,30 @@ async function renderLeaderboard() {
 export function initRanked() {
   document.getElementById("ranked-queue").addEventListener("click", joinQueue);
 
+  // 2v2 duo panel controls.
+  document.getElementById("duo-create")?.addEventListener("click", createDuo);
+  document.getElementById("duo-join")?.addEventListener("click", () => {
+    joinDuo(document.getElementById("duo-code-input")?.value);
+  });
+  document.getElementById("duo-leave")?.addEventListener("click", leaveDuo);
+
   const tab1 = document.getElementById("ranked-tab-1v1");
-  const tab4 = document.getElementById("ranked-tab-4p");
+  const tab2 = document.getElementById("ranked-tab-2v2");
   const pick = async (mode) => {
     if (queued) await leaveQueue(); // switching ladders abandons the search
     activeMode = mode;
     tab1.classList.toggle("is-on", mode === "1v1");
-    tab4.classList.toggle("is-on", mode === "4p");
+    tab2.classList.toggle("is-on", mode === "2v2");
+    renderDuoPanel();
     setQueueUI("idle");
     renderLeaderboard();
   };
   tab1.addEventListener("click", () => pick("1v1"));
-  tab4.addEventListener("click", () => pick("4p"));
+  tab2.addEventListener("click", () => pick("2v2"));
 
   let boardTimer = 0;
   onEnter("screen-ranked", () => {
+    renderDuoPanel();
     setQueueUI("idle");
     renderLeaderboard();
     boardTimer = setInterval(renderLeaderboard, 10000);
@@ -400,5 +624,6 @@ export function initRanked() {
   onLeave("screen-ranked", () => {
     clearInterval(boardTimer);
     if (queued) leaveQueue();
+    // Leaving the screen keeps the duo alive — you can come back to it.
   });
 }

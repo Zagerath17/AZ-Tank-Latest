@@ -77,13 +77,17 @@ export function keyLabel(code) {
 
 /* ---------- render ---------- */
 
+// Offline is a single player (WASD + mouse), so only one control set
+// is editable — the extra local-player binds are gone from the UI.
+const BIND_SLOTS = ["red"];
+
 function render() {
   const host = document.getElementById("binds");
-  host.innerHTML = COLORS.map((color) => `
+  host.innerHTML = BIND_SLOTS.map((color) => `
     <section class="panel bind-panel p-${color}">
       <header class="bind-head">
         ${tankSVG(color)}
-        <h3>${SLOT_NAMES[color]}</h3>
+        <h3>Keyboard controls</h3>
       </header>
       <div class="bind-rows">
         ${ACTIONS.map(([action, label]) => `
@@ -132,7 +136,7 @@ function onKeydown(e) {
   const { color, action } = capturing;
 
   // A key can only belong to one slot — steal it if it's taken elsewhere.
-  for (const c of COLORS) {
+  for (const c of BIND_SLOTS) {
     for (const [a] of ACTIONS) {
       if (binds[c][a] === e.code && !(c === color && a === action)) {
         binds[c][a] = null;

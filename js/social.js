@@ -99,6 +99,8 @@ async function ensureAuth() {
     signUp: m.createUserWithEmailAndPassword,
     signOut: m.signOut,
     onAuthStateChanged: m.onAuthStateChanged,
+    sendVerify: m.sendEmailVerification,
+    sendReset: m.sendPasswordResetEmail,
   };
   return auth;
 }
@@ -168,7 +170,21 @@ export async function doCreate(email, pass, name) {
   const owner = (await f.get(f.ref(f.db, `users/${keyOf(name)}/uid`))).val();
   if (owner) throw new Error("That username is taken.");
   const cred = await a.signUp(a.auth, email.trim(), pass);
+  // Fire off the verification email (best-effort — a send hiccup must
+  // not block the freshly-created account from being used).
+  try {
+    await a.sendVerify(cred.user);
+    toast("Account made — a verification email is on its way.", 6000);
+  } catch (e) { /* they can resend later; account still works */ }
   return adoptProfile(cred.user.uid, name);
+}
+
+// Send a password-reset email for an existing account.
+export async function doPasswordReset(email) {
+  const e = (email ?? "").trim();
+  if (!e) throw new Error("Enter your email first, then tap Forgot password.");
+  const a = await ensureAuth();
+  await a.sendReset(a.auth, e);
 }
 
 export async function logout() {
@@ -215,7 +231,23 @@ async function goOnline() {
     f.onDisconnect(f.ref(f.db, `users/${account.key}/status`)).set("offline");
     f.onDisconnect(f.ref(f.db, `users/${account.key}/lobby`)).set(null);
     startListening();
+    startHeartbeat();
   } catch (e) { /* offline play still works */ }
+}
+
+// Keep lastSeen fresh while the tab is active, so a friend's "last
+// active" time reflects roughly when they were really last around
+// (the onDisconnect leaves lastSeen at its most recent beat).
+let heartbeatTimer = 0;
+function startHeartbeat() {
+  clearInterval(heartbeatTimer);
+  const beat = () => {
+    if (!account || document.hidden) return;
+    ensureFirebase()
+      .then((f) => f.update(f.ref(f.db, `users/${account.key}`), { lastSeen: f.serverTimestamp() }))
+      .catch(() => {});
+  };
+  heartbeatTimer = setInterval(beat, 60000);
 }
 
 // "online" | "lobby" | "round" (lobbyCode only matters for "lobby")
@@ -371,8 +403,27 @@ async function fetchProfile(f, key) {
   return s.exists() ? { key, ...s.val() } : null;
 }
 
+// A short "time since" for a past epoch-ms timestamp.
+function relTime(ts) {
+  if (!ts) return null;
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d ago`;
+  const w = Math.floor(d / 7);
+  if (w < 5) return `${w}w ago`;
+  return "a while ago";
+}
+
 function statusLabel(p) {
-  if (!p || p.status === "offline" || !p.status) return ["offline", "Offline"];
+  if (!p || p.status === "offline" || !p.status) {
+    const seen = relTime(p?.lastSeen);
+    return ["offline", seen ? `Last seen ${seen}` : "Offline"];
+  }
   if (p.status === "round") return ["round", "In a round"];
   if (p.status === "lobby") return ["lobby", "In a lobby"];
   return ["online", "Online"];
@@ -611,6 +662,18 @@ export function initSocial() {
   const crBtn = document.getElementById("login-create");
   siBtn.addEventListener("click", busyGuard(siBtn, () => doSignIn(val("login-email"), val("login-pass"))));
   crBtn.addEventListener("click", busyGuard(crBtn, () => doCreate(val("login-email"), val("login-pass"), val("login-name"))));
+  const fgBtn = document.getElementById("login-forgot");
+  if (fgBtn) fgBtn.addEventListener("click", async () => {
+    fgBtn.disabled = true;
+    try {
+      await doPasswordReset(val("login-email"));
+      toast("Password-reset email sent — check your inbox.", 6000);
+    } catch (e) {
+      toast(authErrorText(e), 5000);
+    } finally {
+      fgBtn.disabled = false;
+    }
+  });
 
   // Social screen tabs: Friends | Requests | Add Friends
   const tabs = {

@@ -99,7 +99,7 @@ export const HEAL = {
 // Any tank inside moves 20% slower. Dries up after a while.
 export const MUD = {
   radiusCells: 0.55,
-  slow: 0.8,          // 20% slow-down
+  slow: 0.6,          // 40% slow-down
   lifeMs: 15000,
 };
 
@@ -111,7 +111,7 @@ export const MUD = {
 // (they're sized off the tank/cell constants).
 export const MORTAR = {
   rangeCells: 5,      // "going out 5 cells takes 5 seconds"
-  msPerCell: 1000,    // flight time per cell of distance
+  msPerCell: 500,     // 2 cells / second (0.5 s per cell)
   cloudMs: 1100,      // the dark cloud lingers this long
 };
 
@@ -204,8 +204,43 @@ export function castRay(x, y, dx, dy, rects, maxDist) {
   return { d: bestT, nx, ny, hit };
 }
 
-// Polyline of a beam reflecting off walls `bounces` times.
-export function laserPath(x, y, a, rects, bounces) {
+// Ray vs one oriented slab { x, y, a, hx, hy }. Works in the slab's
+// local frame, returns { d, nx, ny, hit } with the WORLD-space surface
+// normal (facing the incoming ray) — so the exterior/diagonal boundary
+// reflects the laser like any wall.
+function castRaySlab(x, y, dx, dy, slab, maxDist) {
+  const ca = Math.cos(slab.a), sa = Math.sin(slab.a);
+  // Ray origin + direction into the slab's local axes.
+  const lx = (x - slab.x) * ca + (y - slab.y) * sa;
+  const ly = -(x - slab.x) * sa + (y - slab.y) * ca;
+  const ldx = dx * ca + dy * sa;
+  const ldy = -dx * sa + dy * ca;
+  let tmin = 0, tmax = maxDist, axis = -1;
+  if (Math.abs(ldx) > 1e-9) {
+    const inv = 1 / ldx;
+    let t1 = (-slab.hx - lx) * inv, t2 = (slab.hx - lx) * inv;
+    if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
+    if (t1 > tmin) { tmin = t1; axis = 0; }
+    if (t2 < tmax) tmax = t2;
+  } else if (lx < -slab.hx || lx > slab.hx) return null;
+  if (Math.abs(ldy) > 1e-9) {
+    const inv = 1 / ldy;
+    let t1 = (-slab.hy - ly) * inv, t2 = (slab.hy - ly) * inv;
+    if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
+    if (t1 > tmin) { tmin = t1; axis = 1; }
+    if (t2 < tmax) tmax = t2;
+  } else if (ly < -slab.hy || ly > slab.hy) return null;
+  if (tmax < tmin || tmin <= 1e-6 || tmin >= maxDist) return null;
+  // Local normal on the face we entered, facing back along the ray.
+  let lnx = 0, lny = 0;
+  if (axis === 0) lnx = ldx > 0 ? -1 : 1;
+  else lny = ldy > 0 ? -1 : 1;
+  return { d: tmin, nx: lnx * ca - lny * sa, ny: lnx * sa + lny * ca, hit: true };
+}
+
+// Polyline of a beam reflecting off walls (AABB maze rects) AND the
+// oriented boundary slabs, `bounces` times.
+export function laserPath(x, y, a, rects, bounces, slabs = []) {
   let dx = Math.cos(a);
   let dy = Math.sin(a);
   let px = x;
@@ -213,13 +248,21 @@ export function laserPath(x, y, a, rects, bounces) {
   const pts = [{ x: px, y: py }];
 
   for (let i = 0; i <= bounces; i++) {
-    const r = castRay(px, py, dx, dy, rects, 5000);
+    let r = castRay(px, py, dx, dy, rects, 5000);
+    // Nearer slab hit wins.
+    for (const slab of slabs) {
+      const s2 = castRaySlab(px, py, dx, dy, slab, r.hit ? r.d : 5000);
+      if (s2 && s2.d < (r.hit ? r.d : 5000)) r = s2;
+    }
     px += dx * r.d;
     py += dy * r.d;
     pts.push({ x: px, y: py });
     if (!r.hit) break;
-    if (r.nx !== 0) dx = -dx;
-    else dy = -dy;
+    // Reflect the direction across the surface normal (handles both
+    // axis-aligned and diagonal faces): v' = v − 2(v·n)n.
+    const dot = dx * r.nx + dy * r.ny;
+    dx -= 2 * dot * r.nx;
+    dy -= 2 * dot * r.ny;
     px += r.nx * 0.5; // nudge off the surface so the next cast is clean
     py += r.ny * 0.5;
   }
@@ -529,6 +572,22 @@ export function drawBarrel(ctx, type, R, cMain, cDark) {
 // glyph, a springy pop-in when it lands, and a soft idle bob.
 // Each weapon gets its own distinct accent color — used for the crate
 // rim AND the equipped-weapon label, so they always correspond.
+// Human-readable ability names for the loadout readout.
+export const WEAPON_LABEL = {
+  laser: "Laser",
+  mg: "Machine Gun",
+  rocket: "Homing Rocket",
+  cannon: "Cannon",
+  sniper: "Sniper",
+  mortar: "Mortar",
+  wall: "Wall",
+  armour: "Armour",
+  heal: "Heal Station",
+  mud: "Mud Pit",
+  boost: "Boost",
+  phase: "Phase",
+};
+
 export const GEAR_RIM = {
   laser: "#e8452e",   // red
   mg: "#ff8c1a",      // orange

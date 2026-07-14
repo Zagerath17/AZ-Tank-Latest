@@ -21,7 +21,7 @@ import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
   ARMOUR, HEAL, MUD, MORTAR,
   laserPath, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
-  WEAPON_CATEGORY,
+  WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
 import { sfx, setEngine, startMusic, stopAll } from "./audio.js";
 
@@ -37,7 +37,7 @@ const TANK_RAD = Math.hypot(TANK_HL, TANK_HW); // bounding radius (broadphase / 
 const MOVE_SPEED = U * 2.1;
 const REVERSE_SPEED = U * 1.45;
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
-const TURRET_TURN_SPEED = TURN_SPEED * 1.2; // turret slews 20% faster than the hull
+const TURRET_TURN_SPEED = TURN_SPEED * 1.2 * 0.9; // 1.2× hull, then a 10% turret debuff
 
 const GEAR_R = 14;             // pickup grab radius (added to the tank's)
 const GEAR_TYPE_MAX = 2;       // at most this many of any ONE ability on the map
@@ -92,13 +92,33 @@ function specialInPlay(t) {
 }
 
 const ROUND_PAUSE = 2600;   // ms between rounds
-const NET_SEND_MS = 90;
+// ---- Netcode (see the remote-tank block in stepTanks) ----
+// Packets carry position + velocity + a shared-clock timestamp. Sends
+// are adaptive: quick while moving or turning hard, slow heartbeats
+// while parked. Remote tanks render ~130 ms in the past from a buffer
+// of timestamped snapshots, interpolating between them; when a lag
+// spike starves the buffer they dead-reckon along their last velocity
+// (briefly, damped), and any correction when packets resume is
+// rate-capped — never an instant teleport.
+const NET_SEND_MS = 75;        // base cadence while moving
+const NET_SEND_MIN_MS = 40;    // floor for urgent (sharp-turn) sends
+const NET_IDLE_MS = 450;       // heartbeat while parked
+const NET_INTERP_MS = 130;     // remotes render this far in the past
+const NET_EXTRAP_MS = 250;     // max dead-reckoning past the buffer
+const NET_BUF_MAX = 24;        // ~1.8 s of history
+const NET_SNAP_DIST = CELL * 2.5;   // beyond this, a jump is deliberate
+const NET_CORRECT_SPEED = 2.2;      // × MOVE_SPEED correction cap
+// Arenas grouped by grid size. 1v1 (ranked) draws from small+medium,
+// 2v2 (ranked) from large+xl; casual/offline use the whole range.
+const MAZE_SIZE_GROUPS = {
+  small:  [[7, 5], [7, 6], [8, 5], [8, 6], [8, 7]],
+  medium: [[9, 5], [9, 6], [9, 7], [10, 6], [10, 7], [11, 6]],
+  large:  [[11, 8], [12, 8], [12, 9], [13, 9], [13, 10]],
+  xl:     [[14, 10], [15, 10], [15, 11], [16, 11], [17, 12], [18, 12]],
+};
 const MAZE_SIZES = [
-  [7, 5], [7, 6], [8, 5], [8, 6], [8, 7], [9, 5],
-  [9, 6], [9, 7], [10, 6], [10, 7], [11, 6], [11, 8],
-  // The big leagues: sprawling arenas for longer hunts.
-  [12, 8], [12, 9], [13, 9], [13, 10], [14, 10], [15, 10],
-  [15, 11], [16, 11], [17, 12], [18, 12],
+  ...MAZE_SIZE_GROUPS.small, ...MAZE_SIZE_GROUPS.medium,
+  ...MAZE_SIZE_GROUPS.large, ...MAZE_SIZE_GROUPS.xl,
 ];
 
 const HULL = PALETTE; // every pickable paint + the Impossible black
@@ -284,6 +304,8 @@ function opts_toState(o) {
     onExit: o.onExit,
     ranked: o.ranked,
     winTarget: o.winTarget,
+    serverNow: o.serverNow,
+    teams: o.teams,
     onRankedEnd: o.onRankedEnd,
     casualPlayers: o.casualPlayers,
   };
@@ -307,6 +329,17 @@ export function stopGame() {
 
 export function isGameActive() {
   return !!S;
+}
+
+// True while an online ranked match is running and NOT yet decided —
+// leaving now counts as an abort (see online.js).
+export function rankedInProgress() {
+  return !!(S && S.mode === "online" && S.ranked && !S.matchOver);
+}
+
+// My tanks' received-damage ledger (attacker → total), for reporting.
+export function getMatchStats() {
+  return S ? { dmgBy: S.dmgBy ?? {}, killsBy: S.killsBy ?? {}, myId: S.myId } : null;
 }
 
 // Called by online.js with the full lobby on every snapshot mid-match.
@@ -377,7 +410,29 @@ export function onlineLobbyUpdate(lobby) {
     }
 
     if (!t.local) {
-      if (p.pos) { t.tx = p.pos.x; t.ty = p.pos.y; t.ta = p.pos.a; if (p.pos.u != null) t.tu = p.pos.u; }
+      if (p.pos) {
+        // Buffer the timestamped snapshot for interpolation. Old-format
+        // packets (no `t`) get stamped with their arrival time.
+        const ts = typeof p.pos.t === "number" ? p.pos.t : S.netClock();
+        const buf = (t.netBuf ??= []);
+        const newest = buf[buf.length - 1];
+        if (!newest || ts > newest.ts) {
+          // Per-peer clock skew: arrival − stamp = their clock offset +
+          // network latency. Chase its rolling minimum so one slow
+          // packet can't inflate it; this rebases their timeline onto
+          // ours even if a device's clock offset is way off.
+          const skew = S.netClock() - ts;
+          t.netSkew = t.netSkew == null ? skew : Math.min(t.netSkew * 0.98 + skew * 0.02, skew);
+          buf.push({
+            ts, x: p.pos.x, y: p.pos.y, a: p.pos.a, u: p.pos.u ?? p.pos.a,
+            vx: p.pos.vx ?? 0, vy: p.pos.vy ?? 0,
+          });
+          if (buf.length > NET_BUF_MAX) buf.shift();
+        }
+        // Legacy targets stay maintained (spawn/eject code touches them).
+        t.tx = p.pos.x; t.ty = p.pos.y; t.ta = p.pos.a;
+        if (p.pos.u != null) t.tu = p.pos.u;
+      }
       if (p.shots) {
         const seen = (S.seenShots[t.id] ??= new Set());
         for (const [key, sh] of Object.entries(p.shots)) {
@@ -387,6 +442,29 @@ export function onlineLobbyUpdate(lobby) {
         }
       }
     }
+  }
+
+  // Ranked mid-match departure = an abort. Track who left so their
+  // rating is settled apart from the finishers.
+  if (S.ranked && !S.matchOver && S.roundStartCount >= 2) {
+    S.rankedGone = S.rankedGone ?? new Set();
+    for (const t of S.tanks) {
+      if (!t.bot && t.gone && t.id !== S.myId) S.rankedGone.add(t.id);
+    }
+    if (!S.teams) {
+      // 1v1: my only opponent bailed → I take the match as a 3:0 win.
+      // (Their own client books the matching 0:3 loss as it leaves.)
+      const oppGone = S.roster.some((p) => !p.bot && p.id !== S.myId && S.rankedGone.has(p.id));
+      if (oppGone && S.present.has(S.myId)) {
+        for (const p of S.roster) S.scores[p.id] = p.id === S.myId ? (S.winTarget ?? 3) : 0;
+        S.matchOver = true;
+        S.banner = { silent: true };
+        S.roundOverAt = performance.now();
+        updateScoreHUD();
+      }
+    }
+    // 2v2: the remaining three keep playing (the abandoned player is
+    // simply down a tank → a 1v2); the aborter is excluded at the end.
   }
 
   if (!meIn) {
@@ -421,10 +499,14 @@ function begin(opts) {
     sendGun: opts.sendGun,
     onExit: opts.onExit,
     ranked: !!opts.ranked,
+    netClock: opts.serverNow ?? (() => Date.now()), // shared match clock
+    teams: opts.teams ?? null, // { [playerId]: 0|1 } in team modes (2v2)
     winTarget: opts.winTarget ?? 5,
     onRankedEnd: opts.onRankedEnd ?? null,
     matchOver: false,
     rankedEndFired: false,
+    dmgBy: {},   // attackerId → damage they dealt to MY tanks
+    killsBy: {}, // attackerId → kills of MY tanks
     roundN: opts.roundN ?? 1,
     tanks: [],
     bullets: [],
@@ -453,7 +535,6 @@ function begin(opts) {
     roundOverAt: 0,
     sentNext: false,
     lastT: performance.now(),
-    lastSend: 0,
     raf: 0,
   };
 
@@ -490,16 +571,16 @@ function startRound(seed) {
   let shape = rng() < 0.55
     ? "rect"
     : MAZE_SHAPES_NONRECT[Math.floor(rng() * MAZE_SHAPES_NONRECT.length)];
-  // Shaped arenas lose cells to the mask, so pull their grid size from
-  // the upper half of the list to keep the playable area generous.
-  let sizeIdx;
-  if (shape === "rect") {
-    sizeIdx = Math.floor(rng() * MAZE_SIZES.length);
-  } else {
-    const lo = Math.floor(MAZE_SIZES.length * 0.5);
-    sizeIdx = lo + Math.floor(rng() * (MAZE_SIZES.length - lo));
-  }
-  const [cols, rows] = MAZE_SIZES[sizeIdx];
+  // Size pool by mode: 1v1 → small+medium, 2v2 → large+xl, casual →
+  // the full range. Shaped arenas lose cells to the mask, so within the
+  // chosen pool they take the larger half to keep the area generous.
+  const G = MAZE_SIZE_GROUPS;
+  let pool;
+  if (S.ranked && S.teams) pool = [...G.large, ...G.xl];       // 2v2
+  else if (S.ranked) pool = [...G.small, ...G.medium];         // 1v1
+  else pool = MAZE_SIZES;                                      // casual / offline
+  const sizeStart = shape === "rect" ? 0 : Math.floor(pool.length * 0.5);
+  const [cols, rows] = pool[sizeStart + Math.floor(rng() * (pool.length - sizeStart))];
   // braid 0.1: roughly a third of the previous loopiness — fewer open
   // cross-connections, so corridors read as corridors.
   S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.1 });
@@ -555,15 +636,25 @@ function startRound(seed) {
   S.sentNext = false;
   for (const t of S.tanks) { t.phaseUntil = 0; t.wasPhasing = false; t.ejecting = false; }
 
-  // Players 1 & 2 in opposite corners, 3 & 4 in the other pair. For a
-  // shaped maze a raw corner may fall outside the silhouette, so snap
-  // each to the nearest playable cell.
-  const rawCorners = [
-    [0, 0],
-    [cols - 1, rows - 1],
-    [cols - 1, 0],
-    [0, rows - 1],
-  ];
+  // Players 1 & 2 in opposite corners, 3 & 4 in the other pair. In a
+  // TEAM match (2v2) the pairing changes: team 0 takes the two LEFT
+  // corners, team 1 the two RIGHT corners, so teammates start on the
+  // same side facing the enemy duo. For a shaped maze a raw corner may
+  // fall outside the silhouette, so snap each to the nearest playable
+  // cell.
+  const rawCorners = S.teams
+    ? [
+        [0, 0],               // team 0, first member
+        [0, rows - 1],        // team 0, second member
+        [cols - 1, 0],        // team 1, first member
+        [cols - 1, rows - 1], // team 1, second member
+      ]
+    : [
+        [0, 0],
+        [cols - 1, rows - 1],
+        [cols - 1, 0],
+        [0, rows - 1],
+      ];
   const inside = S.maze.inside;
   const cellInside = (c, r) =>
     !inside || (r >= 0 && r < rows && c >= 0 && c < cols && inside[r][c]);
@@ -582,8 +673,18 @@ function startRound(seed) {
   };
   const corners = rawCorners.map(([c, r]) => snapInside(c, r));
 
+  // In a team match, hand out corners by TEAM (0 → left pair, 1 →
+  // right pair) regardless of roster order.
+  let seat0 = 0, seat1 = 0;
+  const cornerFor = (spec, i) => {
+    if (!S.teams) return corners[i];
+    const team = S.teams[spec.id] ?? 0;
+    const idx = team === 0 ? seat0++ : 2 + seat1++;
+    return corners[Math.min(idx, 3)];
+  };
+
   S.tanks = S.roster.map((spec, i) => {
-    const [c, r] = corners[i];
+    const [c, r] = cornerFor(spec, i);
     const x = (c + 0.5) * CELL;
     const y = (r + 0.5) * CELL;
     const a = Math.atan2(S.worldH / 2 - y, S.worldW / 2 - x);
@@ -609,6 +710,27 @@ function startRound(seed) {
     };
   });
   refreshBotOwnership();
+
+  // Guarantee every tank starts COMPLETELY inside: if a spawn cell is
+  // clipped by a maze wall or the shaped arena's diagonal boundary,
+  // ease the tank toward the map centre until its whole body is clear.
+  const cxW = S.worldW / 2, cyW = S.worldH / 2;
+  for (const t of S.tanks) {
+    for (let step = 0; step < 40; step++) {
+      const clipped =
+        tankHitsAnyWall(t, t.x, t.y, t.a) || tankHitsAnyDiag(t, t.x, t.y, t.a) ||
+        t.x < TANK_RAD || t.x > S.worldW - TANK_RAD ||
+        t.y < TANK_RAD || t.y > S.worldH - TANK_RAD;
+      if (!clipped) break;
+      const dx = cxW - t.x, dy = cyW - t.y;
+      const d = Math.hypot(dx, dy) || 1;
+      t.x += (dx / d) * 6;
+      t.y += (dy / d) * 6;
+    }
+    t.x = Math.max(TANK_RAD, Math.min(S.worldW - TANK_RAD, t.x));
+    t.y = Math.max(TANK_RAD, Math.min(S.worldH - TANK_RAD, t.y));
+    t.tx = t.x; t.ty = t.y;
+  }
 
   S.roundStartCount = S.tanks.filter((t) => !t.gone).length;
 }
@@ -703,7 +825,7 @@ function frame(now) {
     if (t.dead || t.gone) continue;
     if (t.weapon === "laser") {
       const m = muzzlePoint(t, 1);
-      S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects, LASER.previewBounces) });
+      S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects, LASER.previewBounces, S.diag) });
     } else if (t.weapon === "sniper") {
       // Straight line, no bounce, through walls, 3 cells long.
       const m = muzzlePoint(t, 1);
@@ -754,10 +876,17 @@ function frame(now) {
     // exactly once so every client settles its own Elo.
     if (!S.rankedEndFired && now - S.roundOverAt > 3500) {
       S.rankedEndFired = true;
+      // In 2v2, anyone who left mid-match already booked their abort
+      // penalty and is dropped here, so the finishers rate against the
+      // players who were actually present (a 1v2 stays a 1v2). In 1v1
+      // the departed opponent must stay in with a 0 score so the win
+      // computes as a clean 3:0.
+      const drop = S.teams ? (S.rankedGone ?? new Set()) : new Set();
       const placements = S.roster
+        .filter((p) => !drop.has(p.id))
         .map((p) => ({ id: p.id, color: p.color, score: S.scores[p.id] ?? 0 }))
         .sort((a, b) => b.score - a.score);
-      S.onRankedEnd?.(placements);
+      S.onRankedEnd?.(placements, { dmgBy: S.dmgBy ?? {}, killsBy: S.killsBy ?? {}, myId: S.myId });
     }
   } else if (now - S.roundOverAt > ROUND_PAUSE) {
     if (S.mode === "local") {
@@ -770,18 +899,82 @@ function frame(now) {
     // Non-controller online clients wait for the round push.
   }
 
-  if (S.mode === "online" && now - S.lastSend > NET_SEND_MS) {
-    S.lastSend = now;
+  if (S.mode === "online") {
+    const snow = S.netClock();
     for (const t of S.tanks) {
-      if (t.local && !t.dead && !t.gone) {
-        S.sendPos?.(t.id, { x: +t.x.toFixed(1), y: +t.y.toFixed(1), a: +t.a.toFixed(3), u: +(t.turret ?? t.a).toFixed(3) });
+      if (!t.local || t.dead || t.gone) continue;
+      const last = t.netLast;
+      if (!last) {
+        t.netLast = { x: t.x, y: t.y, a: t.a, u: t.turret ?? t.a, at: snow };
+        continue;
       }
+      const elapsed = snow - last.at;
+      if (elapsed < NET_SEND_MIN_MS) continue;
+      const dx = t.x - last.x, dy = t.y - last.y;
+      const moved = Math.hypot(dx, dy);
+      const turned = Math.abs(angleDiff(last.a, t.a));
+      const slewed = Math.abs(angleDiff(last.u, t.turret ?? t.a));
+      const changed = moved > 1 || turned > 0.02 || slewed > 0.03;
+      // Urgent: a sharp course change — remotes need it NOW or they'll
+      // extrapolate down the old heading and need a big correction.
+      const urgent = turned > 0.14 || moved > CELL * 0.5;
+      const due = (changed && elapsed >= NET_SEND_MS) || (urgent) || elapsed >= NET_IDLE_MS;
+      if (!due) continue;
+      // Velocity from ACTUAL displacement (collisions included), px/s.
+      const vx = +(dx / (elapsed / 1000)).toFixed(1);
+      const vy = +(dy / (elapsed / 1000)).toFixed(1);
+      t.netLast = { x: t.x, y: t.y, a: t.a, u: t.turret ?? t.a, at: snow };
+      S.sendPos?.(t.id, {
+        x: +t.x.toFixed(1), y: +t.y.toFixed(1),
+        a: +t.a.toFixed(3), u: +(t.turret ?? t.a).toFixed(3),
+        vx, vy, t: Math.round(snow),
+      });
     }
   }
 
   setEngine(!S.banner, S.engineMovingLocal, S.engineMovingEnemy);
   draw(now);
   S.raf = requestAnimationFrame(frame);
+}
+
+// Sample a remote tank's snapshot buffer at "now minus the interp
+// delay". Between two buffered states → linear interpolation (angles
+// via shortest arc). Past the newest state (packets late) → dead-
+// reckon along the last reported velocity, damped to a stop across
+// NET_EXTRAP_MS so a silent peer coasts and parks instead of flying.
+function sampleNetState(t) {
+  const buf = t.netBuf;
+  if (!buf || !buf.length) return null;
+  const renderT = S.netClock() - (t.netSkew ?? 0) - NET_INTERP_MS;
+  const newest = buf[buf.length - 1];
+
+  if (renderT >= newest.ts) {
+    // Buffer starved — extrapolate, easing the velocity down.
+    const over = Math.min(renderT - newest.ts, NET_EXTRAP_MS);
+    const ease = 1 - over / NET_EXTRAP_MS;          // 1 → 0
+    const sec = (over / 1000) * (0.5 + 0.5 * ease); // integrated damping
+    return {
+      x: newest.x + newest.vx * sec,
+      y: newest.y + newest.vy * sec,
+      a: newest.a, u: newest.u,
+    };
+  }
+  if (renderT <= buf[0].ts) return { x: buf[0].x, y: buf[0].y, a: buf[0].a, u: buf[0].u };
+
+  // Find the straddling pair (buffer is small — a linear walk is fine).
+  for (let i = buf.length - 2; i >= 0; i--) {
+    const a = buf[i], b = buf[i + 1];
+    if (renderT >= a.ts && renderT <= b.ts) {
+      const f = (renderT - a.ts) / Math.max(1, b.ts - a.ts);
+      return {
+        x: a.x + (b.x - a.x) * f,
+        y: a.y + (b.y - a.y) * f,
+        a: a.a + angleDiff(a.a, b.a) * f,
+        u: a.u + angleDiff(a.u, b.u) * f,
+      };
+    }
+  }
+  return { x: newest.x, y: newest.y, a: newest.a, u: newest.u };
 }
 
 function stepTanks(now, dt) {
@@ -796,6 +989,7 @@ function stepTanks(now, dt) {
             cell: CELL,
             maze: S.maze,
             rects: S.rects,
+            diag: S.diag,
             tanks: S.tanks,
             tankR: TANK_RAD,
             bullets: S.aiBullets ?? S.bullets,
@@ -956,17 +1150,44 @@ function stepTanks(now, dt) {
         }
       }
     } else {
-      // Remote tank: glide toward its last reported transform.
+      // Remote tank. Render it NET_INTERP_MS in the past against the
+      // snapshot buffer: interpolating between two real states while
+      // packets flow, dead-reckoning briefly along the last reported
+      // velocity when a lag spike starves the buffer. The correction
+      // toward the sampled state is RATE-CAPPED, so a burst of stale
+      // packets after a spike eases the tank back on course — it never
+      // teleports (unless the jump is a deliberate one, like a spawn).
       const ox = t.x;
       const oy = t.y;
       const oa = t.a;
-      const k = 1 - Math.exp(-12 * dt);
-      t.x += (t.tx - t.x) * k;
-      t.y += (t.ty - t.y) * k;
-      t.a += angleDiff(t.a, t.ta) * k;
-      // Barrel aim glides toward the reported turret angle (its own
-      // channel, so a remote tank can face one way and aim another).
-      t.turret = (t.turret ?? t.a) + angleDiff(t.turret ?? t.a, t.tu ?? t.a) * k;
+      const st = sampleNetState(t);
+      if (st) {
+        const dxs = st.x - t.x, dys = st.y - t.y;
+        const err = Math.hypot(dxs, dys);
+        if (err > NET_SNAP_DIST) {
+          // A jump this size is by design (round spawn, removal glitch).
+          t.x = st.x; t.y = st.y; t.a = st.a; t.turret = st.u;
+        } else {
+          // Exponential pull with a hard speed ceiling: smooth for
+          // small errors, bounded (no warp) for big ones.
+          const k = 1 - Math.exp(-14 * dt);
+          let mx = dxs * k, my = dys * k;
+          const step = Math.hypot(mx, my);
+          const cap = MOVE_SPEED * NET_CORRECT_SPEED * dt;
+          if (step > cap && step > 0) { mx *= cap / step; my *= cap / step; }
+          t.x += mx;
+          t.y += my;
+          t.a += angleDiff(t.a, st.a) * k;
+          t.turret = (t.turret ?? t.a) + angleDiff(t.turret ?? t.a, st.u) * k;
+        }
+      } else {
+        // No buffer yet (just joined / round start): legacy glide.
+        const k = 1 - Math.exp(-12 * dt);
+        t.x += (t.tx - t.x) * k;
+        t.y += (t.ty - t.y) * k;
+        t.a += angleDiff(t.a, t.ta) * k;
+        t.turret = (t.turret ?? t.a) + angleDiff(t.turret ?? t.a, t.tu ?? t.a) * k;
+      }
 
       // Tracks + dust from the observed motion. Boost state arrives
       // over the shot channel (t.boostUntil), so the upgraded trail —
@@ -1194,14 +1415,21 @@ function fireOffense(t, now) {
 function mortarTarget(t) {
   let ax, ay;
   if (t.bot) {
-    let best = Infinity, e = null;
-    for (const o of S.tanks) {
-      if (o === t || o.dead || o.gone) continue;
-      const d = (o.x - t.x) ** 2 + (o.y - t.y) ** 2;
-      if (d < best) { best = d; e = o; }
+    // The AI supplies a predicted landing point (leads the target by
+    // the shell's travel time). Fall back to the nearest enemy's
+    // current position if it hasn't computed one.
+    if (t.mortarAim) {
+      ax = t.mortarAim.x; ay = t.mortarAim.y;
+    } else {
+      let best = Infinity, e = null;
+      for (const o of S.tanks) {
+        if (o === t || o.dead || o.gone) continue;
+        const d = (o.x - t.x) ** 2 + (o.y - t.y) ** 2;
+        if (d < best) { best = d; e = o; }
+      }
+      if (e) { ax = e.x; ay = e.y; }
+      else { ax = t.x + Math.cos(t.turret ?? t.a) * CELL * 3; ay = t.y + Math.sin(t.turret ?? t.a) * CELL * 3; }
     }
-    if (e) { ax = e.x; ay = e.y; }
-    else { ax = t.x + Math.cos(t.turret ?? t.a) * CELL * 3; ay = t.y + Math.sin(t.turret ?? t.a) * CELL * 3; }
   } else if (hasMouseAim) {
     ax = mouseWorld.x; ay = mouseWorld.y;
   } else if (touchAimActive) {
@@ -1254,7 +1482,7 @@ function detonateMortar(m, now) {
     for (const ring of MORTAR_RINGS) {
       if (d <= ring.r * CELL) { dmg = ring.dmg; break; }
     }
-    if (dmg > 0) damageTank(t, dmg);
+    if (dmg > 0) damageTank(t, dmg, m.by);
   }
 }
 
@@ -1414,7 +1642,7 @@ function stepBullets(now, dt) {
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
           // Authority: in local mode we own everyone; online we only
           // pronounce deaths for tanks simulated on this device.
-          if (S.mode === "local" || t.local) damageTank(t, b.mini ? DMG.mg : DMG.basic);
+          if (S.mode === "local" || t.local) damageTank(t, b.mini ? DMG.mg : DMG.basic, b.by);
           break;
         }
       }
@@ -1633,7 +1861,7 @@ function stepShrink(now) {
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
       const ticks = redZoneTicks(t);
-      if (ticks > 0 && (S.mode === "local" || t.local)) damageTank(t, ticks * ZONE_DMG);
+      if (ticks > 0 && (S.mode === "local" || t.local)) damageTank(t, ticks * ZONE_DMG, null);
     }
   }
 }
@@ -1663,7 +1891,7 @@ function pickGearSpot() {
 }
 
 function fireLaser(byId, x, y, a, now) {
-  const pts = laserPath(x, y, a, S.rects, LASER.shotBounces);
+  const pts = laserPath(x, y, a, S.rects, LASER.shotBounces, S.diag);
   const shooter = S.tanks.find((t) => t.id === byId);
   const cum = [0];
   for (let i = 1; i < pts.length; i++) {
@@ -1734,7 +1962,7 @@ function stepBeams(now) {
           // hit. 8 dmg fresh, −1 per bounce so far, floored at 1.
           bm.inside.add(t.id);
           const dmg = Math.max(1, DMG.laserBase - beamBouncesAt(bm, d));
-          if (S.mode === "local" || t.local) damageTank(t, dmg);
+          if (S.mode === "local" || t.local) damageTank(t, dmg, bm.by);
         } else if (!touching && bm.inside.has(t.id)) {
           bm.inside.delete(t.id); // exited — a later re-entry hits again
         }
@@ -1837,7 +2065,7 @@ function stepRockets(now, dt) {
         if (t.id === rk.by && age < ROCKET.ownerGraceMs) continue;
         if (tankHitPoint(t, rk.x, rk.y, r)) {
           alive = false;
-          if (S.mode === "local" || t.local) damageTank(t, DMG.rocket);
+          if (S.mode === "local" || t.local) damageTank(t, DMG.rocket, rk.by);
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3.5 });
           addFade(rk.x, rk.y, r * 1.4, now);
           break;
@@ -2012,7 +2240,7 @@ function stepSnipes(now, dt) {
       if (tankHitPoint(t, s.x, s.y, r)) {
         alive = false;
         addFade(s.x, s.y, r * 1.4, now);
-        if (S.mode === "local" || t.local) damageTank(t, DMG.sniper);
+        if (S.mode === "local" || t.local) damageTank(t, DMG.sniper, s.by);
         break;
       }
     }
@@ -2060,7 +2288,7 @@ function stepCannons(now, dt) {
       if (t.dead || t.gone) continue;
       if (t.id === c.by && now - c.born < 200) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
-        if (S.mode === "local" || t.local) damageTank(t, DMG.cannonBall);
+        if (S.mode === "local" || t.local) damageTank(t, DMG.cannonBall, c.by);
         explodeCannon(c, now);
         alive = false;
         break;
@@ -2115,7 +2343,7 @@ function stepShrapnel(now, dt) {
         if (tankHitPoint(t, sh.x, sh.y, r)) {
           alive = false;
           addFade(sh.x, sh.y, r * 1.2, now);
-          if (S.mode === "local" || t.local) damageTank(t, DMG.shrapnel);
+          if (S.mode === "local" || t.local) damageTank(t, DMG.shrapnel, sh.by);
           break;
         }
       }
@@ -2131,26 +2359,38 @@ function stepShrapnel(now, dt) {
 // Returns true if this hit destroyed it. Only the authoritative client
 // (local sim, or the tank's owner online) should call this so scores
 // stay consistent — callers already gate on (S.mode === "local" || t.local).
-function damageTank(t, amount) {
+function damageTank(t, amount, byId = null) {
   if (t.dead || t.gone) return false;
   const now = performance.now();
   let dmg = amount;
+  let dealt = 0;
   // Armour shield soaks damage first, while it's active.
   if (now < (t.armourUntil ?? 0) && (t.armour ?? 0) > 0) {
     const soak = Math.min(t.armour, dmg);
     t.armour -= soak;
     dmg -= soak;
+    dealt += soak;
     if (t.armour <= 0) t.armourUntil = 0; // shield spent
   }
   t.lastHitAt = now; // for a brief damage flash
-  if (dmg <= 0) { sfx.hit?.(); return false; } // fully absorbed
-  t.hp = (t.hp ?? TANK_HP) - dmg;
-  if (t.hp <= 0) {
-    killTank(t);
-    return true;
+  let killed = false;
+  if (dmg > 0) {
+    const hpBefore = t.hp ?? TANK_HP;
+    t.hp = hpBefore - dmg;
+    dealt += Math.min(hpBefore, dmg); // don't credit overkill
+    if (t.hp <= 0) { killTank(t); killed = true; }
+    else sfx.hit?.();
+  } else {
+    sfx.hit?.(); // fully absorbed by armour
   }
-  sfx.hit?.();
-  return false;
+  // Match stats: credit the attacker for damage actually inflicted and
+  // for the kill (never self-damage, never the environment).
+  if (byId && byId !== t.id && dealt > 0) {
+    S.dmgBy = S.dmgBy ?? {};
+    S.dmgBy[byId] = (S.dmgBy[byId] ?? 0) + dealt;
+    if (killed) { S.killsBy = S.killsBy ?? {}; S.killsBy[byId] = (S.killsBy[byId] ?? 0) + 1; }
+  }
+  return killed;
 }
 
 function killTank(t) {
@@ -2180,6 +2420,41 @@ function isLocalHuman(t) {
 function maybeEndRound(now) {
   if (S.banner || S.roundStartCount < 2) return;
   const alive = S.tanks.filter((t) => !t.dead && !t.gone);
+
+  if (S.teams) {
+    // TEAM match (2v2): the round runs while BOTH teams still have a
+    // tank standing. When one team is wiped, every member of the other
+    // team banks the round win — dead or alive ("if your teammate wins
+    // the round, you also win the round").
+    const aliveTeams = new Set(alive.map((t) => S.teams[t.id] ?? 0));
+    if (aliveTeams.size > 1) return;
+
+    const winTeam = aliveTeams.size === 1 ? [...aliveTeams][0] : null;
+    if (winTeam != null) {
+      let top = 0;
+      for (const p of S.roster) {
+        if ((S.teams[p.id] ?? 0) !== winTeam) continue;
+        S.scores[p.id] = (S.scores[p.id] ?? 0) + 1;
+        top = Math.max(top, S.scores[p.id]);
+      }
+      if (S.ranked && top >= (S.winTarget ?? 5)) S.matchOver = true;
+      S.banner = { silent: true };
+      // The LOCAL player's team winning is a personal Victory — even
+      // if their own tank died earlier in the round.
+      const meTank = S.tanks.find((t) => (S.mode === "online" ? t.id === S.myId : !t.bot));
+      if (meTank && (S.teams[meTank.id] ?? 0) === winTeam) {
+        S.personalMsg = { text: "Victory", color: "#ffd23f", born: now, kind: "win" };
+      }
+      sfx.roundEnd();
+    } else {
+      S.banner = { silent: true }; // both teams wiped — a draw
+      sfx.roundEnd();
+    }
+    S.roundOverAt = now;
+    updateScoreHUD();
+    return;
+  }
+
   if (alive.length > 1) return;
 
   const w = alive[0] ?? null;
@@ -2207,7 +2482,11 @@ function maybeEndRound(now) {
 
 function updateScoreHUD() {
   if (!scoreEl || !S) return;
-  scoreEl.innerHTML = S.roster
+  // Team matches list teammates side by side (team 0 first).
+  const order = S.teams
+    ? [...S.roster].sort((a, b) => (S.teams[a.id] ?? 0) - (S.teams[b.id] ?? 0))
+    : S.roster;
+  scoreEl.innerHTML = order
     .map((p) => {
       const label = p.name ?? (S.mode === "local" ? SLOT_NAMES[p.slot ?? p.color] : null) ?? COLOR_NAMES[p.color];
       return `<div class="sc-card p-${p.color}">
@@ -2846,6 +3125,13 @@ function draw(now) {
         loadoutHudEl._sig = sig;
         for (const cv of loadoutHudEl.querySelectorAll(".loadout-icon")) {
           drawLoadoutIcon(cv, items[cv.dataset.cat]);
+        }
+        // Caption each slot with the equipped ability's name in its own
+        // colour (blank when the slot is empty) — no more keybind text.
+        for (const lbl of loadoutHudEl.querySelectorAll(".loadout-key")) {
+          const type = items[lbl.dataset.cat];
+          lbl.textContent = type ? (WEAPON_LABEL[type] ?? type) : "";
+          lbl.style.color = type ? (GEAR_RIM[type] ?? "#e8eefc") : "";
         }
       }
     }
