@@ -938,11 +938,13 @@ body {
 }
 .loadout-key {
   font-family: "Black Ops One", system-ui;
-  font-size: clamp(.5rem, 1.1vw, .66rem);
-  letter-spacing: .06em;
+  font-size: clamp(.5rem, 1.1vw, .68rem);
+  letter-spacing: .04em;
   color: #aab2c2;
-  text-shadow: 0 2px 4px rgba(0,0,0,.6);
+  text-shadow: 0 2px 4px rgba(0,0,0,.7);
   white-space: nowrap;
+  min-height: .8em;
+  text-align: center;
 }
 
 /* Health readout, bottom-left of the arena: pips (hearts) plus a
@@ -1129,3 +1131,96 @@ body {
     transition: none !important;
   }
 }
+
+/* ---- 2v2 duo (team party) panel on the Ranked screen ---- */
+#duo-panel {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--rivet);
+  border-radius: 10px;
+  background: rgba(255,255,255,.03);
+}
+.duo-code {
+  margin: 0 0 6px;
+  font-family: "Black Ops One", system-ui;
+  letter-spacing: .06em;
+  color: #cfe6ff;
+}
+.duo-members { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.duo-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--rivet);
+  border-radius: 999px;
+  background: rgba(255,255,255,.04);
+}
+.duo-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.duo-input {
+  width: 7.5ch;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--rivet);
+  background: #161a22;
+  color: var(--chalk);
+  font-family: "Chakra Petch", system-ui;
+  letter-spacing: .12em;
+}
+#ranked-queue:disabled { opacity: .45; cursor: not-allowed; }
+
+.btn-link {
+  background: none;
+  border: none;
+  color: #7fb0ff;
+  font-family: "Chakra Petch", system-ui;
+  font-size: .85rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px;
+  align-self: flex-start;
+}
+.btn-link:hover { color: #a9caff; }
+.btn-link:disabled { opacity: .5; cursor: default; }
+
+/* ---- ranked results scoreboard ---- */
+.results-body { width: min(94vw, 560px); margin: 4px auto 14px; }
+.res-winner {
+  text-align: center;
+  font-family: "Black Ops One", system-ui;
+  font-size: clamp(1.2rem, 4vw, 1.8rem);
+  margin: 0 0 14px;
+  letter-spacing: .04em;
+}
+.res-winner.res-win { color: #ffd23f; text-shadow: 0 2px 10px rgba(255,210,63,.4); }
+.res-winner.res-lose { color: #9aa3b2; }
+.res-head, .res-row {
+  display: grid;
+  grid-template-columns: 1fr 4.5rem 4rem 4.5rem;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+}
+.res-head {
+  font-family: "Chakra Petch", system-ui;
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: #808896;
+  border-bottom: 1px solid var(--rivet);
+}
+.res-head span:not(:first-child), .res-row .res-stat, .res-row .res-elo { text-align: center; }
+.res-rows { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.res-row {
+  border-radius: 8px;
+  background: rgba(255,255,255,.03);
+  border-left: 4px solid var(--tank, #808896);
+}
+.res-row.res-me { background: rgba(127,176,255,.12); }
+.res-row.team-0 { border-left-color: #4a9eff; }
+.res-row.team-1 { border-left-color: #ff6a4d; }
+.res-name { display: flex; align-items: center; gap: 6px; font-family: "Chakra Petch", system-ui; font-weight: 600; }
+.res-stat b, .res-elo { font-family: "Black Ops One", system-ui; font-size: 1.05rem; }
+.res-stat em, .res-elo em { display: block; font-size: .55rem; font-style: normal; color: #808896; letter-spacing: .08em; }
+.res-elo.elo-up { color: #4bd08a; }
+.res-elo.elo-down { color: #ff6a4d; }
