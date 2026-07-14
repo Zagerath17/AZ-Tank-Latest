@@ -36,7 +36,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.5</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -70,7 +70,15 @@
           <button class="btn btn-go" id="login-signin" type="button">Sign in</button>
           <button class="btn" id="login-create" type="button">Create account</button>
         </div>
+        <button class="btn-link" id="login-forgot" type="button">Forgot password?</button>
       </div>
+    </section>
+
+    <!-- ============ RANKED RESULTS ============ -->
+    <section class="screen screen-center" id="screen-results" aria-label="Match results">
+      <h2>Match Results</h2>
+      <div class="results-body" id="results-body"></div>
+      <button class="btn btn-big btn-go" id="results-continue" type="button">Continue</button>
     </section>
 
     <!-- ============ VERSUS (loading / sync) ============ -->
@@ -88,7 +96,19 @@
       </header>
       <div class="settings-tabs">
         <button class="btn tab-btn is-on" id="ranked-tab-1v1" type="button">1v1</button>
-        <button class="btn tab-btn" id="ranked-tab-4p" type="button">FFA</button>
+        <button class="btn tab-btn" id="ranked-tab-2v2" type="button">2v2</button>
+      </div>
+      <div id="duo-panel" hidden>
+        <p class="duo-code" id="duo-code"></p>
+        <div class="duo-members" id="duo-members"></div>
+        <div class="duo-actions">
+          <button class="btn" id="duo-create" type="button">CREATE TEAM</button>
+          <span id="duo-join-row">
+            <input class="duo-input" id="duo-code-input" inputmode="numeric" maxlength="4" placeholder="team code">
+            <button class="btn" id="duo-join" type="button">JOIN</button>
+          </span>
+          <button class="btn" id="duo-leave" type="button" hidden>LEAVE TEAM</button>
+        </div>
       </div>
       <p class="rank-mybadge" id="ranked-mybadge">Loading…</p>
       <button class="btn btn-big btn-go" id="ranked-queue" type="button">FIND MATCH</button>
@@ -256,15 +276,15 @@
         <div class="loadout-hud" id="loadout-hud" hidden>
           <div class="loadout-slot">
             <canvas class="loadout-icon" data-cat="offense" width="112" height="112"></canvas>
-            <span class="loadout-key">LMB</span>
+            <span class="loadout-key" data-cat="offense"></span>
           </div>
           <div class="loadout-slot">
             <canvas class="loadout-icon" data-cat="defense" width="112" height="112"></canvas>
-            <span class="loadout-key">RMB</span>
+            <span class="loadout-key" data-cat="defense"></span>
           </div>
           <div class="loadout-slot">
             <canvas class="loadout-icon" data-cat="agility" width="112" height="112"></canvas>
-            <span class="loadout-key">SHIFT</span>
+            <span class="loadout-key" data-cat="agility"></span>
           </div>
         </div>
       </div>
