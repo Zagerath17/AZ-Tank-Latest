@@ -85,6 +85,65 @@ function validName(name) {
   return /^[a-z0-9_]{3,16}$/i.test(name.trim());
 }
 
+// The account-settings modal: change username, reset password, log
+// out, or close. Opened by tapping the profile chip.
+function openAccountPanel() {
+  if (!account) return;
+  const modal = document.getElementById("account-modal");
+  if (!modal) return;
+  document.getElementById("acct-who").textContent = account.name;
+  const nameInput = document.getElementById("acct-newname");
+  nameInput.value = account.name;
+  const msg = document.getElementById("acct-msg");
+  msg.textContent = "";
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; cleanup(); };
+  const onSave = async () => {
+    msg.textContent = "";
+    try {
+      await changeUsername(nameInput.value);
+      msg.style.color = "#4bd08a";
+      msg.textContent = "Username updated.";
+      document.getElementById("acct-who").textContent = account.name;
+    } catch (e) {
+      msg.style.color = "#ff6a4d";
+      msg.textContent = e?.message ?? "Couldn't change that.";
+    }
+  };
+  const onReset = async () => {
+    msg.textContent = "";
+    try {
+      const a = await ensureAuth();
+      const f = await ensureFirebase();
+      const email = (await f.get(f.ref(f.db, `users/${account.key}/email`))).val();
+      if (!email) throw new Error("No email on file — sign in with your email once first.");
+      await a.sendReset(a.auth, email);
+      msg.style.color = "#4bd08a";
+      msg.textContent = "Password-reset email sent.";
+    } catch (e) {
+      msg.style.color = "#ff6a4d";
+      msg.textContent = e?.message ?? "Couldn't send the reset email.";
+    }
+  };
+  const onLogout = () => { close(); logout(); };
+
+  const saveBtn = document.getElementById("acct-save");
+  const resetBtn = document.getElementById("acct-reset");
+  const logoutBtn = document.getElementById("acct-logout");
+  const closeBtn = document.getElementById("acct-close");
+  saveBtn.addEventListener("click", onSave);
+  resetBtn.addEventListener("click", onReset);
+  logoutBtn.addEventListener("click", onLogout);
+  closeBtn.addEventListener("click", close);
+  function cleanup() {
+    saveBtn.removeEventListener("click", onSave);
+    resetBtn.removeEventListener("click", onReset);
+    logoutBtn.removeEventListener("click", onLogout);
+    closeBtn.removeEventListener("click", close);
+  }
+}
+
 /* ---------- Firebase Auth (email + password) ---------- */
 
 async function ensureAuth() {
@@ -138,6 +197,7 @@ async function adoptProfile(uid, wantName = null, email = null) {
       [`users/${key}/uid`]: uid,
       [`users/${key}/createdAt`]: Date.now(),
       [`uids/${uid}`]: key,
+      [`names/${key}`]: key, // username registry (key == keyOf(name) here)
     });
   }
 
@@ -163,17 +223,47 @@ async function adoptProfile(uid, wantName = null, email = null) {
 }
 
 // Resolve a sign-in identifier: an email passes through; a username
-// looks up the email stored on that profile.
+// resolves through the name registry (names/{nameKey} → accountKey),
+// falling back to the legacy direct lookup for old accounts.
 async function resolveEmail(identifier) {
   const id = (identifier ?? "").trim();
   if (!id) throw new Error("Enter your email or username.");
   if (id.includes("@")) return id;
   const f = await ensureFirebase();
-  const email = (await f.get(f.ref(f.db, `users/${keyOf(id)}/email`))).val();
+  const acctKey = (await f.get(f.ref(f.db, `names/${keyOf(id)}`))).val() ?? keyOf(id);
+  const email = (await f.get(f.ref(f.db, `users/${acctKey}/email`))).val();
   if (!email) {
     throw new Error("No email on file for that username yet — sign in with your email once.");
   }
   return email;
+}
+
+// Change the account's DISPLAY name. The underlying account key never
+// moves (friends, ratings, and history stay intact); we just update
+// the shown name, register the new name for username sign-in, and fix
+// the leaderboard mirrors.
+export async function changeUsername(newName) {
+  if (!account) throw new Error("Log in first.");
+  const name = (newName ?? "").trim();
+  if (!validName(name)) throw new Error("Usernames are 3–16 letters, numbers, or _.");
+  if (name === account.name) throw new Error("That's already your username.");
+  const f = await ensureFirebase();
+  const nameKey = keyOf(name);
+  // Free unless it's already an alias pointing back at me.
+  const owner = (await f.get(f.ref(f.db, `names/${nameKey}`))).val();
+  const userAtKey = (await f.get(f.ref(f.db, `users/${nameKey}/uid`))).val();
+  if ((owner && owner !== account.key) || (userAtKey && userAtKey !== account.uid)) {
+    throw new Error("That username is taken.");
+  }
+  const updates = {
+    [`users/${account.key}/name`]: name,
+    [`names/${nameKey}`]: account.key,
+    [`leaderboard/elo1/${account.key}/name`]: name,
+    [`leaderboard/elo2v2/${account.key}/name`]: name,
+  };
+  await f.update(f.ref(f.db), updates);
+  account = { ...account, name };
+  refreshLoginButton();
 }
 
 export async function doSignIn(identifier, pass) {
@@ -400,8 +490,12 @@ function startListening() {
       fb2.get(fb2.ref(fb2.db, `users/${from}/name`)).then((s) => {
         const who = s.val() ?? from;
         if (data.kind === "duo") {
-          // A 2v2 team invite — accepting seats you in their duo.
+          // A 2v2 team invite — accepting seats you in their duo. The
+          // invite is consumed either way so it can't re-fire later.
+          const consume = () =>
+            fb2.remove(fb2.ref(fb2.db, `users/${account.key}/invites/${from}`)).catch(() => {});
           showBanner(`${who} invited you to their 2v2 team`, "JOIN", async () => {
+            consume();
             try {
               const m = await import("./ranked.js");
               await m.joinDuo(String(data.code));
@@ -410,7 +504,7 @@ function startListening() {
             } catch (e) {
               toast(e?.message ?? "Couldn't join that team.");
             }
-          });
+          }, consume);
           return;
         }
         showBanner(`${who} invited you to lobby ${data.code}`, "JOIN", async () => {
@@ -693,11 +787,8 @@ export function initSocial() {
   }
 
   document.getElementById("menu-login").addEventListener("click", () => {
-    if (account) {
-      if (window.confirm(`Log out ${account.name}? This device will forget your data.`)) logout();
-    } else {
-      showScreen("screen-login");
-    }
+    if (account) openAccountPanel();
+    else showScreen("screen-login");
   });
 
   // The login form.

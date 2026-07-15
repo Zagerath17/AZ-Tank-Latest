@@ -105,49 +105,36 @@ export const MUD = {
 
 // Mortar: indirect fire. The shot is aimed at the mouse, snapped to
 // the centre of that cell (max reach rangeCells), arcs high over
-// everything, and lands after a flight whose SPEED GROWS as it goes:
-// it leaves at baseCellsPerSec and gains +50% for every full cell
-// traveled (cell 1 at 2 c/s, cell 2 at 3, cell 3 at 4.5, ...). A
-// pulsing red marker warns the landing cell; impact throws a dark
-// smoke cloud over it. Damage rings live in game code.
+// everything, and lands after a flight whose SPEED RAMPS LINEARLY
+// with distance covered: v(s) = base × (1 + accelPerCell × s) — it
+// leaves at 2 cells/s and is 40% faster after each cell, smoothly
+// (no stepwise jumps). A pulsing red marker warns the landing cell;
+// impact throws a dark smoke cloud over it.
 export const MORTAR = {
   rangeCells: 5,
   baseCellsPerSec: 2,   // launch speed
-  accelPerCell: 1.5,    // ×1.5 after each full cell traveled
+  accelPerCell: 0.4,    // +40% of base per cell traveled (linear ramp)
   cloudMs: 1100,        // the dark cloud lingers this long
 };
 
-// Total flight time (ms) to cover `distCells`, cell by cell.
+// Total flight time (ms) to cover `distCells`:
+//   T(d) = ln(1 + k·d) / (k·v0)   with k = accelPerCell, v0 = base.
 export function mortarFlightMs(distCells) {
-  let ms = 0;
-  let v = MORTAR.baseCellsPerSec;
-  let left = Math.max(0, distCells);
-  while (left > 0) {
-    const seg = Math.min(1, left);
-    ms += (seg / v) * 1000;
-    left -= seg;
-    v *= MORTAR.accelPerCell;
-  }
-  return Math.max(280, ms);
+  const d = Math.max(0, distCells);
+  const k = MORTAR.accelPerCell;
+  const v0 = MORTAR.baseCellsPerSec;
+  const sec = k > 0 ? Math.log(1 + k * d) / (k * v0) : d / v0;
+  return Math.max(280, sec * 1000);
 }
 
-// Distance covered (in cells) after `elapsedMs` of a `distCells`
-// flight — the inverse of mortarFlightMs, for drawing the shell.
+// Distance covered (cells) after `elapsedMs` — the exact inverse:
+//   s(t) = (e^(k·v0·t) − 1) / k.
 export function mortarDistAt(elapsedMs, distCells) {
-  let msLeft = Math.max(0, elapsedMs);
-  let v = MORTAR.baseCellsPerSec;
-  let gone = 0;
-  let left = Math.max(0, distCells);
-  while (left > 0) {
-    const seg = Math.min(1, left);
-    const segMs = (seg / v) * 1000;
-    if (msLeft < segMs) return gone + (msLeft / segMs) * seg;
-    msLeft -= segMs;
-    gone += seg;
-    left -= seg;
-    v *= MORTAR.accelPerCell;
-  }
-  return distCells;
+  const t = Math.max(0, elapsedMs) / 1000;
+  const k = MORTAR.accelPerCell;
+  const v0 = MORTAR.baseCellsPerSec;
+  const s = k > 0 ? (Math.exp(k * v0 * t) - 1) / k : v0 * t;
+  return Math.min(distCells, s);
 }
 
 // A temporary brick wall the player drops. It BLOCKS movement and
@@ -181,7 +168,7 @@ export const ROCKET = {
   r: 1.4,
   lifeMs: 8000,       // 8 s fuse, then it detonates harmlessly
   seekRangeCells: 4.5, // it can only smell tanks this close
-  ownerGraceMs: 1000, // can't collide with its shooter right away
+  ownerGraceMs: 500,  // can't collide with its shooter right away
   trailLen: 26,
 };
 

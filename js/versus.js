@@ -45,7 +45,9 @@ async function recordVsDuo(f, mateKey, oppKeys) {
 
 // Render the versus card. roster: [{ id, name, color, ukey, bot }].
 // teams (2v2 only): { [ukey]: 0|1 }; players: [[id, p]] to map ukeys.
-export async function showVersus(roster, myId, mode, teams = null, players = []) {
+// ranked=false (custom lobbies): the card still loads, but there's no
+// win/loss ledger to show — those records are a ranked-only thing.
+export async function showVersus(roster, myId, mode, teams = null, players = [], ranked = true) {
   const acc = getAccount();
   const host = document.getElementById("versus-body");
   // players may arrive as entries ([[id, p]]) or an id→p object.
@@ -80,7 +82,7 @@ export async function showVersus(roster, myId, mode, teams = null, players = [])
     <div class="vs-mid"><span class="vs-vs">VS</span><span class="vs-ratio-dash">-</span></div>
     <div class="vs-side vs-foes">${foes.map((f, i) => spriteBlock(f, false, i === 0 ? "foe" : "")).join("")}</div>`;
 
-  if (!acc) return;
+  if (!acc || !ranked) return; // custom lobby: card only, no records
   try {
     const f = await ensureFirebase();
     const myBox = host.querySelector('.vs-score[data-side="me"]');

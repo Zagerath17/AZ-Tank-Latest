@@ -815,7 +815,14 @@ function steerTo(t, px, py, acts, world, rBody, allowReverse = true, revThresh =
   // DRIVE. Exception: wedged against a wall the hull can't physically
   // pivot, so backing out along its own axis is the only move.
   const trip = Math.hypot(px - t.x, py - t.y);
-  const canPivot = corridorClear(t.x, t.y, t.x, t.y, world.rects, rBody);
+  // "Pinned" = the hull can't slip forward OR back a hair, so an
+  // in-place pivot would just grind the wall — then backing out along
+  // the axis is the only move. (The old start==end probe was always
+  // clear, so this never triggered.)
+  const nudge = world.cell * 0.3;
+  const fwdClear = corridorClear(t.x, t.y, t.x + Math.cos(t.a) * nudge, t.y + Math.sin(t.a) * nudge, world.rects, rBody);
+  const backClear = corridorClear(t.x, t.y, t.x - Math.cos(t.a) * nudge, t.y - Math.sin(t.a) * nudge, world.rects, rBody);
+  const canPivot = fwdClear || backClear;
   if (allowReverse && (trip < world.cell * 1.25 || !canPivot) && Math.abs(err) > revThresh) {
     let ok = true;
     if (revProbe) {
@@ -830,15 +837,22 @@ function steerTo(t, px, py, acts, world, rBody, allowReverse = true, revThresh =
   }
   if (err > 0.04) acts.right = true;
   else if (err < -0.04) acts.left = true;
-  // Commit to moving through the turn: drive whenever we're roughly
-  // pointed the right way (wider cone than before), so the bot flows
-  // around corners instead of stopping dead to aim at every waypoint.
-  // Reversing keeps the tighter cone — backing up at an angle is how
-  // tanks clip corners.
   if (rev) {
     if (Math.abs(err) < 0.5) acts.down = true;
-  } else if (Math.abs(err) < 0.95) {
+  } else if (Math.abs(err) < 0.35) {
+    // Well-aligned — drive with confidence (straightaways included).
     acts.up = true;
+  } else if (Math.abs(err) < 0.95) {
+    // Mid-turn (rounding a corner): only commit forward if the hull's
+    // ACTUAL path ahead — in the direction it's currently facing, at
+    // FULL body width — is clear. Otherwise the swinging shoulder digs
+    // into the inner corner and pins the tank (the old corner-stick).
+    // When it isn't clear the tank keeps pivoting in place, staying off
+    // the wall where it can still rotate freely.
+    const ahead = world.cell * 0.62;
+    const fx = t.x + Math.cos(t.a) * ahead;
+    const fy = t.y + Math.sin(t.a) * ahead;
+    if (corridorClear(t.x, t.y, fx, fy, world.rects, rBody)) acts.up = true;
   }
 }
 

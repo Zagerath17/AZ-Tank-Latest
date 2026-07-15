@@ -25,7 +25,8 @@
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, tankSVG } from "./main.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
-import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats } from "./game.js";
+import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
+import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats, GEAR_CAP_LIMIT } from "./game.js";
 import * as social from "./social.js";
 import { rankBadge, applyMatchResult } from "./ranked.js";
 import { showVersus, recordResult } from "./versus.js";
@@ -220,6 +221,16 @@ export function lobbyPeers() {
 }
 
 // Fire-and-forget write helper used by the in-game streams.
+// Several lobby paths in one atomic update.
+function writeMany(map) {
+  if (!current || !fb) return;
+  try {
+    const full = {};
+    for (const [k, v] of Object.entries(map)) full[`lobbies/${current.code}/${k}`] = v;
+    fb.update(fb.ref(fb.db), full).catch(() => {});
+  } catch (e) { /* dropped packet beats a freeze */ }
+}
+
 function write(path, value) {
   if (!current || !fb) return;
   // try/catch as well as .catch(): an invalid path makes ref() throw
@@ -249,6 +260,7 @@ async function createLobby() {
       hostId: myId(),
       state: "waiting",
       hideCode: localStorage.getItem("tank.hideCode.v1") === "1",
+      settings: defaultSettings(),
       players: { [myId()]: {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
@@ -435,18 +447,113 @@ async function removeBot(id) {
   await f.remove(f.ref(f.db, `lobbies/${current.code}/players/${id}`));
 }
 
-// The code display honors this device's hide toggle — keep the room
-// number off-screen while streaming. Copy still copies the real code.
-// This is a LOCAL preference (not synced): anyone can hide their own
-// view without affecting other players.
+// The code display follows the HOST's synced toggle: when the host
+// hides the code (handy while streaming), it's hidden for everyone in
+// the room, and only the host gets the button. Copy still copies the
+// real code for whoever already has it.
 function renderLobbyCode(code, lobby) {
-  const hidden = localStorage.getItem("tank.hideCode.v1") === "1";
+  const hidden = !!lobby?.hideCode;
   const el = document.getElementById("lobby-code");
   if (el) el.textContent = hidden ? "••••" : (code ?? "····");
   const btn = document.getElementById("lobby-hide");
   if (btn) {
     btn.textContent = hidden ? "SHOW" : "HIDE";
-    btn.hidden = false; // available to everyone, host or not
+    // Host only — everyone else just sees the result.
+    btn.hidden = !lobby || lobby.hostId !== myId();
+  }
+  const copy = document.getElementById("lobby-copy");
+  if (copy) copy.hidden = hidden && lobby?.hostId !== myId();
+}
+
+/* ---------- custom-lobby match settings (host-controlled) ---------- */
+
+const SIZE_KEYS = ["small", "medium", "large", "xl"];
+const SIZE_LABEL = { small: "Small", medium: "Medium", large: "Large", xl: "Extra large" };
+
+function defaultSettings() {
+  const gear = {};
+  for (const w of WEAPON_TYPES) gear[w] = true;
+  const sizes = {};
+  for (const k of SIZE_KEYS) sizes[k] = true;
+  return { sizes, gear, gearMax: 24 };
+}
+
+// Normalize whatever's on the lobby into a complete settings object —
+// old lobbies (no settings node) and partial writes both land on the
+// defaults rather than breaking the match.
+function readSettings(lobby) {
+  const d = defaultSettings();
+  const s = lobby?.settings ?? {};
+  const sizes = {};
+  for (const k of SIZE_KEYS) sizes[k] = s.sizes?.[k] ?? d.sizes[k];
+  const gear = {};
+  for (const w of WEAPON_TYPES) gear[w] = s.gear?.[w] ?? d.gear[w];
+  const max = Math.max(1, Math.min(GEAR_CAP_LIMIT, s.gearMax ?? d.gearMax));
+  return { sizes, gear, gearMax: max };
+}
+
+function settingsToOpts(lobby) {
+  const s = readSettings(lobby);
+  const sizePool = SIZE_KEYS.filter((k) => s.sizes[k]);
+  const gearPool = WEAPON_TYPES.filter((w) => s.gear[w]);
+  return {
+    sizePool: sizePool.length ? sizePool : SIZE_KEYS,
+    gearPool, // may be empty — that means "no pickups this match"
+    gearMax: s.gearMax,
+  };
+}
+
+// The host's settings panel. Guests never see it; the host's edits
+// write straight to the lobby so everyone's match uses them.
+function renderSettings(lobby, isHost) {
+  const panel = document.getElementById("lobby-settings");
+  if (!panel) return;
+  // Ranked lobbies are fixed by the ladder — no knobs.
+  panel.hidden = !isHost || !!lobby.ranked;
+  if (panel.hidden) return;
+  const s = readSettings(lobby);
+
+  const sizesEl = document.getElementById("set-sizes");
+  sizesEl.innerHTML = SIZE_KEYS.map((k) => `
+    <button class="btn btn-small set-chip ${s.sizes[k] ? "is-on" : ""}"
+            data-size="${k}" type="button">${SIZE_LABEL[k]}</button>`).join("");
+  sizesEl.querySelectorAll("[data-size]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const k = b.dataset.size;
+      const next = { ...s.sizes, [k]: !s.sizes[k] };
+      if (!SIZE_KEYS.some((x) => next[x])) { toast("Keep at least one map size."); return; }
+      write(`settings/sizes/${k}`, next[k]);
+    });
+  });
+
+  const gearEl = document.getElementById("set-gear");
+  gearEl.innerHTML = WEAPON_TYPES.map((w) => `
+    <button class="btn btn-small set-chip ${s.gear[w] ? "is-on" : ""}"
+            data-gear="${w}" type="button">${WEAPON_LABEL[w] ?? w}</button>`).join("");
+  gearEl.querySelectorAll("[data-gear]").forEach((b) => {
+    b.addEventListener("click", () => write(`settings/gear/${b.dataset.gear}`, !s.gear[b.dataset.gear]));
+  });
+
+  const slider = document.getElementById("set-max");
+  const valEl = document.getElementById("set-max-val");
+  slider.max = String(GEAR_CAP_LIMIT);
+  slider.value = String(s.gearMax);
+  valEl.textContent = String(s.gearMax);
+  slider.oninput = () => { valEl.textContent = slider.value; };
+  slider.onchange = () => write("settings/gearMax", Math.max(1, Math.min(GEAR_CAP_LIMIT, +slider.value)));
+
+  const on = WEAPON_TYPES.filter((w) => s.gear[w]).length;
+  const note = document.getElementById("set-note");
+  if (!on) {
+    note.textContent = "No abilities selected — this match spawns no pickups.";
+  } else {
+    // The field fills evenly: every greenlit ability reaches this
+    // depth before any of them goes deeper.
+    const each = Math.floor(s.gearMax / on);
+    const extra = s.gearMax % on;
+    note.textContent = each < 1
+      ? `${s.gearMax} on the field, cycling through ${on} abilit${on === 1 ? "y" : "ies"}.`
+      : `${on} abilities · ${each} of each` + (extra ? `, plus a ${each + 1}${each + 1 === 2 ? "nd" : each + 1 === 3 ? "rd" : "th"} of ${extra}.` : ".");
   }
 }
 
@@ -497,9 +604,13 @@ function handleSnapshot(code, snap) {
     } else if (!current.inGame && current.versusShown) {
       maybeBeginFromReady(code, lobby);
     } else if (current.inGame) {
-      if (humans.length === 1 && humans[0][0] === me) {
+      if (humans.length === 1 && humans[0][0] === me && !lobby.ranked) {
+        // Casual: alone with bots → back to the lobby.
         returnToLobbySolo(entries);
       } else {
+        // Ranked stays in-match even when the last opponent bails —
+        // onlineLobbyUpdate turns that into an automatic 3:0 win and
+        // the results screen follows.
         onlineLobbyUpdate(lobby);
       }
     }
@@ -563,7 +674,7 @@ function enterVersus(code, lobby) {
     id, name: p.name ?? null, color: resolved[id], ukey: p.ukey ?? null, bot: p.bot ?? null,
   }));
   showVersus(roster, me, lobby.rankedMode ?? "1v1",
-    lobby.teams ?? null, current?.playersCache ?? []);
+    lobby.teams ?? null, current?.playersCache ?? [], !!lobby.ranked);
   showScreen("screen-versus");
 
   // Announce readiness (informational — the shared clock, not this
@@ -652,9 +763,14 @@ function beginOnlineGame(code, lobby) {
     current.rankedSettled = false;
   }
 
+  const setOpts = settingsToOpts(lobby);
   startOnlineGame({
     ranked: !!lobby.ranked,
     serverNow, // shared match clock (device clock + Firebase offset)
+    // Custom lobbies honour the host's panel; ranked ignores it.
+    sizePool: lobby.ranked ? null : setOpts.sizePool,
+    gearPool: lobby.ranked ? null : setOpts.gearPool,
+    gearMax: lobby.ranked ? null : setOpts.gearMax,
     teams: teamsById,
     winTarget: lobby.ranked ? 3 : null, // both ladders: first to 3
     casualPlayers: !lobby.ranked ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
@@ -763,6 +879,7 @@ function renderLobby(code, lobby) {
   // ranked lobbies are matchmade: no invites, no bots, auto-start.
   const socialBtn = document.getElementById("lobby-social");
   socialBtn.hidden = !(isHost && social.getAccount()) || !!lobby.ranked;
+  renderSettings(lobby, isHost);
   if (lobby.ranked) {
     document.getElementById("lobby-addbot").hidden = true;
     document.getElementById("lobby-start").hidden = true;
@@ -942,19 +1059,42 @@ export function initOnline() {
   const createBtn = document.getElementById("btn-create");
   const joinBtn = document.getElementById("btn-join");
   const startBtn = document.getElementById("lobby-start");
-  // The HOST's toggle hides the code for the whole lobby (synced —
-  // Hiding the code is a local, per-device toggle (handy while
-  // streaming). It flips this device's preference and re-renders at
-  // once — no host check, no server round-trip.
+  // The HOST's toggle hides the code for the WHOLE lobby: it's written
+  // to the lobby node, so every client's snapshot hides it together.
   const hideBtn = document.getElementById("lobby-hide");
   hideBtn.addEventListener("click", () => {
-    const now = localStorage.getItem("tank.hideCode.v1") === "1";
-    localStorage.setItem("tank.hideCode.v1", now ? "0" : "1");
-    renderLobbyCode(current?.code, current?.lastLobby);
+    if (!current?.isHost) return; // guests don't get a say (button is hidden anyway)
+    const next = !current?.lastLobby?.hideCode;
+    localStorage.setItem("tank.hideCode.v1", next ? "1" : "0"); // remembered for my next lobby
+    if (current.lastLobby) current.lastLobby.hideCode = next;   // instant local paint
+    renderLobbyCode(current.code, current.lastLobby);
+    write("hideCode", next);
   });
 
   document.getElementById("lobby-social").addEventListener("click", () => {
     social.toggleInvitePanel();
+  });
+
+  // Match settings fold open/shut (host-only panel).
+  const setToggle = document.getElementById("settings-toggle");
+  setToggle?.addEventListener("click", () => {
+    const body = document.getElementById("settings-body");
+    const caret = document.getElementById("settings-caret");
+    if (!body) return;
+    body.hidden = !body.hidden;
+    if (caret) caret.textContent = body.hidden ? "▾" : "▴";
+  });
+  document.getElementById("set-gear-all")?.addEventListener("click", () => {
+    if (!current?.isHost) return;
+    const up = {};
+    for (const w of WEAPON_TYPES) up[`settings/gear/${w}`] = true;
+    writeMany(up);
+  });
+  document.getElementById("set-gear-none")?.addEventListener("click", () => {
+    if (!current?.isHost) return;
+    const up = {};
+    for (const w of WEAPON_TYPES) up[`settings/gear/${w}`] = false;
+    writeMany(up);
   });
 
   const copyBtn = document.getElementById("lobby-copy");

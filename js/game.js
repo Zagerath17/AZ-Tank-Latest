@@ -40,10 +40,13 @@ const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
 const TURRET_TURN_SPEED = TURN_SPEED * 1.2 * 0.9; // 1.2× hull, then a 10% turret debuff
 
 const GEAR_R = 14;             // pickup grab radius (added to the tank's)
-const GEAR_TYPE_MAX = 2;       // at most this many of any ONE ability on the map
-const GEAR_MAX = WEAPON_TYPES.length * GEAR_TYPE_MAX; // field cap = 2× the ability roster
-const GEAR_FIRST_MS = 3500;    // first pickup after round start
-const GEAR_EVERY_MS = 5500;    // then every 5.5–9 s
+const GEAR_TYPE_MAX = 2;       // default depth: this many of each ability
+const GEAR_MAX = WEAPON_TYPES.length * GEAR_TYPE_MAX; // default field cap (24)
+export const GEAR_CAP_LIMIT = 30; // the highest a host can set the cap
+const GEAR_FIRST_MS = 2500;    // first pickup after round start
+const GEAR_EVERY_MS = 3930;    // then every 3.9–6.4 s (40% faster than 5.5–9)
+const GEAR_EVERY_JITTER = 2500;
+const GEAR_SPREAD_MIN = CELL * 2.2; // crates keep this far apart when they can
 
 // ---- Ranked closing zone ----
 const ZONE_FIRST_MS = 30000;   // first layer claimed 30 s in
@@ -311,6 +314,9 @@ function opts_toState(o) {
     ranked: o.ranked,
     winTarget: o.winTarget,
     serverNow: o.serverNow,
+    gearPool: o.gearPool,
+    gearMax: o.gearMax,
+    sizePool: o.sizePool,
     teams: o.teams,
     onRankedEnd: o.onRankedEnd,
     casualPlayers: o.casualPlayers,
@@ -500,6 +506,10 @@ function begin(opts) {
     onExit: opts.onExit,
     ranked: !!opts.ranked,
     netClock: opts.serverNow ?? (() => Date.now()), // shared match clock
+    // Custom-lobby host settings (null → defaults everywhere).
+    gearPool: opts.gearPool ?? null,   // greenlit ability types
+    gearMax: opts.gearMax ?? null,     // field cap (≤ GEAR_CAP_LIMIT)
+    sizePool: opts.sizePool ?? null,   // allowed map size groups
     teams: opts.teams ?? null, // { [playerId]: 0|1 } in team modes (2v2)
     winTarget: opts.winTarget ?? 5,
     onRankedEnd: opts.onRankedEnd ?? null,
@@ -572,13 +582,17 @@ function startRound(seed) {
     ? "rect"
     : MAZE_SHAPES_NONRECT[Math.floor(rng() * MAZE_SHAPES_NONRECT.length)];
   // Size pool by mode: 1v1 → small+medium, 2v2 → large+xl, casual →
-  // the full range. Shaped arenas lose cells to the mask, so within the
-  // chosen pool they take the larger half to keep the area generous.
+  // the host's chosen groups (all of them by default). Shaped arenas
+  // lose cells to the mask, so within the chosen pool they take the
+  // larger half to keep the area generous.
   const G = MAZE_SIZE_GROUPS;
   let pool;
   if (S.ranked && S.teams) pool = [...G.large, ...G.xl];       // 2v2
   else if (S.ranked) pool = [...G.small, ...G.medium];         // 1v1
-  else pool = MAZE_SIZES;                                      // casual / offline
+  else if (S.sizePool?.length) {
+    pool = S.sizePool.flatMap((k) => G[k] ?? []);
+    if (!pool.length) pool = MAZE_SIZES; // host unticked everything
+  } else pool = MAZE_SIZES;                                    // casual / offline
   const sizeStart = shape === "rect" ? 0 : Math.floor(pool.length * 0.5);
   const [cols, rows] = pool[sizeStart + Math.floor(rng() * (pool.length - sizeStart))];
   // braid 0.1: roughly a third of the previous loopiness — fewer open
@@ -1652,8 +1666,9 @@ function stepBullets(now, dt) {
 
       for (const t of S.tanks) {
         if (t.dead || t.gone) continue;
-        // Fresh shots can't clip their own barrel on the way out.
-        if (t.id === b.by && now - b.born < 150) continue;
+        // Fresh shots can't clip their own barrel on the way out —
+        // but the window is short, so point-blank wall bounces bite.
+        if (t.id === b.by && now - b.born < 75) continue;
         if (tankHitPoint(t, b.x, b.y, b.r ?? BULLET_R)) {
           alive = false;
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
@@ -1723,15 +1738,23 @@ function addHealPop(x, y, now) {
 
 function stepGear(now) {
   // Spawn (local sim, or the controller online — pushed via sync).
-  if (S.isController && S.gear.length < GEAR_MAX && now >= S.gearNextAt) {
-    S.gearNextAt = now + GEAR_EVERY_MS + Math.random() * 3500;
+  // Host settings (custom lobbies) decide WHICH abilities are in the
+  // rotation and the field cap; both default to the full roster.
+  const pool = S.gearPool?.length ? S.gearPool : WEAPON_TYPES;
+  const cap = S.gearMax ?? GEAR_MAX;
+  if (S.isController && S.gear.length < cap && now >= S.gearNextAt) {
+    S.gearNextAt = now + GEAR_EVERY_MS + Math.random() * GEAR_EVERY_JITTER;
     const spot = pickGearSpot();
     if (spot) {
-      // Per-type cap: never more than GEAR_TYPE_MAX of any one ability
-      // on the field at once — spawn only from the types still open.
+      // Round-robin the roster: always spawn one of the LEAST-common
+      // greenlit abilities. With everything enabled and a cap of 30
+      // that lays down 2 of each (24), then tops up a 3rd of six of
+      // them — an even spread rather than a run on one type.
       const counts = {};
-      for (const g of S.gear) counts[g.type] = (counts[g.type] ?? 0) + 1;
-      const open = WEAPON_TYPES.filter((w) => (counts[w] ?? 0) < GEAR_TYPE_MAX);
+      for (const w of pool) counts[w] = 0;
+      for (const g of S.gear) if (counts[g.type] != null) counts[g.type]++;
+      const min = Math.min(...pool.map((w) => counts[w]));
+      const open = pool.filter((w) => counts[w] === min);
       if (open.length) {
         const type = open[Math.floor(Math.random() * open.length)];
         const key = "g" + (S.gearSeq++) + Math.random().toString(36).slice(2, 6);
@@ -1893,7 +1916,15 @@ function pickGearSpot() {
   const inside = S.maze.inside;
   const cellInside = (c, r) =>
     !inside || (r >= 0 && r < S.maze.rows && c >= 0 && c < S.maze.cols && inside[r][c]);
-  for (let tries = 0; tries < 30; tries++) {
+
+  // Gather every VALID candidate we can find, then take the one that
+  // sits FARTHEST from the nearest existing crate (farthest-point
+  // sampling). Picking the first random hit is what let crates bunch
+  // up; scoring the options spreads them across the arena instead —
+  // and it degrades gracefully on a cramped map, where it simply
+  // returns the roomiest spot available rather than failing.
+  const cands = [];
+  for (let tries = 0; tries < 60; tries++) {
     const cc = c0 + Math.floor(Math.random() * (c1 - c0 + 1));
     const rr = r0 + Math.floor(Math.random() * (r1 - r0 + 1));
     if (!cellInside(cc, rr)) continue; // stay within the shape
@@ -1915,12 +1946,21 @@ function pickGearSpot() {
       if (t.dead || t.gone) continue;
       if ((t.x - x) ** 2 + (t.y - y) ** 2 < (CELL * 1.2) ** 2) { clear = false; break; }
     }
+    if (!clear) continue;
+    // Hard floor: never stack crates on top of each other.
+    let near = Infinity;
     for (const g of S.gear) {
-      if ((g.x - x) ** 2 + (g.y - y) ** 2 < CELL * CELL) { clear = false; break; }
+      const d = Math.hypot(g.x - x, g.y - y);
+      if (d < near) near = d;
     }
-    if (clear) return { x, y };
+    if (near < CELL) continue;
+    cands.push({ x, y, near });
+    // Comfortably isolated already — no need to keep searching.
+    if (near >= GEAR_SPREAD_MIN && cands.length >= 6) break;
   }
-  return null;
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.near - a.near); // most isolated first
+  return { x: cands[0].x, y: cands[0].y };
 }
 
 function fireLaser(byId, x, y, a, now) {
@@ -2269,7 +2309,7 @@ function stepSnipes(now, dt) {
     let alive = true;
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
-      if (t.id === s.by && now - s.born < 120) continue; // don't clip the shooter on exit
+      if (t.id === s.by && now - s.born < 60) continue; // don't clip the shooter on exit
       if (tankHitPoint(t, s.x, s.y, r)) {
         alive = false;
         addFade(s.x, s.y, r * 1.4, now);
@@ -2319,7 +2359,7 @@ function stepCannons(now, dt) {
 
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
-      if (t.id === c.by && now - c.born < 200) continue;
+      if (t.id === c.by && now - c.born < 100) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
         applyHit(t, DMG.cannonBall, c.by, now);
         explodeCannon(c, now);

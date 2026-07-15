@@ -199,17 +199,21 @@ async function createDuo() {
 
 export async function joinDuo(code) {
   const acc = getAccount();
-  if (!acc) { toast("Log in to join a team."); return; }
-  if (duo) return;
+  if (!acc) { toast("Log in to join a team."); throw new Error("Not logged in."); }
   code = String(code || "").trim();
-  if (!/^\d{4}$/.test(code)) { toast("Team codes are 4 digits."); return; }
+  if (duo?.code === code) return; // already seated in this team
+  // Accepting an invite while holding a (solo) team of your own:
+  // leave it first — the silent early-return here was why accepted
+  // invites sometimes did nothing.
+  if (duo) await leaveDuo();
+  if (!/^\d{4}$/.test(code)) throw new Error("That team code looks wrong.");
   const f = await ensureFirebase();
   const ref = f.ref(f.db, `duos/${code}`);
   const snap = await f.get(ref);
   const v = snap.val();
-  if (!v) { toast("No team with that code."); return; }
+  if (!v) throw new Error("That team no longer exists.");
   if (Object.keys(v.members ?? {}).length >= 2 && !v.members?.[acc.key]) {
-    toast("That team is already full (2 max)."); return;
+    throw new Error("That team is already full (2 max).");
   }
   const elo = (await fetchMyElo("2v2")) ?? DEFAULT_ELO;
   await f.set(f.ref(f.db, `duos/${code}/members/${acc.key}`), {
