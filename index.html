@@ -36,7 +36,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.6</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -58,19 +58,30 @@
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>Account</h2>
       </header>
-      <p class="hint">Sign in — or create an account with a username. You'll stay
-        signed in on this device until you log out.</p>
-      <div class="form-col">
-        <input type="email" id="login-email" placeholder="email" autocomplete="email">
-        <input type="password" id="login-pass" placeholder="password (6+ characters)"
+      <p class="hint">You'll stay signed in on this device until you log out.</p>
+      <div class="settings-tabs">
+        <button class="btn tab-btn is-on" id="login-tab-in" type="button">SIGN IN</button>
+        <button class="btn tab-btn" id="login-tab-up" type="button">CREATE ACCOUNT</button>
+      </div>
+      <div class="form-col" id="login-form-in">
+        <input type="text" id="login-ident" placeholder="email or username"
+               autocomplete="username" autocapitalize="off">
+        <input type="password" id="login-pass" placeholder="password"
                autocomplete="current-password">
-        <input type="text" id="login-name" placeholder="username (new accounts only)"
-               maxlength="16" autocomplete="off" autocapitalize="off">
         <div class="form-row">
           <button class="btn btn-go" id="login-signin" type="button">Sign in</button>
-          <button class="btn" id="login-create" type="button">Create account</button>
+          <button class="btn" id="login-forgot" type="button">RESET PASSWORD</button>
         </div>
-        <button class="btn-link" id="login-forgot" type="button">Forgot password?</button>
+      </div>
+      <div class="form-col" id="login-form-up" hidden>
+        <input type="email" id="signup-email" placeholder="email" autocomplete="email">
+        <input type="text" id="signup-name" placeholder="username"
+               maxlength="16" autocomplete="off" autocapitalize="off">
+        <input type="password" id="signup-pass" placeholder="password (6+ characters)"
+               autocomplete="new-password">
+        <div class="form-row">
+          <button class="btn btn-go" id="login-create" type="button">Create account</button>
+        </div>
       </div>
     </section>
 
@@ -99,14 +110,9 @@
         <button class="btn tab-btn" id="ranked-tab-2v2" type="button">2v2</button>
       </div>
       <div id="duo-panel" hidden>
-        <p class="duo-code" id="duo-code"></p>
         <div class="duo-members" id="duo-members"></div>
+        <ul class="duo-invite-list" id="duo-invite-list" hidden></ul>
         <div class="duo-actions">
-          <button class="btn" id="duo-create" type="button">CREATE TEAM</button>
-          <span id="duo-join-row">
-            <input class="duo-input" id="duo-code-input" inputmode="numeric" maxlength="4" placeholder="team code">
-            <button class="btn" id="duo-join" type="button">JOIN</button>
-          </span>
           <button class="btn" id="duo-leave" type="button" hidden>LEAVE TEAM</button>
         </div>
       </div>
