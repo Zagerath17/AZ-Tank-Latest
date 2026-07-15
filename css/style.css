@@ -1224,3 +1224,16 @@ body {
 .res-stat em, .res-elo em { display: block; font-size: .55rem; font-style: normal; color: #808896; letter-spacing: .08em; }
 .res-elo.elo-up { color: #4bd08a; }
 .res-elo.elo-down { color: #ff6a4d; }
+
+/* duo seats + invite picker */
+.duo-invite-btn { border-style: dashed; opacity: .85; }
+.duo-invite-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
