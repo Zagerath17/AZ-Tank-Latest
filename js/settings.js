@@ -4,7 +4,7 @@
 // Other modules read them with getBinds().
 // ================================================================
 
-import { onEnter, onLeave, toast, COLORS, SLOT_NAMES, tankSVG } from "./main.js";
+import { onEnter, onLeave, toast, SLOT_NAMES, tankSVG } from "./main.js";
 import { getAudioLevels, setAudioLevel, sfx } from "./audio.js";
 import { getDnd, setDnd, getNoRequests, setNoRequests } from "./social.js";
 
@@ -18,11 +18,15 @@ const ACTIONS = [
   ["shoot", "Shoot"],
 ];
 
+// Offline is a single player (WASD + mouse), so there is exactly one
+// editable control set.
+const BIND_SLOTS = ["red"];
+
+// ONE control set. (Older builds stored binds for four local players;
+// those legacy slots are ignored on load and dropped on the next save,
+// so stale defaults like yellow's KeyY-to-shoot can't ghost-fire.)
 const DEFAULTS = {
-  red:    { up: "KeyW",    down: "KeyS",      left: "KeyA",      right: "KeyD",       shoot: "Space" },
-  green:  { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", shoot: "Enter" },
-  blue:   { up: "KeyI",    down: "KeyK",      left: "KeyJ",      right: "KeyL",       shoot: "KeyO"  },
-  yellow: { up: "KeyT",    down: "KeyG",      left: "KeyF",      right: "KeyH",       shoot: "KeyY"  },
+  red: { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", shoot: "Space" },
 };
 
 let binds = load();
@@ -35,7 +39,7 @@ function load() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORE_KEY));
     if (raw) {
-      for (const color of COLORS) {
+      for (const color of BIND_SLOTS) {
         for (const [action] of ACTIONS) {
           const v = raw?.[color]?.[action];
           if (typeof v === "string" || v === null) out[color][action] = v;
@@ -76,10 +80,6 @@ export function keyLabel(code) {
 }
 
 /* ---------- render ---------- */
-
-// Offline is a single player (WASD + mouse), so only one control set
-// is editable — the extra local-player binds are gone from the UI.
-const BIND_SLOTS = ["red"];
 
 function render() {
   const host = document.getElementById("binds");

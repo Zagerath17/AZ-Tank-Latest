@@ -196,11 +196,28 @@ export const sfx = {
   },
 
   // Tank takes a non-lethal hit: a short metallic thunk.
+  // Armour strike: a bright metallic ping over a dull body knock,
+  // with a tick of noise — reads as metal-on-metal, not a beep.
   hit() {
-    if (!ready() || limited("hit", 60)) return;
+    if (!ready() || limited("hit", 55)) return;
     try {
-      blip("square", 320, 150, 0.05, 0.1);
-      blip("triangle", 180, 90, 0.08, 0.08);
+      blip("triangle", 1750, 620, 0.06, 0.09);         // the ping
+      blip("square", 240, 95, 0.07, 0.11);             // the knock
+      whoosh("highpass", 3800, 1400, 0.035, 0.06);     // impact tick
+      blip("sine", 95, 55, 0.09, 0.07, 0.005);         // hull thud
+    } catch (e) {}
+  },
+
+  // A tank going up: sharp crack, roaring noise sweep, deep sub thump,
+  // and a metal-debris ring tail. Bigger than a plain boom.
+  explosion() {
+    if (!ready() || limited("explosion", 150)) return;
+    try {
+      whoosh("highpass", 5200, 900, 0.09, 0.22);        // the crack
+      whoosh("lowpass", 2600, 90, 0.85, 0.4, 0.01, 0.6); // the roar
+      blip("sine", 105, 30, 0.6, 0.4, 0.01);            // sub thump
+      blip("triangle", 1250, 320, 0.28, 0.07, 0.09);    // debris ring
+      blip("square", 68, 34, 0.4, 0.16, 0.05);          // aftershock
     } catch (e) {}
   },
 

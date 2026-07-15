@@ -13,14 +13,14 @@
 // ================================================================
 
 import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
-import { COLORS, COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
+import { COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
-  ARMOUR, HEAL, MUD, MORTAR,
-  laserPath, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
+  ARMOUR, HEAL, MUD, MORTAR, mortarFlightMs, mortarDistAt,
+  laserPath, castRaySlab, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
   WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
 import { sfx, setEngine, startMusic, stopAll } from "./audio.js";
@@ -164,9 +164,15 @@ export function initGame() {
 
   exitBtn.addEventListener("click", () => {
     const s = S;
-    stopGame();
-    if (s?.mode === "online") s.onExit?.();
-    else showScreen("screen-local");
+    if (s?.mode === "online") {
+      // The exit callback (leaveLobby / endMatchForAll) stops the game
+      // itself — calling stopGame first would wipe the match state the
+      // ranked ABORT penalty needs to read.
+      s.onExit?.();
+    } else {
+      stopGame();
+      showScreen("screen-local");
+    }
   });
 
   // Mobile controls: two analog sticks + three category fire buttons.
@@ -329,12 +335,6 @@ export function stopGame() {
 
 export function isGameActive() {
   return !!S;
-}
-
-// True while an online ranked match is running and NOT yet decided —
-// leaving now counts as an abort (see online.js).
-export function rankedInProgress() {
-  return !!(S && S.mode === "online" && S.ranked && !S.matchOver);
 }
 
 // My tanks' received-damage ledger (attacker → total), for reporting.
@@ -626,6 +626,7 @@ function startRound(seed) {
   S.mudPits = [];
   S.mortars = [];
   S.mortarClouds = [];
+  S.sparks = [];
   S.mortarAim = null;
   S.beams = [];
   S.booms = [];
@@ -766,8 +767,8 @@ function clearHeld() {
 
 function isBoundCode(code) {
   const b = getBinds();
-  return COLORS.some((c) =>
-    ["up", "down", "left", "right", "shoot"].some((a) => b[c][a] === code),
+  return Object.values(b).some((set) =>
+    ["up", "down", "left", "right", "shoot"].some((a) => set?.[a] === code),
   );
 }
 
@@ -777,15 +778,13 @@ function readActions(tank, binds) {
     shoot: false, def: false, agi: false,
   };
 
-  // Local: strictly your SLOT's binds (colors are just paint now).
-  // Online: your (only) tank answers to any slot's binds, so WASD
-  // and arrows both work.
-  const sources = S.mode === "online" ? COLORS : [tank.slot ?? tank.color];
-  for (const c of sources) {
-    for (const a of ["up", "down", "left", "right", "shoot"]) {
-      const code = binds[c][a];
-      if (code && held.has(code)) acts[a] = true;
-    }
+  // ONE control set drives the human tank everywhere (the legacy
+  // multi-player slots are gone — no more ghost binds like the old
+  // yellow player's KeyY-to-shoot).
+  const set = binds.red ?? Object.values(binds)[0] ?? {};
+  for (const a of ["up", "down", "left", "right", "shoot"]) {
+    const code = set[a];
+    if (code && held.has(code)) acts[a] = true;
   }
 
   // Touch pad only ever drives the single local human tank.
@@ -1304,9 +1303,24 @@ function muzzlePoint(t, projR) {
   const bl = BARRELS[t.weapon] ?? BARRELS.normal;
   const aim = t.turret ?? t.a;
   const len = bl.len * TANK_R + projR + 2;
-  const tipX = t.x + Math.cos(aim) * len;
-  const tipY = t.y + Math.sin(aim) * len;
-  const hit = segmentFirstHit(t.x, t.y, tipX, tipY, S.rects);
+  const dx = Math.cos(aim);
+  const dy = Math.sin(aim);
+  const tipX = t.x + dx * len;
+  const tipY = t.y + dy * len;
+  // Nearest obstruction between hull centre and barrel tip: interior
+  // walls, the shaped arena's diagonal boundary slabs, AND the outer
+  // world bounds — so a tank nosed up against ANY edge can't spawn a
+  // shot on the far side of it.
+  let hit = segmentFirstHit(t.x, t.y, tipX, tipY, S.rects);
+  for (const slab of S.diag ?? []) {
+    const r = castRaySlab(t.x, t.y, dx, dy, slab, len);
+    if (r && r.d / len < hit) hit = r.d / len;
+  }
+  const pad = projR + 1;
+  if (dx > 0) hit = Math.min(hit, (S.worldW - pad - t.x) / (dx * len));
+  else if (dx < 0) hit = Math.min(hit, (pad - t.x) / (dx * len));
+  if (dy > 0) hit = Math.min(hit, (S.worldH - pad - t.y) / (dy * len));
+  else if (dy < 0) hit = Math.min(hit, (pad - t.y) / (dy * len));
   const k = Math.min(1, Math.max(0.2, hit * 0.9));
   return { x: t.x + (tipX - t.x) * k, y: t.y + (tipY - t.y) * k };
 }
@@ -1396,7 +1410,7 @@ function fireOffense(t, now) {
     // Indirect fire: aim at the mouse (or, for bots, their target),
     // snap to the CENTRE of that cell, and clamp the target to within
     // MORTAR.rangeCells of the tank. The shell arcs up and comes down
-    // there after msPerCell per cell of travel.
+    // there, gaining +50% speed for every cell it travels.
     const tgt = mortarTarget(t);
     launchMortar(t.id, t.x, t.y, tgt.x, tgt.y, now);
     sendTypedShot(t, {
@@ -1450,11 +1464,15 @@ function mortarTarget(t) {
 }
 
 // Launch an arcing shell from (x0,y0) toward the locked cell (tx,ty).
-// Flight time scales with distance: MORTAR.msPerCell per cell.
+// The flight ACCELERATES: +50% speed per cell traveled (see weapons.js
+// for the shared math — every client and the AI use the same curve).
 function launchMortar(byId, x0, y0, tx, ty, now) {
   const distCells = Math.hypot(tx - x0, ty - y0) / CELL;
-  const flightMs = Math.max(400, distCells * MORTAR.msPerCell);
-  S.mortars.push({ by: byId, x0, y0, x: tx, y: ty, born: now, landAt: now + flightMs });
+  S.mortars.push({
+    by: byId, x0, y0, x: tx, y: ty, born: now,
+    distCells,
+    landAt: now + mortarFlightMs(distCells),
+  });
   sfx.cannon?.(); // a heavy launch thump
 }
 
@@ -1472,17 +1490,16 @@ function detonateMortar(m, now) {
   // The dark smoke cloud covering the cell.
   (S.mortarClouds ??= []).push({ x: m.x, y: m.y, born: now, seed: (Math.random() * 1e9) | 0 });
   addFade(m.x, m.y, CELL * 0.4, now);
-  // Damage rings — each tank takes the amount of the nearest band it's
-  // within (applied by the authoritative client to its own tanks).
+  // Damage rings — the hit FX plays for every tank in the blast on
+  // every client; applyHit applies damage only on the authority.
   for (const t of S.tanks) {
     if (t.dead || t.gone) continue;
-    if (!(S.mode === "local" || t.local)) continue;
     const d = Math.hypot(t.x - m.x, t.y - m.y);
     let dmg = 0;
     for (const ring of MORTAR_RINGS) {
       if (d <= ring.r * CELL) { dmg = ring.dmg; break; }
     }
-    if (dmg > 0) damageTank(t, dmg, m.by);
+    if (dmg > 0) applyHit(t, dmg, m.by, now);
   }
 }
 
@@ -1642,7 +1659,7 @@ function stepBullets(now, dt) {
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
           // Authority: in local mode we own everyone; online we only
           // pronounce deaths for tanks simulated on this device.
-          if (S.mode === "local" || t.local) damageTank(t, b.mini ? DMG.mg : DMG.basic, b.by);
+          applyHit(t, b.mini ? DMG.mg : DMG.basic, b.by, now);
           break;
         }
       }
@@ -1670,6 +1687,7 @@ function stepSpecials(now, dt) {
   S.booms = S.booms.filter((bo) => now - bo.born < 320);
   S.mudPits = S.mudPits.filter((m) => now - m.born < MUD.lifeMs);
   if (S.mortarClouds) S.mortarClouds = S.mortarClouds.filter((c) => now - c.born < MORTAR.cloudMs);
+  if (S.sparks) S.sparks = S.sparks.filter((p) => now - p.born < p.life);
 }
 
 // Healing pads: a tank must be CONTINUOUSLY inside for HEAL.tickMs to
@@ -1861,7 +1879,11 @@ function stepShrink(now) {
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
       const ticks = redZoneTicks(t);
-      if (ticks > 0 && (S.mode === "local" || t.local)) damageTank(t, ticks * ZONE_DMG, null);
+      if (ticks > 0 && (S.mode === "local" || t.local)) {
+        t.lastHitAt = now; // zone burn flashes too
+        sfx.hit?.();
+        damageTank(t, ticks * ZONE_DMG, null);
+      }
     }
   }
 }
@@ -1877,7 +1899,18 @@ function pickGearSpot() {
     if (!cellInside(cc, rr)) continue; // stay within the shape
     const x = (cc + 0.5) * CELL;
     const y = (rr + 0.5) * CELL;
+    // Shaped arenas: the diagonal boundary slab can slice through an
+    // "inside" cell — don't drop a crate into (or poking through) it.
     let clear = true;
+    for (const w of S.diag ?? []) {
+      const ca = Math.cos(w.a), sa = Math.sin(w.a);
+      const lx = (x - w.x) * ca + (y - w.y) * sa;
+      const ly = -(x - w.x) * sa + (y - w.y) * ca;
+      const dx = Math.max(0, Math.abs(lx) - w.hx);
+      const dy = Math.max(0, Math.abs(ly) - w.hy);
+      if (Math.hypot(dx, dy) < GEAR_R + 26) { clear = false; break; }
+    }
+    if (!clear) continue;
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
       if ((t.x - x) ** 2 + (t.y - y) ** 2 < (CELL * 1.2) ** 2) { clear = false; break; }
@@ -1962,7 +1995,7 @@ function stepBeams(now) {
           // hit. 8 dmg fresh, −1 per bounce so far, floored at 1.
           bm.inside.add(t.id);
           const dmg = Math.max(1, DMG.laserBase - beamBouncesAt(bm, d));
-          if (S.mode === "local" || t.local) damageTank(t, dmg, bm.by);
+          applyHit(t, dmg, bm.by, now);
         } else if (!touching && bm.inside.has(t.id)) {
           bm.inside.delete(t.id); // exited — a later re-entry hits again
         }
@@ -2065,7 +2098,7 @@ function stepRockets(now, dt) {
         if (t.id === rk.by && age < ROCKET.ownerGraceMs) continue;
         if (tankHitPoint(t, rk.x, rk.y, r)) {
           alive = false;
-          if (S.mode === "local" || t.local) damageTank(t, DMG.rocket, rk.by);
+          applyHit(t, DMG.rocket, rk.by, now);
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3.5 });
           addFade(rk.x, rk.y, r * 1.4, now);
           break;
@@ -2240,7 +2273,7 @@ function stepSnipes(now, dt) {
       if (tankHitPoint(t, s.x, s.y, r)) {
         alive = false;
         addFade(s.x, s.y, r * 1.4, now);
-        if (S.mode === "local" || t.local) damageTank(t, DMG.sniper, s.by);
+        applyHit(t, DMG.sniper, s.by, now);
         break;
       }
     }
@@ -2288,7 +2321,7 @@ function stepCannons(now, dt) {
       if (t.dead || t.gone) continue;
       if (t.id === c.by && now - c.born < 200) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
-        if (S.mode === "local" || t.local) damageTank(t, DMG.cannonBall, c.by);
+        applyHit(t, DMG.cannonBall, c.by, now);
         explodeCannon(c, now);
         alive = false;
         break;
@@ -2343,7 +2376,7 @@ function stepShrapnel(now, dt) {
         if (tankHitPoint(t, sh.x, sh.y, r)) {
           alive = false;
           addFade(sh.x, sh.y, r * 1.2, now);
-          if (S.mode === "local" || t.local) damageTank(t, DMG.shrapnel, sh.by);
+          applyHit(t, DMG.shrapnel, sh.by, now);
           break;
         }
       }
@@ -2359,6 +2392,33 @@ function stepShrapnel(now, dt) {
 // Returns true if this hit destroyed it. Only the authoritative client
 // (local sim, or the tank's owner online) should call this so scores
 // stay consistent — callers already gate on (S.mode === "local" || t.local).
+
+// A projectile connected with a tank. The FLASH, SPARKS, and SOUND
+// play on EVERY client (each simulates the collision locally); the
+// actual damage is applied only by the tank's authoritative client.
+function applyHit(t, amount, byId, now = performance.now()) {
+  t.lastHitAt = now;           // red damage flash (drawTank)
+  addHitSparks(t.x, t.y, now); // metal sparks at the hull
+  sfx.hit?.();
+  if (S.mode === "local" || t.local) damageTank(t, amount, byId);
+}
+
+// Short-lived orange/white sparks thrown from a hit.
+function addHitSparks(x, y, now) {
+  const list = (S.sparks ??= []);
+  const n = 5 + (Math.random() * 3 | 0);
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 60 + Math.random() * 140;
+    list.push({
+      x, y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      born: now, life: 180 + Math.random() * 140,
+      hot: Math.random() < 0.4, // some sparks flash white
+    });
+  }
+}
+
 function damageTank(t, amount, byId = null) {
   if (t.dead || t.gone) return false;
   const now = performance.now();
@@ -2379,16 +2439,17 @@ function damageTank(t, amount, byId = null) {
     t.hp = hpBefore - dmg;
     dealt += Math.min(hpBefore, dmg); // don't credit overkill
     if (t.hp <= 0) { killTank(t); killed = true; }
-    else sfx.hit?.();
-  } else {
-    sfx.hit?.(); // fully absorbed by armour
   }
-  // Match stats: credit the attacker for damage actually inflicted and
-  // for the kill (never self-damage, never the environment).
-  if (byId && byId !== t.id && dealt > 0) {
+  // Match stats: credit the attacker for damage actually inflicted —
+  // INCLUDING damage to yourself (a mortar on your own feet counts) —
+  // and for kills of OTHER tanks (a self-kill isn't a kill).
+  if (byId && dealt > 0) {
     S.dmgBy = S.dmgBy ?? {};
     S.dmgBy[byId] = (S.dmgBy[byId] ?? 0) + dealt;
-    if (killed) { S.killsBy = S.killsBy ?? {}; S.killsBy[byId] = (S.killsBy[byId] ?? 0) + 1; }
+    if (killed && byId !== t.id) {
+      S.killsBy = S.killsBy ?? {};
+      S.killsBy[byId] = (S.killsBy[byId] ?? 0) + 1;
+    }
   }
   return killed;
 }
@@ -2396,7 +2457,15 @@ function damageTank(t, amount, byId = null) {
 function killTank(t) {
   if (t.dead) return;
   t.dead = true;
-  sfx.boom();
+  const now = performance.now();
+  // The full send-off: a dedicated explosion sound, a fireball flash,
+  // a debris shower, and a lingering smoke pall over the wreck.
+  sfx.explosion ? sfx.explosion() : sfx.boom();
+  S.booms.push({ x: t.x, y: t.y, born: now, r: TANK_R * 3.2 });
+  addFade(t.x, t.y, TANK_R * 1.6, now);
+  addHitSparks(t.x, t.y, now);
+  addHitSparks(t.x, t.y, now); // double shower — it's an explosion
+  (S.mortarClouds ??= []).push({ x: t.x, y: t.y, born: now, seed: (Math.random() * 1e9) | 0 });
   if (S.mode === "online" && t.local) S.sendDead?.(t.id);
 
   // If the tank that just died is the local human's, show a black
@@ -2404,7 +2473,7 @@ function killTank(t) {
   // as long as the round is still going. If they were the last one
   // out, the round-end banner takes over anyway.
   if (isLocalHuman(t)) {
-    S.personalMsg = { text: "Destroyed", color: "#0a0c10", born: performance.now(), kind: "dead" };
+    S.personalMsg = { text: "Destroyed", color: "#0a0c10", born: now, kind: "dead" };
   }
 }
 
@@ -2947,6 +3016,24 @@ function draw(now) {
   // Lofted mortar shells fly ABOVE everything (they're up in the air).
   for (const m of S.mortars) drawMortarShell(m, now);
 
+  // Impact sparks: short hot streaks thrown from a hull hit.
+  if (S.sparks) {
+    for (const p of S.sparks) {
+      const k = (now - p.born) / p.life;
+      const px = p.x + p.vx * (now - p.born) / 1000;
+      const py = p.y + p.vy * (now - p.born) / 1000;
+      ctx.save();
+      ctx.globalAlpha = 1 - k;
+      ctx.strokeStyle = p.hot ? "#fff2d8" : "#ffab3d";
+      ctx.lineWidth = p.hot ? 2 : 1.5;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px - p.vx * 0.03, py - p.vy * 0.03);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   ctx.fillStyle = "#20242c";
   for (const b of S.bullets) {
     ctx.beginPath();
@@ -3298,7 +3385,12 @@ function drawMortarMarker(m, now) {
 // The arcing shell: rises high and falls onto the target. Top-down, so
 // "height" is a vertical screen offset with a ground shadow beneath.
 function drawMortarShell(m, now) {
-  const p = Math.max(0, Math.min(1, (now - m.born) / (m.landAt - m.born)));
+  // Ground progress follows the ACCELERATING flight curve, so the
+  // shell visibly picks up pace the further it goes.
+  const d = m.distCells ?? Math.hypot(m.x - m.x0, m.y - m.y0) / CELL;
+  const p = d > 0
+    ? Math.max(0, Math.min(1, mortarDistAt(now - m.born, d) / d))
+    : Math.max(0, Math.min(1, (now - m.born) / (m.landAt - m.born)));
   const gx = m.x0 + (m.x - m.x0) * p;   // ground position
   const gy = m.y0 + (m.y - m.y0) * p;
   const arc = Math.sin(Math.PI * p);    // 0→1→0
@@ -3517,13 +3609,45 @@ function drawTank(t, now) {
   ctx.fillStyle = hull;
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
 
-  // Damage flash: a quick white overlay right after taking a hit.
+  // ---- Directional detail: the FRONT and REAR read differently ----
+  // Front (+x): a lighter sloped glacis plate ending in a nose chevron.
+  ctx.fillStyle = shade(hull, -0.18); // lighter
+  ctx.beginPath();
+  ctx.moveTo(R * 0.32, -R * 0.5);
+  ctx.lineTo(R * 0.86, -R * 0.28);
+  ctx.lineTo(R * 0.86, R * 0.28);
+  ctx.lineTo(R * 0.32, R * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = shade(hull, 0.45);
+  ctx.lineWidth = Math.max(1.5, R * 0.07);
+  ctx.beginPath(); // nose chevron
+  ctx.moveTo(R * 0.52, -R * 0.3);
+  ctx.lineTo(R * 0.78, 0);
+  ctx.lineTo(R * 0.52, R * 0.3);
+  ctx.stroke();
+  // Rear (−x): darker engine deck with grille slats + twin exhausts.
+  ctx.fillStyle = shade(hull, 0.35); // darker
+  rr(-R * 0.9, -R * 0.46, R * 0.42, R * 0.92, R * 0.1);
+  ctx.strokeStyle = shade(hull, 0.6);
+  ctx.lineWidth = Math.max(1, R * 0.05);
+  ctx.beginPath();
+  for (let i = -2; i <= 2; i++) {
+    ctx.moveTo(-R * 0.84, i * R * 0.16);
+    ctx.lineTo(-R * 0.54, i * R * 0.16);
+  }
+  ctx.stroke();
+  ctx.fillStyle = "#3a3f4c"; // exhaust stubs poking past the tail
+  rr(-R * 1.0, -R * 0.36, R * 0.14, R * 0.16, R * 0.05);
+  rr(-R * 1.0, R * 0.2, R * 0.14, R * 0.16, R * 0.05);
+
+  // Damage flash: the whole tank blinks RED right after taking a hit.
   const sinceHit = now - (t.lastHitAt ?? -9999);
-  if (sinceHit < 160) {
+  if (sinceHit < 170) {
     ctx.save();
-    ctx.globalAlpha = 0.6 * (1 - sinceHit / 160);
-    ctx.fillStyle = "#ffffff";
-    rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+    ctx.globalAlpha = 0.62 * (1 - sinceHit / 170);
+    ctx.fillStyle = "#ff2d28";
+    rr(-R * 0.98, -R * 0.86, R * 1.96, R * 1.72, R * 0.2); // treads too
     ctx.restore();
   }
 
@@ -3566,15 +3690,78 @@ function drawTank(t, now) {
 }
 
 function drawWreck(t) {
+  const now = performance.now();
+  const seed = (t.x * 7 + t.y * 13) | 0;
   ctx.save();
   ctx.translate(t.x, t.y);
+
+  // Scorch ring on the floor under everything.
+  ctx.globalAlpha = 0.5;
+  const sg = ctx.createRadialGradient(0, 0, TANK_R * 0.3, 0, 0, TANK_R * 1.5);
+  sg.addColorStop(0, "rgba(10, 10, 12, 0.9)");
+  sg.addColorStop(1, "rgba(10, 10, 12, 0)");
+  ctx.fillStyle = sg;
+  ctx.beginPath();
+  ctx.arc(0, 0, TANK_R * 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
   ctx.rotate(t.a);
+  // Charred hull, slightly crumpled (notched corners).
+  ctx.fillStyle = "#1d222b";
+  rr(-TANK_R * 0.85, -TANK_R * 0.58, TANK_R * 1.7, TANK_R * 1.16, TANK_R * 0.16);
   ctx.fillStyle = "#232833";
-  rr(-TANK_R * 0.8, -TANK_R * 0.55, TANK_R * 1.6, TANK_R * 1.1, TANK_R * 0.2);
+  rr(-TANK_R * 0.7, -TANK_R * 0.44, TANK_R * 1.4, TANK_R * 0.88, TANK_R * 0.12);
+  // Burst plating: dark gashes across the deck.
+  ctx.strokeStyle = "#0e1116";
+  ctx.lineWidth = TANK_R * 0.12;
+  ctx.beginPath();
+  ctx.moveTo(-TANK_R * 0.5, -TANK_R * 0.3);
+  ctx.lineTo(TANK_R * 0.25, TANK_R * 0.15);
+  ctx.moveTo(TANK_R * 0.4, -TANK_R * 0.35);
+  ctx.lineTo(TANK_R * 0.1, TANK_R * 0.4);
+  ctx.stroke();
+  // The turret ring, blown loose — sits askew off-centre, hull-toned.
+  ctx.save();
+  ctx.translate(TANK_R * 0.28, -TANK_R * 0.2);
+  ctx.rotate(0.7);
   ctx.fillStyle = shade(HULL[t.color], 0.75);
   ctx.beginPath();
-  ctx.arc(0, 0, TANK_R * 0.32, 0, Math.PI * 2);
+  ctx.arc(0, 0, TANK_R * 0.34, 0, Math.PI * 2);
   ctx.fill();
+  ctx.strokeStyle = "#141821";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+  // Glowing embers that breathe.
+  const glow = 0.4 + 0.35 * Math.sin(now / 210 + seed);
+  ctx.fillStyle = `rgba(255, 120, 40, ${0.35 + 0.3 * glow})`;
+  ctx.beginPath();
+  ctx.arc(-TANK_R * 0.32, TANK_R * 0.18, TANK_R * 0.1, 0, Math.PI * 2);
+  ctx.arc(TANK_R * 0.1, -TANK_R * 0.28, TANK_R * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Continuous smoke: three staggered plumes rising and fading on a
+  // loop (deterministic from time + position — no particle state).
+  ctx.save();
+  ctx.translate(t.x, t.y);
+  for (let i = 0; i < 3; i++) {
+    const period = 1400 + i * 260;
+    const k = ((now + seed * 37 + i * 500) % period) / period; // 0→1
+    const drift = Math.sin(seed + i * 2.1) * TANK_R * 0.5;
+    const px = drift * k;
+    const py = -TANK_R * (0.2 + k * 1.7);
+    const rr2 = TANK_R * (0.22 + k * 0.5);
+    ctx.globalAlpha = 0.34 * (1 - k);
+    const g = ctx.createRadialGradient(px, py, 0, px, py, rr2);
+    g.addColorStop(0, "rgba(28, 28, 34, 0.9)");
+    g.addColorStop(1, "rgba(28, 28, 34, 0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(px, py, rr2, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 

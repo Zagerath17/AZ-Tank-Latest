@@ -21,7 +21,7 @@
 // ================================================================
 
 import { segmentHitsAnyRect } from "./maze.js";
-import { ROCKET, SNIPER, MORTAR, LASER, laserPath, WEAPON_CATEGORY } from "./weapons.js";
+import { ROCKET, SNIPER, MORTAR, mortarFlightMs, LASER, laserPath, WEAPON_CATEGORY } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
@@ -32,15 +32,15 @@ export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 // this few shots left, a bot only spends them on verified hits.
 export const AI_PARAMS = {
   easy: {
-    speed: 0.75, turn: 0.82, react: 0.60,
-    aimErr: 0.22,       // random aim wobble (radians)
-    aimTol: 0.20,       // required alignment before firing
-    range: 5,           // awareness range (cells)
-    fireRange: 4.5,     // won't fire beyond this (cells)
+    speed: 0.82, turn: 0.88, react: 0.45,
+    aimErr: 0.16,       // random aim wobble (radians)
+    aimTol: 0.18,       // required alignment before firing
+    range: 6,           // awareness range (cells)
+    fireRange: 5,       // won't fire beyond this (cells)
     cooldown: 1.75,
-    fireProb: 0.75,
-    dodgeSkill: 0.25,   // dodges badly — sees threats late, reacts to few
-    dodgeHorizon: 0.45,
+    fireProb: 0.85,
+    dodgeSkill: 0.4,    // dodges some — still very punishable
+    dodgeHorizon: 0.55,
     lead: 0,            // no movement prediction
     selfCheckT: 0.35,   // barely checks its own ricochets — still fumbles sometimes
     verifyHit: false,
@@ -49,10 +49,11 @@ export const AI_PARAMS = {
     reserve: 0,
   },
   medium: {
-    speed: 0.88, turn: 0.96, react: 0.40,
-    aimErr: 0.1, aimTol: 0.12, range: 8, fireRange: 5.5, cooldown: 1.1, fireProb: 0.92,
-    dodgeSkill: 0.55, dodgeHorizon: 0.8,
-    lead: 0,
+    speed: 0.94, turn: 1.0, react: 0.28,
+    aimErr: 0.06, aimTol: 0.1, range: 10, fireRange: 6, cooldown: 1.1, fireProb: 0.96,
+    jinkMs: 640,        // starts weaving under fire (movement, not firepower)
+    dodgeSkill: 0.7, dodgeHorizon: 1.0,
+    lead: 0.35,         // begins predicting movement
     selfCheckT: 0.9,    // won't shoot itself
     verifyHit: false,
     verifyBeyond: 4,    // long shots must trace to a hit
@@ -60,25 +61,25 @@ export const AI_PARAMS = {
     reserve: 1,
   },
   hard: {
-    speed: 1.0, turn: 1.0, react: 0.30,
-    aimErr: 0.028, aimTol: 0.07, range: 13, fireRange: 6.5, cooldown: 0.8, fireProb: 1,
+    speed: 1.0, turn: 1.0, react: 0.22,
+    aimErr: 0.018, aimTol: 0.06, range: 13, fireRange: 7, cooldown: 0.8, fireProb: 1,
     burst: 3,           // pours it on when the lane is open
     jinkMs: 520,        // sharp evasive weaving between shots
-    dodgeSkill: 0.92, dodgeHorizon: 1.2,
-    lead: 0.65,         // partial movement prediction
+    dodgeSkill: 0.97, dodgeHorizon: 1.3,
+    lead: 0.8,          // strong movement prediction
     selfCheckT: 1.7,
     verifyHit: false,
-    verifyBeyond: 3.5,  // long shots must trace to a hit
+    verifyBeyond: 3,    // long shots must trace to a hit
     push: true,         // rushes enemies who are out of ammo
     standoff: 1.95,
     reserve: 1,
   },
   impossible: {
-    speed: 1.0, turn: 1.0, react: 0.20,
-    aimErr: 0.008, aimTol: 0.055, range: 99, fireRange: 7, cooldown: 0.45, fireProb: 1,
+    speed: 1.0, turn: 1.0, react: 0.14,
+    aimErr: 0.004, aimTol: 0.045, range: 99, fireRange: 7.5, cooldown: 0.45, fireProb: 1,
     burst: 4,           // relentless verified volleys
     jinkMs: 430,        // relentless weaving
-    dodgeSkill: 1, dodgeHorizon: 1.35,
+    dodgeSkill: 1, dodgeHorizon: 1.5,
     lead: 1,            // full intercept prediction
     selfCheckT: 1.8,
     verifyHit: true,    // only fires traced, landing shots — bank shots included
@@ -88,8 +89,6 @@ export const AI_PARAMS = {
   },
 };
 
-// Escape maneuvers tried when jammed; a wedged rectangle may have
-// only ONE free action, so we cycle (with randomness → no livelock).
 /* ================================================================
    Main driver
    ================================================================ */
@@ -277,17 +276,20 @@ export function botActions(t, world, dt, now) {
   if (!target) return finish(ai, acts);
 
   const dist = Math.sqrt(best);
+  // Closing speed (px/s, + = target approaching) — used by the
+  // anti-push wall reaction.
+  ai.closing = ai.prevDist != null ? (ai.prevDist - dist) / dt : 0;
+  ai.prevDist = dist;
 
   // ---- Mortar: indirect fire that arcs over walls. Aim at where the
   // target will BE when the shell lands, not where it is now: the
-  // flight time scales with distance (MORTAR.msPerCell per cell), so we
-  // solve the intercept by iterating a couple of times. Prediction
+  // flight ACCELERATES with distance (shared curve in weapons.js), so
+  // we solve the intercept by iterating a couple of times. Prediction
   // quality scales with the tier's `lead`; weaker bots also scatter the
   // landing and fire less often. No line of sight or hull alignment is
   // needed — that's the whole point of a mortar.
   if (t.weapon === "mortar") {
     const tv = ai.vel[target.id];
-    const secPerCell = MORTAR.msPerCell / 1000;
     const tvSpeed = tv ? Math.hypot(tv.vx, tv.vy) : 0;
     // Lead steady movers fully; barely lead erratic weavers (their
     // weave centre is the best guess). Weaker tiers lead less.
@@ -295,7 +297,7 @@ export function botActions(t, world, dt, now) {
     let ax = target.x, ay = target.y;
     if (lead > 0 && tvSpeed > 25) {
       for (let k = 0; k < 3; k++) {
-        const ft = (Math.hypot(ax - t.x, ay - t.y) / cell) * secPerCell;
+        const ft = mortarFlightMs(Math.hypot(ax - t.x, ay - t.y) / cell) / 1000;
         ax = target.x + tv.vx * ft * lead;
         ay = target.y + tv.vy * ft * lead;
       }
@@ -357,11 +359,13 @@ export function botActions(t, world, dt, now) {
         const fleeing = !!ai.threat && dist < cell * 2.0;
         want = chasing || fleeing;
       } else if (t.agility === "phase") {
-        // Phase to escape a shot you can't dodge, or to slip through a
-        // wall toward a target you otherwise can't reach.
+        // Phase ONLY to slip through a wall toward a target you can't
+        // otherwise reach — never as a panic button. Remember why we
+        // phased so the drive-through actually happens (see the
+        // navigation override below).
         const wallBetween = los === false && dist < P.range * cell &&
           segmentHitsAnyRect(t.x, t.y, target.x, target.y, world.rects);
-        want = threatSoon || (wallBetween && dist < cell * 3.5);
+        want = wallBetween && dist < cell * 3.5;
       }
       if (want && !ai.agiWant) {
         ai.agiWant = true;
@@ -370,6 +374,10 @@ export function botActions(t, world, dt, now) {
       if (!want) ai.agiWant = false; // situation passed — reset
       if (ai.agiWant && now >= ai.agiAt) {
         ai.agiWant = false;
+        if (t.agility === "phase") {
+          ai.phaseGoal = { x: target.x, y: target.y };
+          ai.phaseGoalSet = now; // phaseUntil lands next frame — grace below
+        }
         acts.agi = true;
       }
     } else {
@@ -379,9 +387,27 @@ export function botActions(t, world, dt, now) {
     // -- defense slot --
     if (t.defense) {
       let want = false;
-      if (t.defense === "wall" || t.defense === "mud") {
-        // Screen/impede an enemy that has a clear look at you at mid
-        // range (a wall blocks fire; mud drops behind to slow a chaser).
+      let quick = false; // reactive uses → short, tier-scaled delay
+      if (t.defense === "wall") {
+        // (a) BLOCK ON REACTION: a ball is inbound, arriving soon, and
+        // we're roughly facing it — slam the wall down as a shield.
+        // (The wall drops ahead of the hull, so facing matters.)
+        const th = ai.threat;
+        if (th && th.impactAt) {
+          const eta = th.impactAt - now;
+          const src = th.src;
+          const faceOk = !src ||
+            Math.abs(angleDiff(t.a, Math.atan2(src.y - t.y, src.x - t.x))) < 1.0;
+          if (eta > 100 && eta < 780 && faceOk) { want = true; quick = true; }
+        }
+        // (b) STOP A PUSH: an enemy closing in fast gets a wall in the
+        // face — measured closing speed, not just proximity.
+        if (!want && los && dist < cell * 3.2) {
+          const facing = Math.abs(angleDiff(t.a, Math.atan2(target.y - t.y, target.x - t.x))) < 0.9;
+          if ((ai.closing ?? 0) > 55 && facing) want = true;
+        }
+      } else if (t.defense === "mud") {
+        // Impede an enemy that has a clear look at you at mid range.
         want = los && dist > cell * 1.4 && dist < cell * 5;
       } else if (t.defense === "armour") {
         // Shield up the moment a fight is on or a shot is inbound.
@@ -393,7 +419,11 @@ export function botActions(t, world, dt, now) {
       }
       if (want && !ai.defWant) {
         ai.defWant = true;
-        ai.defAt = now + 250 + Math.random() * 350;
+        // Reactive blocks land at reflex speed (scaled by the tier's
+        // reaction stat); planned uses keep the human-ish pause.
+        ai.defAt = quick
+          ? now + 90 + (P.react ?? 0.3) * 400
+          : now + 250 + Math.random() * 350;
       }
       if (!want) ai.defWant = false;
       if (ai.defWant && now >= ai.defAt) {
@@ -413,9 +443,21 @@ export function botActions(t, world, dt, now) {
 
   let combatSteered = false;
   // Laser aiming uses the beam's reflections: even with no direct line
-  // of sight, a bank angle onto the target counts as a shot.
-  const laserAim = (t.weapon === "laser" && !dodging)
-    ? bestLaserAngle(t, target, world) : null;
+  // of sight, a bank angle onto the target counts as a shot — but only
+  // at COMBAT range. Without the range gate a bot that grabbed a laser
+  // would find a 4-bounce angle across the whole map and stand rooted
+  // to aim it (the "freezes after picking an item up" bug). The scan is
+  // also cached (150 ms) — 72 ray-casts per frame is wasted work.
+  let laserAim = null;
+  if (t.weapon === "laser" && !dodging && dist < cell * 6.5) {
+    if (now >= (ai.laserAimAt ?? 0)) {
+      ai.laserAimAt = now + 150;
+      ai.laserAim = bestLaserAngle(t, target, world);
+    }
+    laserAim = ai.laserAim;
+  } else {
+    ai.laserAim = null;
+  }
   if (shotLos || laserAim != null) {
     // Aim point: lead the target by its tracked velocity (per tier).
     const tv = ai.vel[target.id];
@@ -678,6 +720,21 @@ function navigate(t, ai, target, world, P, rBody, now, acts) {
   const myCell = { c: cellOf(t.x, cell, world.maze.cols), r: cellOf(t.y, cell, world.maze.rows) };
   const tgCell = { c: cellOf(target.x, cell, world.maze.cols), r: cellOf(target.y, cell, world.maze.rows) };
   const tgKey = tgCell.c + "," + tgCell.r;
+
+  // Phase drive-through: while intangible (having phased to cross a
+  // wall), the maze path is irrelevant — the whole point is to drive
+  // STRAIGHT through the bricks at the remembered goal. Without this a
+  // phased bot would still follow corridors and waste the window.
+  if (ai.phaseGoal) {
+    const phasing = now < (t.phaseUntil ?? 0);
+    const arming = now - (ai.phaseGoalSet ?? 0) < 250; // activation lands next frame
+    if (phasing || arming) {
+      steerTo(t, ai.phaseGoal.x, ai.phaseGoal.y, acts, world, rBody, false);
+      return finish(ai, acts);
+    }
+    ai.phaseGoal = null; // window closed — back to normal pathing
+    ai.repathAt = 0;
+  }
 
   if (now > ai.repathAt || !ai.path.length || ai.tgKey !== tgKey) {
     const fresh = bfsPath(world.maze, myCell, tgCell);

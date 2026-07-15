@@ -27,9 +27,9 @@
 // team-wide: if your teammate is the last one standing, you both won.
 // ================================================================
 
-import { toast, onEnter, onLeave } from "./main.js";
+import { toast, onEnter, onLeave, tankSVG } from "./main.js";
 import { ensureFirebase, createRankedLobby } from "./online.js";
-import { getAccount } from "./social.js";
+import { getAccount, getInvitableFriends, sendInvite } from "./social.js";
 import { isConfigured } from "./firebase-config.js";
 
 export const DEFAULT_ELO = 500;
@@ -197,7 +197,7 @@ async function createDuo() {
   toast("Couldn't find a free team code.");
 }
 
-async function joinDuo(code) {
+export async function joinDuo(code) {
   const acc = getAccount();
   if (!acc) { toast("Log in to join a team."); return; }
   if (duo) return;
@@ -286,30 +286,80 @@ function renderDuoPanel() {
   panel.hidden = activeMode !== "2v2";
   if (panel.hidden) return;
   const members = document.getElementById("duo-members");
-  const codeEl = document.getElementById("duo-code");
-  const createBtn = document.getElementById("duo-create");
-  const joinRow = document.getElementById("duo-join-row");
   const leaveBtn = document.getElementById("duo-leave");
+  const list = document.getElementById("duo-invite-list");
   const acc = getAccount();
 
-  if (!duo) {
-    codeEl.textContent = "";
-    members.innerHTML = acc
-      ? `<span class="hint">Party up: create a team and share the code, or join your teammate's.</span>`
-      : `<span class="hint">Log in from the title screen to build a team.</span>`;
-    createBtn.hidden = !acc;
-    joinRow.hidden = !acc;
+  if (!acc) {
+    members.innerHTML = `<span class="hint">Log in from the title screen to build a team.</span>`;
     leaveBtn.hidden = true;
-  } else {
-    codeEl.textContent = `Team code: ${duo.code}`;
-    members.innerHTML = duo.members
-      .map((m) => `<span class="duo-member">${rankBadge(m.elo, 16)} ${m.name}${m.key === duo.leader ? " ★" : ""}</span>`)
-      .join("");
-    createBtn.hidden = true;
-    joinRow.hidden = true;
-    leaveBtn.hidden = false;
+    if (list) list.hidden = true;
+    setQueueUI(queued ? "queued" : "idle");
+    return;
   }
+
+  // Two seats: you, and your teammate — or an INVITE button in the
+  // empty seat (no codes; invites go straight to a friend's screen).
+  const meElo = duo?.members.find((m) => m.key === acc.key)?.elo;
+  const mate = duo?.members.find((m) => m.key !== acc.key) ?? null;
+  const seat = (inner, extra = "") => `<span class="duo-member ${extra}">${inner}</span>`;
+  members.innerHTML =
+    seat(`${rankBadge(meElo ?? DEFAULT_ELO, 16)} ${acc.name}${duo && duo.leader === acc.key ? " ★" : ""}`) +
+    (mate
+      ? seat(`${rankBadge(mate.elo, 16)} ${mate.name}${duo && duo.leader === mate.key ? " ★" : ""}`)
+      : `<button class="btn duo-invite-btn" id="duo-invite" type="button">+ INVITE FRIEND</button>`);
+
+  document.getElementById("duo-invite")?.addEventListener("click", toggleDuoInvites);
+  leaveBtn.hidden = !duo;
   setQueueUI(queued ? "queued" : "idle");
+}
+
+// The friend picker under the empty seat. Creates the duo on demand
+// (the code lives on quietly — players never see or type it).
+async function toggleDuoInvites() {
+  const list = document.getElementById("duo-invite-list");
+  if (!list) return;
+  if (!list.hidden) { list.hidden = true; return; }
+  list.hidden = false;
+  list.innerHTML = `<li class="hint">Loading friends…</li>`;
+  try {
+    if (!duo) {
+      await createDuo();
+      // createDuo's watch fires async; wait for the local mirror.
+      for (let i = 0; i < 20 && !duo; i++) await new Promise((r) => setTimeout(r, 100));
+      if (!duo) throw new Error("Couldn't set the team up.");
+    }
+    const friends = await getInvitableFriends();
+    if (!friends.length) {
+      list.innerHTML = `<li class="hint">No friends online right now — add some from the title screen.</li>`;
+      return;
+    }
+    list.innerHTML = friends.map((p) => `
+      <li class="friend-row p-${p.color ?? "slate"}">
+        ${tankSVG(p.color ?? "slate")}
+        <span class="friend-name">${p.name}</span>
+        <button class="btn btn-small" data-duo-invite="${p.key}" ${p.dnd ? "disabled" : ""}>
+          ${p.dnd ? "DND" : "INVITE"}
+        </button>
+      </li>`).join("");
+    list.querySelectorAll("[data-duo-invite]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await sendInvite(btn.dataset.duoInvite, duo.code, "duo");
+          toast("Team invite sent.");
+          btn.disabled = true;
+          btn.textContent = "SENT";
+        } catch (e) { toast("Couldn't send the invite."); }
+      });
+    });
+  } catch (e) {
+    list.innerHTML = `<li class="hint">${e?.message ?? "Couldn't load friends."}</li>`;
+  }
+}
+
+// Deep-link helper: after accepting a duo invite, land on the 2v2 tab.
+export function showRanked2v2() {
+  document.getElementById("ranked-tab-2v2")?.click();
 }
 
 function setQueueUI(state, extra = "") {
@@ -324,9 +374,9 @@ function setQueueUI(state, extra = "") {
       btn.textContent = "FIND 2v2 MATCH";
       btn.disabled = !full || !isDuoLeader();
       status.textContent = extra || (!duo
-        ? "Team up (2 players) to queue. Teams are paired by MEAN Elo, within ±100."
+        ? "Invite a friend to your empty seat to queue. Teams pair by MEAN Elo, within ±100."
         : !full
-          ? `Waiting for your teammate — share code ${duo.code}.`
+          ? "Waiting for your teammate to accept the invite…"
           : isDuoLeader()
             ? "Team ready. Find a match!"
             : "Team ready — your leader (★) starts the search.");
@@ -593,11 +643,7 @@ async function renderLeaderboard() {
 export function initRanked() {
   document.getElementById("ranked-queue").addEventListener("click", joinQueue);
 
-  // 2v2 duo panel controls.
-  document.getElementById("duo-create")?.addEventListener("click", createDuo);
-  document.getElementById("duo-join")?.addEventListener("click", () => {
-    joinDuo(document.getElementById("duo-code-input")?.value);
-  });
+  // 2v2 duo panel controls (invites happen inside renderDuoPanel).
   document.getElementById("duo-leave")?.addEventListener("click", leaveDuo);
 
   const tab1 = document.getElementById("ranked-tab-1v1");

@@ -25,7 +25,7 @@
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, tankSVG } from "./main.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
-import { startOnlineGame, onlineLobbyUpdate, stopGame, rankedInProgress, getMatchStats } from "./game.js";
+import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats } from "./game.js";
 import * as social from "./social.js";
 import { rankBadge, applyMatchResult } from "./ranked.js";
 import { showVersus, recordResult } from "./versus.js";
@@ -327,7 +327,7 @@ async function leaveLobby() {
   // exit into their 3:0 win; in 2v2 my three tablemates keep playing
   // (the abandoned player is now in a 1v2) and I'm dropped from their
   // final tally. Computed BEFORE I remove myself, best-effort.
-  if (c && c.ranked && !c.rankedSettled && rankedInProgress() && c.rankedInfo) {
+  if (c && c.ranked && !c.rankedSettled && c.inGame && c.rankedInfo) {
     c.rankedSettled = true;
     const acc = social.getAccount();
     const me = acc ? c.rankedInfo.find((r) => r.key === acc.key) : null;
@@ -364,11 +364,12 @@ async function leaveLobby() {
   }
 
   stopGame(); // no-op if we weren't mid-match
-  if (!c) { showScreen("screen-online"); return; }
+  const dest = c?.ranked ? "screen-ranked" : "screen-online";
+  if (!c) { showScreen(dest); return; }
 
   current = null;
   try { c.unsub(); } catch { /* already gone */ }
-  showScreen("screen-online");
+  showScreen(dest);
 
   // Best-effort cleanup: remove me; if only bots (or nobody) remain,
   // remove the whole lobby — bots can't play by themselves.
@@ -512,6 +513,7 @@ function handleSnapshot(code, snap) {
 // handler walks them back to the lobby screen together.
 function endMatchForAll() {
   if (!current) return;
+  stopGame(); // the exit handler no longer pre-stops for online exits
   // The host transitions instantly; everyone else follows on the
   // snapshot that carries the state flip.
   current.inGame = false;
@@ -634,6 +636,7 @@ function beginOnlineGame(code, lobby) {
     ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
         id,
         key: p.ukey ?? null,
+        name: p.name ?? p.ukey ?? "Player",
         elo: (rMode === "1v1" ? p.e1 : p.e2) ?? 500,
         team: teamsById ? (teamsById[id] ?? 0) : null,
       }))

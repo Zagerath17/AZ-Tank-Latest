@@ -73,7 +73,7 @@ export const BOOST = {
 };
 
 export const PHASE = {
-  durationMs: 1500,  // 1.5 seconds of intangibility
+  durationMs: 1000,  // one second of intangibility
   opacity: 0.5,      // half-transparent while phasing
 };
 
@@ -89,8 +89,8 @@ export const ARMOUR = {
 // ANY tank standing in it.
 export const HEAL = {
   radiusCells: 0.5,   // ~1 cell diameter
-  durationMs: 9000,
-  tickMs: 3000,       // 3 s inside per HP
+  durationMs: 6000,
+  tickMs: 2000,       // 2 s inside per HP (3 ticks over the pad's life)
   tickGraceMs: 60,    // absorbs the one-frame boundary so 9 s → the full 3 HP
   healPerHp: 1,
 };
@@ -99,21 +99,56 @@ export const HEAL = {
 // Any tank inside moves 20% slower. Dries up after a while.
 export const MUD = {
   radiusCells: 0.55,
-  slow: 0.6,          // 40% slow-down
+  slow: 0.3,          // 70% slow-down
   lifeMs: 15000,
 };
 
 // Mortar: indirect fire. The shot is aimed at the mouse, snapped to
 // the centre of that cell (max reach rangeCells), arcs high over
-// everything, and lands after msPerCell of flight per cell of
-// distance. A pulsing red marker warns the landing cell; impact
-// throws a dark smoke cloud over it. Damage rings live in game code
-// (they're sized off the tank/cell constants).
+// everything, and lands after a flight whose SPEED GROWS as it goes:
+// it leaves at baseCellsPerSec and gains +50% for every full cell
+// traveled (cell 1 at 2 c/s, cell 2 at 3, cell 3 at 4.5, ...). A
+// pulsing red marker warns the landing cell; impact throws a dark
+// smoke cloud over it. Damage rings live in game code.
 export const MORTAR = {
-  rangeCells: 5,      // "going out 5 cells takes 5 seconds"
-  msPerCell: 500,     // 2 cells / second (0.5 s per cell)
-  cloudMs: 1100,      // the dark cloud lingers this long
+  rangeCells: 5,
+  baseCellsPerSec: 2,   // launch speed
+  accelPerCell: 1.5,    // ×1.5 after each full cell traveled
+  cloudMs: 1100,        // the dark cloud lingers this long
 };
+
+// Total flight time (ms) to cover `distCells`, cell by cell.
+export function mortarFlightMs(distCells) {
+  let ms = 0;
+  let v = MORTAR.baseCellsPerSec;
+  let left = Math.max(0, distCells);
+  while (left > 0) {
+    const seg = Math.min(1, left);
+    ms += (seg / v) * 1000;
+    left -= seg;
+    v *= MORTAR.accelPerCell;
+  }
+  return Math.max(280, ms);
+}
+
+// Distance covered (in cells) after `elapsedMs` of a `distCells`
+// flight — the inverse of mortarFlightMs, for drawing the shell.
+export function mortarDistAt(elapsedMs, distCells) {
+  let msLeft = Math.max(0, elapsedMs);
+  let v = MORTAR.baseCellsPerSec;
+  let gone = 0;
+  let left = Math.max(0, distCells);
+  while (left > 0) {
+    const seg = Math.min(1, left);
+    const segMs = (seg / v) * 1000;
+    if (msLeft < segMs) return gone + (msLeft / segMs) * seg;
+    msLeft -= segMs;
+    gone += seg;
+    left -= seg;
+    v *= MORTAR.accelPerCell;
+  }
+  return distCells;
+}
 
 // A temporary brick wall the player drops. It BLOCKS movement and
 // eats projectiles (they don't bounce off it — they're consumed). It
@@ -131,7 +166,7 @@ export const WALL = {
 
 export const MG = {
   windupMs: 500,     // barrel spin-up on the first trigger pull
-  shots: 26,         // total balls per pickup — hold or tap to fire
+  shots: 18,         // total balls per pickup — hold or tap to fire
   gapMs: 90,         // minimum gap between balls while holding
   spread: 0.07,      // radians of random scatter per ball
   r: 0.5,            // × bullet radius — "half sized balls"
@@ -208,7 +243,7 @@ export function castRay(x, y, dx, dy, rects, maxDist) {
 // local frame, returns { d, nx, ny, hit } with the WORLD-space surface
 // normal (facing the incoming ray) — so the exterior/diagonal boundary
 // reflects the laser like any wall.
-function castRaySlab(x, y, dx, dy, slab, maxDist) {
+export function castRaySlab(x, y, dx, dy, slab, maxDist) {
   const ca = Math.cos(slab.a), sa = Math.sin(slab.a);
   // Ray origin + direction into the slab's local axes.
   const lx = (x - slab.x) * ca + (y - slab.y) * sa;

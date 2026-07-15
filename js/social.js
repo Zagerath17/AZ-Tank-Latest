@@ -123,7 +123,7 @@ function authErrorText(e) {
 }
 
 // After auth succeeds, connect the uid to its username profile.
-async function adoptProfile(uid, wantName = null) {
+async function adoptProfile(uid, wantName = null, email = null) {
   const f = await ensureFirebase();
   let key = (await f.get(f.ref(f.db, `uids/${uid}`))).val();
 
@@ -141,6 +141,12 @@ async function adoptProfile(uid, wantName = null) {
     });
   }
 
+  // Keep the account's email on file so "sign in with username" can
+  // resolve it (back-fills quietly for accounts made before this).
+  if (email) {
+    f.set(f.ref(f.db, `users/${key}/email`), String(email).toLowerCase()).catch(() => {});
+  }
+
   const prof = (await f.get(f.ref(f.db, `users/${key}`))).val() ?? {};
   account = { key, name: prof.name ?? key, uid };
   localStorage.setItem(LS_NAME, JSON.stringify(account));
@@ -156,10 +162,25 @@ async function adoptProfile(uid, wantName = null) {
   return account;
 }
 
-export async function doSignIn(email, pass) {
+// Resolve a sign-in identifier: an email passes through; a username
+// looks up the email stored on that profile.
+async function resolveEmail(identifier) {
+  const id = (identifier ?? "").trim();
+  if (!id) throw new Error("Enter your email or username.");
+  if (id.includes("@")) return id;
+  const f = await ensureFirebase();
+  const email = (await f.get(f.ref(f.db, `users/${keyOf(id)}/email`))).val();
+  if (!email) {
+    throw new Error("No email on file for that username yet — sign in with your email once.");
+  }
+  return email;
+}
+
+export async function doSignIn(identifier, pass) {
   const a = await ensureAuth();
-  const cred = await a.signIn(a.auth, email.trim(), pass);
-  return adoptProfile(cred.user.uid);
+  const email = await resolveEmail(identifier);
+  const cred = await a.signIn(a.auth, email, pass);
+  return adoptProfile(cred.user.uid, null, cred.user.email);
 }
 
 export async function doCreate(email, pass, name) {
@@ -176,15 +197,14 @@ export async function doCreate(email, pass, name) {
     await a.sendVerify(cred.user);
     toast("Account made — a verification email is on its way.", 6000);
   } catch (e) { /* they can resend later; account still works */ }
-  return adoptProfile(cred.user.uid, name);
+  return adoptProfile(cred.user.uid, name, cred.user.email);
 }
 
 // Send a password-reset email for an existing account.
-export async function doPasswordReset(email) {
-  const e = (email ?? "").trim();
-  if (!e) throw new Error("Enter your email first, then tap Forgot password.");
+export async function doPasswordReset(identifier) {
   const a = await ensureAuth();
-  await a.sendReset(a.auth, e);
+  const email = await resolveEmail(identifier);
+  await a.sendReset(a.auth, email);
 }
 
 export async function logout() {
@@ -379,6 +399,20 @@ function startListening() {
       }
       fb2.get(fb2.ref(fb2.db, `users/${from}/name`)).then((s) => {
         const who = s.val() ?? from;
+        if (data.kind === "duo") {
+          // A 2v2 team invite — accepting seats you in their duo.
+          showBanner(`${who} invited you to their 2v2 team`, "JOIN", async () => {
+            try {
+              const m = await import("./ranked.js");
+              await m.joinDuo(String(data.code));
+              showScreen("screen-ranked");
+              m.showRanked2v2?.();
+            } catch (e) {
+              toast(e?.message ?? "Couldn't join that team.");
+            }
+          });
+          return;
+        }
         showBanner(`${who} invited you to lobby ${data.code}`, "JOIN", async () => {
           try {
             await joinLobby(String(data.code));
@@ -566,6 +600,28 @@ async function searchPlayer() {
   }
 }
 
+/* ---------- shared invite helpers ---------- */
+
+// Online, non-DND friends — for invite pickers (lobby and 2v2 duo).
+export async function getInvitableFriends() {
+  if (!account) return [];
+  const f = await ensureFirebase();
+  const fs = await f.get(f.ref(f.db, `users/${account.key}/friends`));
+  const keys = Object.keys(fs.val() ?? {});
+  const profiles = (await Promise.all(keys.map((k) => fetchProfile(f, k)))).filter(Boolean);
+  return profiles.filter((p) => p.status && p.status !== "offline");
+}
+
+// Drop an invite in a friend's inbox. kind: undefined = lobby, "duo" =
+// a 2v2 team seat. `code` is the lobby/duo code to join on accept.
+export async function sendInvite(friendKey, code, kind = null) {
+  if (!account) throw new Error("Log in first.");
+  const f = await ensureFirebase();
+  await f.set(f.ref(f.db, `users/${friendKey}/invites/${account.key}`), {
+    code, at: Date.now(), ...(kind ? { kind } : {}),
+  });
+}
+
 /* ---------- host's in-lobby invite panel ---------- */
 
 export async function toggleInvitePanel() {
@@ -626,7 +682,7 @@ export function initSocial() {
   if (account) {
     ensureAuth()
       .then((a) => a.onAuthStateChanged(a.auth, (user) => {
-        if (user) adoptProfile(user.uid).catch(() => {});
+        if (user) adoptProfile(user.uid, null, user.email).catch(() => {});
         else { // cached name but no session — require a fresh login
           account = null;
           localStorage.removeItem(LS_NAME);
@@ -660,13 +716,13 @@ export function initSocial() {
   };
   const siBtn = document.getElementById("login-signin");
   const crBtn = document.getElementById("login-create");
-  siBtn.addEventListener("click", busyGuard(siBtn, () => doSignIn(val("login-email"), val("login-pass"))));
-  crBtn.addEventListener("click", busyGuard(crBtn, () => doCreate(val("login-email"), val("login-pass"), val("login-name"))));
+  siBtn.addEventListener("click", busyGuard(siBtn, () => doSignIn(val("login-ident"), val("login-pass"))));
+  crBtn.addEventListener("click", busyGuard(crBtn, () => doCreate(val("signup-email"), val("signup-pass"), val("signup-name"))));
   const fgBtn = document.getElementById("login-forgot");
   if (fgBtn) fgBtn.addEventListener("click", async () => {
     fgBtn.disabled = true;
     try {
-      await doPasswordReset(val("login-email"));
+      await doPasswordReset(val("login-ident"));
       toast("Password-reset email sent — check your inbox.", 6000);
     } catch (e) {
       toast(authErrorText(e), 5000);
@@ -674,6 +730,19 @@ export function initSocial() {
       fgBtn.disabled = false;
     }
   });
+  // Sign in / Create account tabs.
+  const tabIn = document.getElementById("login-tab-in");
+  const tabUp = document.getElementById("login-tab-up");
+  const pickLoginTab = (up) => {
+    tabIn?.classList.toggle("is-on", !up);
+    tabUp?.classList.toggle("is-on", up);
+    const fi = document.getElementById("login-form-in");
+    const fu = document.getElementById("login-form-up");
+    if (fi) fi.hidden = up;
+    if (fu) fu.hidden = !up;
+  };
+  tabIn?.addEventListener("click", () => pickLoginTab(false));
+  tabUp?.addEventListener("click", () => pickLoginTab(true));
 
   // Social screen tabs: Friends | Requests | Add Friends
   const tabs = {

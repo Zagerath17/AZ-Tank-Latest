@@ -48,7 +48,12 @@ async function recordVsDuo(f, mateKey, oppKeys) {
 export async function showVersus(roster, myId, mode, teams = null, players = []) {
   const acc = getAccount();
   const host = document.getElementById("versus-body");
-  const ukeyOf = (id) => players.find(([pid]) => pid === id)?.[1]?.ukey ?? null;
+  // players may arrive as entries ([[id, p]]) or an id→p object.
+  const entries = Array.isArray(players) ? players : Object.entries(players ?? {});
+  const ukeyOf = (id) =>
+    roster.find((r) => r.id === id)?.ukey
+    ?? entries.find(([pid]) => pid === id)?.[1]?.ukey
+    ?? null;
 
   const meRow = roster.find((r) => r.id === myId);
   let allies = [];
