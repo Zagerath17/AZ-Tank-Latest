@@ -36,7 +36,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.6.5</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -252,6 +252,24 @@
           <p class="hint" id="lobby-paint-hint">Your paint — taken colors are locked:</p>
           <div class="swatches swatches-wide" id="lobby-paint"></div>
           <button class="btn" id="lobby-addbot" hidden>Add a bot tank</button>
+          <div class="panel host-settings" id="lobby-settings" hidden>
+            <button class="btn settings-head" id="settings-toggle" type="button">
+              MATCH SETTINGS <span id="settings-caret">▾</span>
+            </button>
+            <div id="settings-body" hidden>
+              <p class="set-label">Map sizes</p>
+              <div class="set-chips" id="set-sizes"></div>
+              <p class="set-label">Abilities in rotation</p>
+              <div class="set-chips" id="set-gear"></div>
+              <div class="set-row">
+                <button class="btn btn-small" id="set-gear-all" type="button">ALL</button>
+                <button class="btn btn-small" id="set-gear-none" type="button">NONE</button>
+              </div>
+              <p class="set-label">Max abilities on the field: <b id="set-max-val">24</b></p>
+              <input type="range" id="set-max" min="1" max="30" value="24" step="1">
+              <p class="hint" id="set-note"></p>
+            </div>
+          </div>
           <p class="hint" id="lobby-status"></p>
           <button class="btn btn-big btn-go" id="lobby-start" hidden>Start battle</button>
         </div>
@@ -325,6 +343,22 @@
     <span id="notice-text"></span>
     <button class="btn btn-small" id="notice-yes" type="button">OK</button>
     <button class="btn btn-small notice-x" id="notice-no" type="button">✕</button>
+  </div>
+  <div id="account-modal" class="acct-modal" hidden>
+    <div class="acct-card">
+      <h3>Account — <span id="acct-who"></span></h3>
+      <label class="acct-label" for="acct-newname">Username</label>
+      <div class="acct-row">
+        <input type="text" id="acct-newname" maxlength="16" autocapitalize="off" autocomplete="off">
+        <button class="btn" id="acct-save" type="button">SAVE</button>
+      </div>
+      <div class="acct-actions">
+        <button class="btn" id="acct-reset" type="button">RESET PASSWORD</button>
+        <button class="btn" id="acct-logout" type="button">LOG OUT</button>
+      </div>
+      <p class="acct-msg" id="acct-msg"></p>
+      <button class="btn btn-go" id="acct-close" type="button">CLOSE</button>
+    </div>
   </div>
   <script type="module" src="js/main.js"></script>
 </body>

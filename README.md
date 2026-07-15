@@ -45,6 +45,7 @@ Then open http://localhost:8080
 >     "lobbies":     { ".read": true, ".write": true },
 >     "users":       { ".read": true, ".write": true, ".indexOn": ["elo1", "elo4"] },
 >     "uids":        { ".read": true, ".write": true },
+>     "names":       { ".read": true, ".write": true },
 >     "queue":       { ".read": true, ".write": true },
 >     "duos":        { ".read": true, ".write": true },
 >     "leaderboard": { ".read": true, ".write": true }
