@@ -1237,3 +1237,47 @@ body {
   max-height: 200px;
   overflow-y: auto;
 }
+
+/* account settings modal */
+.acct-modal {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 8, 12, 0.72);
+  padding: 20px;
+}
+.acct-card {
+  width: min(94vw, 420px);
+  background: #161a22;
+  border: 1px solid var(--rivet);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.55);
+}
+.acct-card h3 { margin: 0 0 14px; font-family: "Black Ops One", system-ui; letter-spacing: .04em; }
+.acct-label { display: block; font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; color: #808896; margin-bottom: 5px; }
+.acct-row { display: flex; gap: 8px; margin-bottom: 14px; }
+.acct-row input {
+  flex: 1; min-width: 0;
+  padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--rivet); background: #0f1218; color: var(--chalk);
+  font-family: "Chakra Petch", system-ui; letter-spacing: .04em;
+}
+.acct-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.acct-actions .btn { flex: 1; }
+.acct-msg { min-height: 1.1em; margin: 6px 0 12px; font-size: .85rem; }
+#acct-close { width: 100%; }
+
+/* host match-settings panel */
+.host-settings { padding: 10px 12px; margin: 6px 0; }
+.settings-head {
+  width: 100%;
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: "Black Ops One", system-ui; letter-spacing: .06em;
+}
+.set-label { margin: 10px 0 6px; font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; color: #808896; }
+.set-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.set-chip { opacity: .42; border-style: dashed; }
+.set-chip.is-on { opacity: 1; border-style: solid; border-color: #4bd08a; color: #d8ffe9; }
+.set-row { display: flex; gap: 6px; margin-top: 8px; }
+#set-max { width: 100%; margin: 2px 0 4px; accent-color: #4bd08a; }
+#set-note { min-height: 1.1em; }
