@@ -27,6 +27,22 @@ import { sfx } from "./audio.js";
 const LS_NAME = "tank.account.v1";
 const LS_DND = "tank.dnd.v1";
 const LS_NOREQ = "tank.noreq.v1";
+// ---- dev accounts ----------------------------------------------
+// A short, fixed roster. Membership is decided by the address on the
+// FIREBASE AUTH record — not by anything in the database or on this
+// device — so no other account can inherit these powers by editing a
+// profile. Everyone not on this list is completely unaffected: every
+// dev branch below is behind isDev(), which is false for them.
+const DEV_EMAILS = new Set([
+  "samuelbarnhart17@gmail.com",
+  "rainphyer17@gmail.com",
+  "barnhartisaac@gmail.com",
+]);
+
+function isDevEmail(email) {
+  return DEV_EMAILS.has(String(email ?? "").trim().toLowerCase());
+}
+
 const LS_BLOCKS = "tank.blocks.v1";
 const LS_VOICE = "tank.voice.v1";
 
@@ -98,6 +114,37 @@ function openAccountPanel() {
   const msg = document.getElementById("acct-msg");
   msg.textContent = "";
   modal.hidden = false;
+
+  // Dev tools: hidden entirely unless this account is on the roster,
+  // so a normal player never sees (or can reach) any of it.
+  const devWrap = document.getElementById("acct-dev");
+  const paintDevElo = () => {
+    const a = document.getElementById("dev-elo1");
+    const b = document.getElementById("dev-elo2");
+    if (a) a.textContent = devElo("1v1") ?? "—";
+    if (b) b.textContent = devElo("2v2") ?? "—";
+  };
+  if (devWrap) {
+    devWrap.hidden = !isDev();
+    if (isDev()) paintDevElo();
+  }
+  const onDevElo = async (e) => {
+    const btn = e.target.closest("[data-dev-elo]");
+    if (!btn || !isDev()) return;
+    btn.disabled = true;
+    try {
+      await devAdjustElo(btn.dataset.devElo, +btn.dataset.delta);
+      paintDevElo();
+      msg.style.color = "#4bd08a";
+      msg.textContent = "Elo updated.";
+    } catch (err) {
+      msg.style.color = "#ff6a4d";
+      msg.textContent = err?.message ?? "Couldn't change Elo.";
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  devWrap?.addEventListener("click", onDevElo);
 
   const close = () => { modal.hidden = true; cleanup(); };
   const onSave = async () => {
@@ -189,6 +236,7 @@ function openAccountPanel() {
   delCancel?.addEventListener("click", onDelCancel);
   delGo?.addEventListener("click", onDelGo);
   function cleanup() {
+    devWrap?.removeEventListener("click", onDevElo);
     saveBtn.removeEventListener("click", onSave);
     resetBtn.removeEventListener("click", onReset);
     logoutBtn.removeEventListener("click", onLogout);
@@ -273,6 +321,8 @@ async function adoptProfile(uid, wantName = null, email = null) {
   const prof = (await f.get(f.ref(f.db, `users/${key}`))).val() ?? {};
   account = {
     key, name: prof.name ?? key, uid,
+    // Set from the auth email only; never read back from the profile.
+    dev: isDevEmail(email ?? auth?.auth?.currentUser?.email),
     // Shop state travels with the account: paint you've equipped, the
     // tags you've earned, and everything you own.
     skin: SKINS[prof.color] && !SKINS[prof.color].reserved ? prof.color : DEFAULT_SKIN,
@@ -532,6 +582,31 @@ export function setStatus(status, lobbyCode = null) {
     .catch(() => {});
 }
 
+/* ---------- dev tools ---------- */
+
+// Nudge one of MY OWN ratings by ±100. Dev-only, and it only ever
+// writes this account's own rows — no other player is touched.
+export async function devAdjustElo(mode, delta) {
+  if (!account?.dev) throw new Error("Not a dev account.");
+  const field = mode === "2v2" ? "elo2v2" : "elo1";
+  const f = await ensureFirebase();
+  const cur = (await f.get(f.ref(f.db, `users/${account.key}/${field}`))).val();
+  const next = Math.max(0, Math.round((cur ?? 500) + delta));
+  await f.update(f.ref(f.db), {
+    [`users/${account.key}/${field}`]: next,
+    // Keep the public mirror in step, or the leaderboard would lie.
+    [`leaderboard/${field}/${account.key}`]: { name: account.name ?? account.key, elo: next },
+  });
+  account[field] = next;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  return next;
+}
+
+export function devElo(mode) {
+  const field = mode === "2v2" ? "elo2v2" : "elo1";
+  return account?.[field] ?? null;
+}
+
 /* ---------- the shop: tags, ownership, equipped paint ---------- */
 
 // The paint this device wears. Signed out, that's always the default —
@@ -540,7 +615,14 @@ export function getSkin() {
   return account?.skin ?? DEFAULT_SKIN;
 }
 
+// Is the signed-in account on the dev roster? False for everyone else,
+// which is what keeps every dev branch inert on normal accounts.
+export function isDev() {
+  return !!account?.dev;
+}
+
 export function getTags() {
+  if (account?.dev) return Infinity; // dev accounts never run out
   return account?.tags ?? 0;
 }
 
@@ -582,8 +664,16 @@ export async function buySkin(id) {
   if (!skin || skin.reserved) throw new Error("That paint doesn't exist.");
   if (ownsSkin(id)) throw new Error("You already own that.");
   const cost = skin.cost ?? 0;
-  if (account.tags < cost) throw new Error(`Not enough tags — you need ${cost - account.tags} more.`);
   const f = await ensureFirebase();
+  // Dev accounts have infinite tags: grant the paint, charge nothing,
+  // and don't touch the balance.
+  if (account.dev) {
+    await f.set(f.ref(f.db, `users/${account.key}/owned/${id}`), true);
+    account.owned = { ...(account.owned ?? {}), [id]: true };
+    localStorage.setItem(LS_NAME, JSON.stringify(account));
+    return Infinity;
+  }
+  if (account.tags < cost) throw new Error(`Not enough tags — you need ${cost - account.tags} more.`);
   // Re-read the balance before spending: tags are earned on other
   // devices too, and the cached number can be stale.
   const live = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val() ?? 0;
@@ -606,6 +696,7 @@ export async function buySkin(id) {
 export async function awardTags(kills) {
   const n = Math.max(0, Math.floor(kills ?? 0));
   if (!account || !n) return account?.tags ?? 0;
+  if (account.dev) return Infinity; // already infinite; nothing to bank
   try {
     const f = await ensureFirebase();
     const live = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val() ?? 0;
@@ -1007,7 +1098,12 @@ export async function toggleInvitePanel() {
 export function initSocial() {
   try {
     const saved = JSON.parse(localStorage.getItem(LS_NAME));
-    if (saved?.key) account = saved; // instant UI; auth confirms below
+    if (saved?.key) {
+      // Instant UI; auth confirms below. The cached copy is never
+      // trusted for dev status — that's recomputed from the auth
+      // email in adoptProfile, so editing this blob grants nothing.
+      account = { ...saved, dev: false };
+    }
   } catch (e) { /* fresh device */ }
   refreshLoginButton();
 

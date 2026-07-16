@@ -15,7 +15,7 @@ import {
   SKINS, SHOP_SKINS, TIER_ORDER, DEFAULT_SKIN, tierUnlocked, skinFinish,
 } from "./skins.js";
 import {
-  getAccount, getSkin, getTags, ownsSkin, bestElo, buySkin, equipSkin,
+  getAccount, getSkin, getTags, ownsSkin, bestElo, buySkin, equipSkin, isDev,
 } from "./social.js";
 import { rankOf } from "./ranked.js";
 
@@ -96,7 +96,7 @@ function renderColours() {
           ${g.ids.map((id) => tile(id, {
             owned: ownsSkin(id),
             worn: id === worn,
-            afford: tags >= (SKINS[id].cost ?? 0),
+            afford: isDev() || tags >= (SKINS[id].cost ?? 0),
             unlocked,
           })).join("")}
         </div>
@@ -109,7 +109,7 @@ function renderColours() {
       ? "Log in to earn tags and buy paint — you're running standard red for now."
       : elo == null
         ? "Play a ranked match to set your rank. Copper paint is open to you now."
-        : `${rank} rank · paint up to ${rank} is open to you.`;
+        : `${rank} rank · paint up to ${rank} is open to you.${isDev() ? " · DEV: unlimited tags" : ""}`;
   }
 }
 
@@ -139,7 +139,10 @@ function renderPatterns() {
 
 function refresh() {
   const tagsEl = document.getElementById("shop-tags");
-  if (tagsEl) tagsEl.textContent = String(getTags());
+  if (tagsEl) {
+    const n = getTags();
+    tagsEl.textContent = Number.isFinite(n) ? String(n) : "∞";
+  }
   if (tab === "colours") renderColours();
   else renderPatterns();
 }

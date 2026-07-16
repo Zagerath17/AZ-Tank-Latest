@@ -112,8 +112,6 @@ export function tankSVG(color) {
       <path d="M4 13h8 M4 19h8 M4 25h8 M4 31h8 M4 37h8"/>
       <path d="M36 13h8 M36 19h8 M36 25h8 M36 31h8 M36 37h8"/>
     </g>
-    <!-- barrel (front = up) -->
-    <rect x="21" y="1" width="6" height="16" rx="2.4" fill="${barrel}"/>
     <!-- hull -->
     <rect x="10" y="9" width="28" height="30" rx="6" fill="${hull}"/>
     <!-- front glacis + nose chevron (top) -->
@@ -126,7 +124,11 @@ export function tankSVG(color) {
     </g>
     <rect x="15" y="38" width="4" height="3" rx="1" fill="#3a3f4c"/>
     <rect x="29" y="38" width="4" height="3" rx="1" fill="#3a3f4c"/>
-    <!-- turret -->
+    <!-- Barrel and turret ride ON TOP of the hull, exactly as the game
+         draws them: the barrel runs from the turret's centre out past
+         the nose, and the turret ring caps its root. Drawing either of
+         them before the hull buries the assembly. -->
+    <rect x="21" y="1" width="6" height="24" rx="2.4" fill="${barrel}"/>
     <circle cx="24" cy="24" r="7.5" fill="${barrel}"/>
     <circle cx="24" cy="24" r="7.5" fill="none" stroke="${chevron}" stroke-width="1"/>
   </svg>`;
