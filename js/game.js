@@ -14,6 +14,7 @@
 
 import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
 import { COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
+import { skinFinish } from "./skins.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon, snapSpawn } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
@@ -49,9 +50,11 @@ const GEAR_EVERY_JITTER = 2500;
 const GEAR_SPREAD_MIN = CELL * 2.2; // crates keep this far apart when they can
 
 // ---- Ranked closing zone ----
-const ZONE_FIRST_MS = 30000;   // first layer claimed 30 s in
-const ZONE_PERIOD = 30000;     // a new layer every 30 s thereafter
+const ZONE_FIRST_MS = 30000;   // first layer claimed 30 s in (ranked)
+const ZONE_PERIOD = 30000;     // a new layer every 30 s thereafter (ranked)
 const ZONE_WARN_MS = 5000;     // a layer blinks this long before it turns red
+export const ZONE_MIN_PERIOD = 10000; // custom-lobby clamp: fastest zone
+export const ZONE_MAX_PERIOD = 60000; // custom-lobby clamp: slowest zone
 const ZONE_DMG_PERIOD = 2000;  // red cells deal 1 dmg every 2 s
 const ZONE_DMG = 1;            // damage per tick
 const ZONE_INSIDE_FRAC = 0.30; // a tank must be >30% into a red cell to be hit
@@ -317,6 +320,8 @@ function opts_toState(o) {
     gearPool: o.gearPool,
     gearMax: o.gearMax,
     sizePool: o.sizePool,
+    zone: o.zone,
+    zonePeriod: o.zonePeriod,
     teams: o.teams,
     onRankedEnd: o.onRankedEnd,
     casualPlayers: o.casualPlayers,
@@ -332,6 +337,7 @@ export function stopGame() {
   window.removeEventListener("keyup", onKeyup);
   window.removeEventListener("blur", clearHeld);
   touchPad.hidden = true;
+  touchPad.parentElement?.classList.remove("has-touch");
   if (scoreEl) scoreEl.innerHTML = "";
   if (loadoutHudEl) loadoutHudEl.hidden = true;
   if (armourHudEl) armourHudEl.hidden = true;
@@ -562,9 +568,12 @@ function begin(opts) {
   window.addEventListener("blur", clearHeld);
 
   // On-screen controls when a touch device drives exactly one human tank.
+  // They're overlaid on the arena, so flag the wrap — the corner HUDs
+  // shift up out from under the sticks.
   const isTouch = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
   const humanLocal = S.tanks.filter((t) => t.local && !t.bot).length;
   touchPad.hidden = !(isTouch && humanLocal === 1);
+  touchPad.parentElement?.classList.toggle("has-touch", !touchPad.hidden);
 
   updateScoreHUD();
   showScreen("screen-game");
@@ -631,7 +640,16 @@ function startRound(seed) {
   S.zoneMaxLayer = rd.maxLayer;
   S.zoneLevel = 0;             // layers currently permanently red
   S.zoneWarnLevel = -1;        // layer currently blinking (‑1 = none)
-  S.zoneNextAt = S.ranked ? S.freezeUntil + ZONE_FIRST_MS : Infinity;
+  // Ranked always closes on the default cadence. Custom lobbies close
+  // only if the host enabled it, and at the host's chosen period
+  // (clamped 10–60 s). The warning blink can't outrun the period, so a
+  // fast 10 s zone still gets a sensible heads-up.
+  const zoneOn = S.ranked || !!opts.zone;
+  S.zonePeriod = S.ranked
+    ? ZONE_PERIOD
+    : Math.max(ZONE_MIN_PERIOD, Math.min(ZONE_MAX_PERIOD, (opts.zonePeriod ?? 30) * 1000));
+  S.zoneWarn = Math.min(ZONE_WARN_MS, Math.max(2000, S.zonePeriod - 2000));
+  S.zoneNextAt = zoneOn ? S.freezeUntil + S.zonePeriod : Infinity;
   S.zoneWarnUntil = 0;
   S.zoneDamageAt = 0;          // next time red cells tick damage
   S.rockets = [];
@@ -1849,12 +1867,12 @@ function redZoneTicks(t) {
 // more than 30% inside them, every ZONE_DMG_PERIOD. This proceeds until
 // every cell is red (at which point any survivors all die → draw).
 function stepShrink(now) {
-  if (!S.ranked || S.zoneNextAt === Infinity) return;
+  if (S.zoneNextAt === Infinity) return;
 
   // --- promote a layer: start its warning blink ---
   if (S.zoneWarnLevel < 0 && S.zoneLevel <= S.zoneMaxLayer && now >= S.zoneNextAt) {
     S.zoneWarnLevel = S.zoneLevel;      // this layer begins blinking
-    S.zoneWarnUntil = now + ZONE_WARN_MS;
+    S.zoneWarnUntil = now + (S.zoneWarn ?? ZONE_WARN_MS);
     S.zoneFlashTick = -1;
   }
 
@@ -1880,7 +1898,7 @@ function stepShrink(now) {
     // Schedule the next layer, or — once the whole map is red — a final
     // sweep that finishes off anyone still standing.
     if (S.zoneLevel <= S.zoneMaxLayer) {
-      S.zoneNextAt = now + ZONE_PERIOD;
+      S.zoneNextAt = now + (S.zonePeriod ?? ZONE_PERIOD);
     } else {
       S.zoneNextAt = Infinity; // fully closed
     }
@@ -3306,7 +3324,8 @@ function draw(now) {
   // next layer, flips to a red "CLOSING" flash while a layer blinks,
   // and disappears once the whole map is red.
   if (shrinkEl) {
-    if (S.ranked && !counting) {
+    const zoneActive = S.zoneNextAt !== Infinity || (S.zoneWarnLevel ?? -1) >= 0;
+    if (zoneActive && !counting) {
       const warning = (S.zoneWarnLevel ?? -1) >= 0;
       if (warning) {
         const left = Math.max(0, Math.ceil((S.zoneWarnUntil - now) / 1000));
@@ -3324,7 +3343,7 @@ function draw(now) {
         shrinkEl.textContent = `ZONE ${mm}:${ss}`;
         shrinkEl.classList.remove("warn");
       }
-    } else if (!S.ranked) {
+    } else if (!zoneActive) {
       shrinkEl.hidden = true;
     }
   }
@@ -3597,6 +3616,49 @@ function drawWall(w, now) {
   ctx.restore();
 }
 
+// The hull fill for a paint id: a flat colour for ordinary paints, or
+// a raked gradient for the shop's metals. Called per tank per frame,
+// so the flat path stays a plain string and only the metals build a
+// gradient object.
+function hullPaint(color, R, now) {
+  const hex = HULL[color] ?? HULL.red;
+  const finish = skinFinish(color);
+  if (finish === "flat") return hex;
+  // A slow drift so the sheen lives rather than sitting frozen.
+  const t = (now / 2600) % 1;
+  const sweep = -R + t * R * 0.5;
+  const g = ctx.createLinearGradient(sweep - R, -R, sweep + R, R);
+  if (finish === "metallic") {
+    g.addColorStop(0, shade(hex, 0.45));
+    g.addColorStop(0.34, hex);
+    g.addColorStop(0.5, shade(hex, -0.62));
+    g.addColorStop(0.66, hex);
+    g.addColorStop(1, shade(hex, 0.45));
+  } else if (finish === "reflective") {
+    g.addColorStop(0, shade(hex, 0.55));
+    g.addColorStop(0.3, hex);
+    g.addColorStop(0.46, "#ffffff");
+    g.addColorStop(0.6, hex);
+    g.addColorStop(0.78, shade(hex, 0.5));
+    g.addColorStop(1, hex);
+  } else if (finish === "shiny") {
+    g.addColorStop(0, shade(hex, 0.4));
+    g.addColorStop(0.38, hex);
+    g.addColorStop(0.52, "#fffbe6");
+    g.addColorStop(0.68, hex);
+    g.addColorStop(1, shade(hex, 0.42));
+  } else { // prismatic — diamond
+    g.addColorStop(0, hex);
+    g.addColorStop(0.18, "#ffd9f2");
+    g.addColorStop(0.34, "#d9fff0");
+    g.addColorStop(0.5, "#ffffff");
+    g.addColorStop(0.66, "#d9ecff");
+    g.addColorStop(0.84, hex);
+    g.addColorStop(1, "#ffe9fb");
+  }
+  return g;
+}
+
 function drawTank(t, now) {
   const hull = HULL[t.color];
   const R = TANK_R;
@@ -3646,7 +3708,12 @@ function drawTank(t, now) {
     ctx.stroke();
   }
 
-  ctx.fillStyle = hull;
+  // The shop's premium paints aren't flat colours — they're FINISHES.
+  // A gradient raked across the hull sells the material: a swept
+  // highlight for metallic, a hard mirror band for reflective, a bright
+  // bloom for shiny, a spectral sweep for diamond. The finish scrolls
+  // very slowly with time so it catches the light as the tank turns.
+  ctx.fillStyle = hullPaint(t.color, R, now);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
 
   // ---- Directional detail: the FRONT and REAR read differently ----

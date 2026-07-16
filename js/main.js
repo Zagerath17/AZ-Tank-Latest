@@ -3,6 +3,7 @@
 // ================================================================
 
 import { initSettings } from "./settings.js";
+import { initShop } from "./shop.js";
 import { initLocal } from "./local.js";
 import { initOnline } from "./online.js";
 import { initGame } from "./game.js";
@@ -18,7 +19,7 @@ export function setInMatch(v) { inMatch = v; }
 let settingsReturn = "screen-menu";
 
 export {
-  COLORS, SLOT_NAMES, PALETTE, PICKABLE, COLOR_NAMES, freeColor,
+  COLORS, SLOT_NAMES, PALETTE, COLOR_NAMES, freeColor,
 } from "./palette.js";
 import { COLORS } from "./palette.js"; // used below for the menu row
 
@@ -74,13 +75,50 @@ export function toast(msg, ms = 3000) {
 
 /* ---------- top-down tank icon (the recurring motif) ---------- */
 
+// Blend a hex colour toward the dark base (matches the in-game shade).
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const mix = (x, t) => Math.round(x + (t - x) * f);
+  return `rgb(${mix((n >> 16) & 255, 16)}, ${mix((n >> 8) & 255, 19)}, ${mix(n & 255, 26)})`;
+}
+
+// A tank sprite that mirrors what you actually drive: treads with
+// links, a hull with a lighter sloped glacis + nose chevron at the
+// FRONT and a darker engine deck with grille + twin exhausts at the
+// REAR, a turret, and a barrel. Drawn pointing UP (barrel at top).
 export function tankSVG(color) {
-  return `<svg class="tank p-${color}" viewBox="0 0 48 48" aria-hidden="true">
-    <rect class="tread"  x="5"    y="10" width="8"  height="30" rx="3"/>
-    <rect class="tread"  x="35"   y="10" width="8"  height="30" rx="3"/>
-    <rect class="barrel" x="20.5" y="1"  width="7"  height="16" rx="2.6"/>
-    <rect class="hull"   x="11"   y="12" width="26" height="26" rx="6"/>
-    <circle class="turret" cx="24" cy="27" r="7.5"/>
+  const hull = PALETTE[color] ?? PALETTE.slate;
+  const light = shade(hull, -0.2);   // glacis (lighter)
+  const dark = shade(hull, 0.34);    // engine deck (darker)
+  const edge = shade(hull, 0.5);
+  const chevron = shade(hull, -0.5);
+  // Barrel + turret shades reuse the hull family.
+  const barrel = shade(hull, 0.25);
+  return `<svg class="tank" viewBox="0 0 48 48" aria-hidden="true">
+    <!-- treads -->
+    <rect x="4"  y="8" width="8" height="32" rx="3" fill="#2a303c"/>
+    <rect x="36" y="8" width="8" height="32" rx="3" fill="#2a303c"/>
+    <g stroke="#6b7488" stroke-width="1.6">
+      <path d="M4 13h8 M4 19h8 M4 25h8 M4 31h8 M4 37h8"/>
+      <path d="M36 13h8 M36 19h8 M36 25h8 M36 31h8 M36 37h8"/>
+    </g>
+    <!-- barrel (front = up) -->
+    <rect x="21" y="1" width="6" height="16" rx="2.4" fill="${barrel}"/>
+    <!-- hull -->
+    <rect x="10" y="9" width="28" height="30" rx="6" fill="${hull}"/>
+    <!-- front glacis + nose chevron (top) -->
+    <path d="M13 15 L35 15 L31 9 L17 9 Z" fill="${light}"/>
+    <polyline points="17,13 24,9.5 31,13" fill="none" stroke="${edge}" stroke-width="1.4"/>
+    <!-- rear engine deck + grille + exhausts (bottom) -->
+    <rect x="14" y="31" width="20" height="8" rx="2" fill="${dark}"/>
+    <g stroke="${chevron}" stroke-width="1.1">
+      <path d="M17 33.5h14 M17 36h14"/>
+    </g>
+    <rect x="15" y="38" width="4" height="3" rx="1" fill="#3a3f4c"/>
+    <rect x="29" y="38" width="4" height="3" rx="1" fill="#3a3f4c"/>
+    <!-- turret -->
+    <circle cx="24" cy="24" r="7.5" fill="${barrel}"/>
+    <circle cx="24" cy="24" r="7.5" fill="none" stroke="${chevron}" stroke-width="1"/>
   </svg>`;
 }
 
@@ -132,6 +170,7 @@ function renderMenuTanks() {
 wireNavigation();
 renderMenuTanks();
 initSettings();
+initShop();
 initLocal();
 initOnline();
 initGame();

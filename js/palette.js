@@ -1,34 +1,32 @@
 // ================================================================
-// palette.js — colors, slots, and names. Deliberately import-free:
-// game.js and main.js import each other, and module-level constants
-// must live OUTSIDE that cycle or they hit the temporal dead zone.
+// palette.js — control slots and the colour lookup the renderer uses.
+//
+// The paint CATALOGUE (what exists, what it costs, what rank it
+// needs) lives in skins.js; this module just exposes it in the shape
+// the rest of the game already expects. skins.js imports nothing, so
+// there's no cycle to worry about.
 // ================================================================
 
-// The four CONTROL SLOTS (keybind seats). Slots are not colors any
-// more — every tank picks its paint separately.
+import { SKINS, DEFAULT_SKIN, freeBotSkin } from "./skins.js";
+
+// The four CONTROL SLOTS (keybind seats). Slots are not colours.
 export const COLORS = ["red", "green", "blue", "yellow"];
 export const SLOT_NAMES = { red: "Player 1", green: "Player 2", blue: "Player 3", yellow: "Player 4" };
 
-// The full paint shop. "black" exists but is reserved: it belongs to
-// the Impossible AI and can never be picked by anyone else.
-export const PALETTE = {
-  red: "#ff5147", green: "#46d160", blue: "#47a3ff", yellow: "#ffc531",
-  orange: "#f5820b", purple: "#9a5ce6", pink: "#f26fb1", cyan: "#22c3e6",
-  lime: "#a3d21c", teal: "#16a985", magenta: "#cf3fd1", brown: "#a4713a",
-  slate: "#7e8ba3", mint: "#4fdca4", crimson: "#c2183c", navy: "#3550c2",
-  black: "#20242e",
-};
-export const PICKABLE = Object.keys(PALETTE).filter((c) => c !== "black");
-export const COLOR_NAMES = {
-  red: "Red", green: "Green", blue: "Blue", yellow: "Yellow",
-  orange: "Orange", purple: "Purple", pink: "Pink", cyan: "Cyan",
-  lime: "Lime", teal: "Teal", magenta: "Magenta", brown: "Brown",
-  slate: "Slate", mint: "Mint", crimson: "Crimson", navy: "Navy",
-  black: "Black",
-};
+// id → hex, for the renderer.
+export const PALETTE = Object.fromEntries(
+  Object.entries(SKINS).map(([id, s]) => [id, s.hex]),
+);
 
-// Pick a random color that nobody at the table is using.
-export function freeColor(taken, allowBlack = false) {
-  const pool = (allowBlack ? Object.keys(PALETTE) : PICKABLE).filter((c) => !taken.has(c));
-  return pool[Math.floor(Math.random() * pool.length)] ?? "slate";
+// id → display name.
+export const COLOR_NAMES = Object.fromEntries(
+  Object.entries(SKINS).map(([id, s]) => [id, s.name]),
+);
+
+// Nobody "picks" paint any more — it's bought in the shop and worn
+// everywhere. Bots take a random primary that no player is wearing.
+export function freeColor(taken) {
+  return freeBotSkin(taken instanceof Set ? taken : new Set(taken ?? []));
 }
+
+export { DEFAULT_SKIN };

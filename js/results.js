@@ -13,6 +13,19 @@
 import { showScreen } from "./main.js";
 import { ensureFirebase } from "./online.js";
 import { rankBadge } from "./ranked.js";
+import { awardTags } from "./social.js";
+
+// Claim this match's kill tags exactly once. The claim flag lives on
+// the lobby, so reloading the results screen — or a second device —
+// can't collect the same kills twice.
+async function payTags(f, code, myKey, kills) {
+  if (!f || !myKey) return;
+  const ref = f.ref(f.db, `lobbies/${code}/tagged/${myKey}`);
+  const already = (await f.get(ref)).val();
+  if (already) return;
+  await f.set(ref, kills);
+  await awardTags(kills);
+}
 
 // players: [{ id, key, name, color, team, score, elo }]. onContinue is
 // called when the player dismisses the screen.
@@ -26,6 +39,7 @@ export async function showRankedResults(code, rMode, players, myKey, onContinue)
   }
 
   let timer = 0;
+  let paid = false;
   let f = null;
   try { f = await ensureFirebase(); } catch (e) { /* render offline-ish */ }
 
@@ -53,6 +67,19 @@ export async function showRankedResults(code, rMode, players, myKey, onContinue)
       for (const [att, v] of Object.entries(victim ?? {})) killsByPlayer[att] = (killsByPlayer[att] ?? 0) + (+v || 0);
     }
     render(body, rMode, players, myKey, results, dmgByPlayer, killsByPlayer);
+    // Tags: one skull coin per ranked kill. A kill is only ever known
+    // on the VICTIM's client, so this is the first moment my own count
+    // exists — every ledger has landed and been summed. Paid once per
+    // match, guarded in the lobby itself so a reload (or the poll
+    // below firing again) can't pay twice.
+    const meRow = players.find((p) => p.key === myKey);
+    if (meRow && !paid) {
+      const mine = killsByPlayer[meRow.id] ?? 0;
+      if (mine > 0) {
+        paid = true; // don't re-enter while the guard write is in flight
+        payTags(f, code, myKey, mine).catch(() => { paid = false; });
+      }
+    }
   };
 
   await draw();

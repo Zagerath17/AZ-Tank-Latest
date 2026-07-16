@@ -494,14 +494,37 @@ export function setEngine(active, localMoving, enemyMoving) {
 //   C5 523.3 D5 587.3 E5 659.3 F5 698.5 G5 784
 
 const TRACKS = {
-  // Slow, ominous anthem — the iconic hook. Sparse, heavy, memorable.
+  // The title THEME — a full arrangement in A minor that moves through
+  // distinct sections (intro → theme → answer → build → chorus → outro)
+  // and only then loops, so it plays like a song instead of one bar on
+  // repeat. Sections advance in order (see the scheduler).
   title: [
-    { bpm: 82, drums: "swell",
-      // Root descent Am – F – G – Em, a big cinematic loop.
-      bass: [55,0,0,0, 55,0,55,0, 43.65,0,0,0, 43.65,0,43.65,0, 49,0,0,0, 49,0,49,0, 41.2,0,0,0, 41.2,0,55,0],
-      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0, 41.2,0,0,0, 0,0,0,0],
-      // The HOOK: a rising call that falls and resolves.
-      lead: [440,0,0,523.3, 659.3,0,587.3,0, 523.3,0,0,493.9, 440,0,0,0, 349.2,0,440,0, 523.3,0,493.9,0, 329.6,0,0,0, 440,0,0,0] },
+    { bpm: 82, drums: "swell", section: "intro",
+      bass: [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
+      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
+      lead: [0,0,0,0, 329.63,0,0,0, 0,0,0,0, 349.23,0,0,0, 0,0,0,0, 392,0,0,0, 0,0,392,0, 440,0,0,0] },
+    { bpm: 82, drums: "swell", section: "theme",
+      bass: [55,0,0,55, 0,0,55,0, 43.65,0,0,43.65, 0,0,0,0, 65.41,0,0,65.41, 0,0,0,0, 49,0,0,49, 0,0,55,0],
+      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
+      lead: [440,0,523.25,493.88, 440,0,329.63,0, 349.23,0,440,392, 349.23,0,0,0, 329.63,0,392,523.25, 493.88,0,392,0, 293.66,0,392,493.88, 440,0,0,0] },
+    { bpm: 82, drums: "swell", section: "answer",
+      bass: [73.41,0,0,73.41, 0,0,0,0, 55,0,0,55, 0,0,0,0, 43.65,0,0,43.65, 0,0,0,0, 41.20,0,0,41.20, 0,0,0,0],
+      sub:  [73.41,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 41.20,0,0,0, 0,0,0,0],
+      lead: [587.33,0,523.25,440, 587.33,0,0,0, 523.25,0,493.88,0, 440,0,329.63,0, 349.23,0,440,523.25, 659.25,0,587.33,0, 659.25,0,0,493.88, 523.25,0,493.88,0] },
+    { bpm: 82, drums: "light", section: "build",
+      bass: [55,55,0,55, 49,49,0,49, 43.65,43.65,0,43.65, 41.20,41.20,0,41.20, 55,55,0,55, 49,49,0,49, 43.65,43.65,0,43.65, 41.20,0,41.20,0],
+      sub:  [55,0,0,0, 49,0,0,0, 43.65,0,0,0, 41.20,0,0,0, 55,0,0,0, 49,0,0,0, 43.65,0,0,0, 41.20,0,0,0],
+      lead: [440,0,0,0, 493.88,0,0,0, 523.25,0,0,0, 587.33,0,659.25,0, 440,0,493.88,0, 523.25,0,587.33,0, 659.25,0,698.46,0, 783.99,0,0,0],
+      arp:  [220,261.63,329.63,261.63, 246.94,293.66,349.23,293.66, 261.63,329.63,392,329.63, 293.66,349.23,440,349.23, 220,261.63,329.63,261.63, 246.94,293.66,349.23,293.66, 261.63,329.63,392,493.88, 587.33,493.88,392,329.63] },
+    { bpm: 82, drums: "light", section: "chorus",
+      bass: [55,0,55,0, 55,0,43.65,0, 43.65,0,43.65,0, 43.65,0,0,0, 65.41,0,65.41,0, 65.41,0,49,0, 49,0,49,0, 49,0,55,0],
+      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
+      lead: [440,0,659.25,0, 880,0,783.99,659.25, 698.46,0,0,523.25, 440,0,523.25,0, 392,0,523.25,659.25, 783.99,0,659.25,523.25, 587.33,0,783.99,0, 493.88,0,587.33,0],
+      arp:  [220,329.63,440,329.63, 220,329.63,440,523.25, 174.61,261.63,349.23,261.63, 220,261.63,349.23,261.63, 261.63,329.63,392,329.63, 261.63,392,523.25,392, 196,246.94,392,246.94, 246.94,293.66,392,493.88] },
+    { bpm: 82, drums: "swell", section: "outro",
+      bass: [55,0,0,0, 0,0,0,0, 41.20,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0, 55,0,0,0, 55,0,0,0],
+      sub:  [55,0,0,0, 0,0,0,0, 41.20,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0],
+      lead: [440,0,0,392, 349.23,0,329.63,0, 293.66,0,329.63,0, 349.23,0,0,0, 329.63,0,0,0, 246.94,0,329.63,0, 220,0,0,0, 0,0,0,0] },
   ],
   // Tense anticipation — a steady pulse that coils, ready to break.
   lobby: [
@@ -662,7 +685,7 @@ export function startMusic(mode = "game") {
     if (music.mode === mode) return;
     // Swap themes in place: new pattern from the top of the bar.
     music.mode = mode;
-    music.trackIdx = Math.floor(Math.random() * TRACKS[mode].length);
+    music.trackIdx = mode === "title" ? 0 : Math.floor(Math.random() * TRACKS[mode].length);
     music.step = 0;
     music.loops = 0;
     return;
@@ -673,7 +696,7 @@ export function startMusic(mode = "game") {
     gain.connect(musicBus);
     music = {
       gain, timer: 0, nextAt: 0, step: 0, loops: 0,
-      mode, trackIdx: Math.floor(Math.random() * TRACKS[mode].length),
+      mode, trackIdx: mode === "title" ? 0 : Math.floor(Math.random() * TRACKS[mode].length),
     };
     music.timer = setInterval(() => {
       if (!ready() || !music) return;
@@ -686,9 +709,13 @@ export function startMusic(mode = "game") {
         if (music.step >= tr.bass.length) {
           music.step = 0;
           music.loops += 1;
-          // In-game: shuffle to a DIFFERENT track every few loops.
           const pool = TRACKS[music.mode];
-          if (pool.length > 1 && music.loops >= 3) {
+          if (music.mode === "title") {
+            // Walk the song's sections in order, then loop — a real
+            // arrangement, not one bar on repeat.
+            music.trackIdx = (music.trackIdx + 1) % pool.length;
+          } else if (pool.length > 1 && music.loops >= 3) {
+            // In-game: shuffle to a DIFFERENT track every few loops.
             music.loops = 0;
             let next = music.trackIdx;
             while (next === music.trackIdx) next = Math.floor(Math.random() * pool.length);

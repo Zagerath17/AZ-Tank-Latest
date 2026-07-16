@@ -20,6 +20,7 @@
 // ================================================================
 
 import { toast, tankSVG, showScreen, onEnter, onLeave } from "./main.js";
+import { SKINS, DEFAULT_SKIN } from "./skins.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
 
@@ -270,7 +271,16 @@ async function adoptProfile(uid, wantName = null, email = null) {
   }
 
   const prof = (await f.get(f.ref(f.db, `users/${key}`))).val() ?? {};
-  account = { key, name: prof.name ?? key, uid };
+  account = {
+    key, name: prof.name ?? key, uid,
+    // Shop state travels with the account: paint you've equipped, the
+    // tags you've earned, and everything you own.
+    skin: SKINS[prof.color] && !SKINS[prof.color].reserved ? prof.color : DEFAULT_SKIN,
+    tags: Math.max(0, prof.tags ?? 0),
+    owned: { ...(prof.owned ?? {}), [DEFAULT_SKIN]: true },
+    elo1: prof.elo1 ?? null,
+    elo2v2: prof.elo2v2 ?? null,
+  };
   localStorage.setItem(LS_NAME, JSON.stringify(account));
   // Their cloud-saved preferences come back with them.
   if (typeof prof.dnd === "boolean") localStorage.setItem(LS_DND, prof.dnd ? "1" : "0");
@@ -522,11 +532,91 @@ export function setStatus(status, lobbyCode = null) {
     .catch(() => {});
 }
 
-export function setLastColor(color) {
-  if (!account || !color) return;
-  ensureFirebase()
-    .then((f) => f.set(f.ref(f.db, `users/${account.key}/color`), color))
-    .catch(() => {});
+/* ---------- the shop: tags, ownership, equipped paint ---------- */
+
+// The paint this device wears. Signed out, that's always the default —
+// paint is account property, earned and bought.
+export function getSkin() {
+  return account?.skin ?? DEFAULT_SKIN;
+}
+
+export function getTags() {
+  return account?.tags ?? 0;
+}
+
+export function ownsSkin(id) {
+  if (id === DEFAULT_SKIN) return true;
+  return !!account?.owned?.[id];
+}
+
+export function ownedSkins() {
+  return { ...(account?.owned ?? {}), [DEFAULT_SKIN]: true };
+}
+
+// The rating the shop gates on: your BEST of the two ladders, so a
+// rank you've reached in either mode unlocks its paint.
+export function bestElo() {
+  if (!account) return null;
+  const a = account.elo1;
+  const b = account.elo2v2;
+  if (a == null && b == null) return null;
+  return Math.max(a ?? -Infinity, b ?? -Infinity);
+}
+
+// Wear paint you already own.
+export async function equipSkin(id) {
+  if (!account) throw new Error("Log in to change your paint.");
+  if (!SKINS[id] || SKINS[id].reserved) throw new Error("That paint doesn't exist.");
+  if (!ownsSkin(id)) throw new Error("You don't own that paint yet.");
+  account.skin = id;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  const f = await ensureFirebase();
+  await f.set(f.ref(f.db, `users/${account.key}/color`), id);
+}
+
+// Buy paint. The rank gate and the price are both checked here, not
+// just in the UI — the button being enabled is never the authority.
+export async function buySkin(id) {
+  if (!account) throw new Error("Log in to use the shop.");
+  const skin = SKINS[id];
+  if (!skin || skin.reserved) throw new Error("That paint doesn't exist.");
+  if (ownsSkin(id)) throw new Error("You already own that.");
+  const cost = skin.cost ?? 0;
+  if (account.tags < cost) throw new Error(`Not enough tags — you need ${cost - account.tags} more.`);
+  const f = await ensureFirebase();
+  // Re-read the balance before spending: tags are earned on other
+  // devices too, and the cached number can be stale.
+  const live = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val() ?? 0;
+  if (live < cost) {
+    account.tags = Math.max(0, live);
+    throw new Error(`Not enough tags — you need ${cost - live} more.`);
+  }
+  await f.update(f.ref(f.db), {
+    [`users/${account.key}/tags`]: live - cost,
+    [`users/${account.key}/owned/${id}`]: true,
+  });
+  account.tags = live - cost;
+  account.owned = { ...(account.owned ?? {}), [id]: true };
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  return account.tags;
+}
+
+// Award tags for ranked kills. Called once per ranked match, with the
+// number of enemy tanks this player destroyed.
+export async function awardTags(kills) {
+  const n = Math.max(0, Math.floor(kills ?? 0));
+  if (!account || !n) return account?.tags ?? 0;
+  try {
+    const f = await ensureFirebase();
+    const live = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val() ?? 0;
+    const next = live + n;
+    await f.set(f.ref(f.db, `users/${account.key}/tags`), next);
+    account.tags = next;
+    localStorage.setItem(LS_NAME, JSON.stringify(account));
+    return next;
+  } catch (e) {
+    return account.tags;
+  }
 }
 
 export function setDnd(on) {

@@ -4,15 +4,16 @@
 // Offline is strictly YOU vs the AI. Seat 1 is always the human
 // player (WASD to drive, mouse to aim, left-click to fire); the
 // other three seats can each hold a bot of a chosen difficulty.
-// Each tank's paint is picked from the swatch strip; no two tanks
-// may wear the same color. Impossible bots are locked to black.
+// Paint isn't picked here any more: you wear whatever you bought and
+// equipped in the SHOP, and bots take random primaries that avoid it.
+// Impossible bots are locked to black.
 // ================================================================
 
 import {
-  onEnter, onLeave, COLORS, SLOT_NAMES, COLOR_NAMES,
-  PICKABLE, freeColor, tankSVG,
+  onEnter, onLeave, COLORS, SLOT_NAMES, tankSVG,
 } from "./main.js";
-import { setLastColor } from "./social.js";
+import { freeBotSkin } from "./skins.js";
+import { getSkin } from "./social.js";
 import { startLocalGame } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
 
@@ -20,6 +21,7 @@ const HUMAN = COLORS[0];           // seat 1 is always the human ("You")
 const BOT_SEATS = COLORS.slice(1); // the rest can hold bots
 const bots = { green: null, blue: null, yellow: null };
 const paint = { red: "red", green: "green", blue: "blue", yellow: "yellow" };
+
 const BOT_CYCLE = [null, ...AI_LEVELS];
 
 function active(slot) {
@@ -34,14 +36,23 @@ function takenColors(except) {
   return s;
 }
 
-// Give a slot a legal color: keep its current pick if free, else the
-// classic slot color, else something random that nobody wears.
+// The human always wears their equipped shop paint. Bots take a
+// random primary that nobody at the table is wearing — re-rolled only
+// when their current one would clash. Impossible is locked to black.
 function ensurePaint(slot) {
+  if (slot === HUMAN) { paint[slot] = getSkin(); return; }
   if (bots[slot] === "impossible") { paint[slot] = "black"; return; }
+  if (!bots[slot]) { paint[slot] = null; return; }
   const taken = takenColors(slot);
-  if (paint[slot] === "black" || taken.has(paint[slot])) {
-    paint[slot] = !taken.has(slot) ? slot : freeColor(taken);
+  if (!paint[slot] || paint[slot] === "black" || taken.has(paint[slot])) {
+    paint[slot] = freeBotSkin(taken);
   }
+}
+
+// Repaint every seat, human first so the bots dodge the player.
+function ensureAllPaint() {
+  ensurePaint(HUMAN);
+  for (const slot of BOT_SEATS) ensurePaint(slot);
 }
 
 /* ---------- render ---------- */
@@ -61,22 +72,6 @@ function render() {
         ? "A bot drives this tank"
         : "Add a bot to fill this seat";
 
-    // Paint strip: for the human always, and for any occupied bot seat.
-    // Impossible bots are locked to black.
-    let swatches = "";
-    if (isHuman || bot) {
-      if (bot === "impossible") {
-        swatches = `<div class="swatches"><span class="swatch-lock">LOCKED · BLACK</span></div>`;
-      } else {
-        const taken = takenColors(slot);
-        swatches = `<div class="swatches">` + PICKABLE.map((c) => `
-          <button class="swatch p-${c} ${c === col ? "sel" : ""}"
-                  data-paint="${slot}" data-color="${c}"
-                  ${taken.has(c) ? "disabled" : ""}
-                  aria-label="${COLOR_NAMES[c]}"></button>`).join("") + `</div>`;
-      }
-    }
-
     // The human seat has no bot chip; bot seats cycle difficulty.
     const chip = isHuman
       ? ""
@@ -92,7 +87,6 @@ function render() {
         <span class="slot-status">${status}</span>
         <span class="slot-prompt">${prompt}</span>
         ${chip}
-        ${swatches}
       </div>`;
   }).join("");
 
@@ -101,25 +95,9 @@ function render() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const slot = btn.dataset.bot;
-      const wasBot = !!bots[slot];
       bots[slot] = BOT_CYCLE[(BOT_CYCLE.indexOf(bots[slot]) + 1) % BOT_CYCLE.length];
-      if (bots[slot] && !wasBot) {
-        // Fresh bot: grab a random color nobody's wearing.
-        paint[slot] = freeColor(takenColors(slot));
-      }
-      ensurePaint(slot);
-      render();
-    });
-  });
-
-  // Swatch tap repaints the tank (unless someone else wears it).
-  host.querySelectorAll(".swatch").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const slot = btn.dataset.paint;
-      const c = btn.dataset.color;
-      if (takenColors(slot).has(c)) return;
-      paint[slot] = c;
+      paint[slot] = null;  // fresh coat for the new occupant
+      ensureAllPaint();
       render();
     });
   });
@@ -140,7 +118,7 @@ function updateStart() {
 
 export function initLocal() {
   onEnter("screen-local", () => {
-    ensurePaint(HUMAN);
+    ensureAllPaint(); // picks up any paint swapped in the shop since
     render();
   });
 
@@ -151,8 +129,6 @@ export function initLocal() {
       .filter((c) => active(c))
       .map((c) => ({ slot: c, color: paint[c], bot: c === HUMAN ? null : bots[c] }));
     sessionStorage.setItem("tank.localPlayers", JSON.stringify(specs));
-    // Remember the human's paint on their account.
-    setLastColor(paint[HUMAN]);
     startLocalGame(specs);
   });
 }

@@ -23,7 +23,8 @@
 // Colors come from join order. Max 4 players (bots count).
 // ================================================================
 
-import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, PICKABLE, freeColor, tankSVG } from "./main.js";
+import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { SKINS, BOT_SKINS, DEFAULT_SKIN } from "./skins.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats, GEAR_CAP_LIMIT } from "./game.js";
@@ -134,22 +135,43 @@ function myId() {
   return id;
 }
 
-// Colors are CHOSEN now, not assigned by seat — but conflicts are
-// resolved deterministically in join order, so every client agrees:
-// earliest joinedAt keeps their pick; later duplicates get bumped to
-// the first free color. Impossible bots are always black.
+// Paint is bought in the shop and worn as-is — a player's colour is
+// their identity now, so nobody gets bumped off theirs. Bots fill in
+// around them: a random PRIMARY that no human at the table wears (and
+// that no other bot has taken), resolved deterministically in join
+// order so every client agrees. Impossible bots are always black.
 function resolveColors(entries) {
-  const used = new Set();
   const out = {};
+  const taken = new Set();
+  // Humans first — they keep exactly what they equipped.
   for (const [id, p] of entries) {
-    let c = null;
-    if (p.bot === "impossible") c = "black";
-    else if (p.color && PICKABLE.includes(p.color) && !used.has(p.color)) c = p.color;
-    if (!c) c = PICKABLE.find((k) => !used.has(k)) ?? "slate";
-    used.add(c);
+    if (p.bot) continue;
+    const c = SKINS[p.color] && !SKINS[p.color].reserved ? p.color : DEFAULT_SKIN;
     out[id] = c;
+    taken.add(c);
+  }
+  // Then bots, each avoiding every colour already on the field.
+  for (const [id, p] of entries) {
+    if (!p.bot) continue;
+    if (p.bot === "impossible") { out[id] = "black"; continue; }
+    // A bot's stored colour stands unless a player wears it.
+    let c = p.color && BOT_SKINS.includes(p.color) && !taken.has(p.color) ? p.color : null;
+    if (!c) c = pickBotColor(taken, id);
+    out[id] = c;
+    taken.add(c);
   }
   return out;
+}
+
+// Deterministic per-bot fallback: every client must land on the same
+// colour, so we walk the primary pool from a hash of the bot's id
+// rather than calling Math.random().
+function pickBotColor(taken, id) {
+  const free = BOT_SKINS.filter((c) => !taken.has(c));
+  const pool = free.length ? free : BOT_SKINS;
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return pool[h % pool.length];
 }
 
 // Join order for seats and conflict priority.
@@ -189,6 +211,7 @@ export async function createRankedLobby(mode, expect, teams = null) {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
+        color: social.getSkin(), // the paint you bought and equipped
         e1: await myEloOrNull(f, "elo1"),
         e2: await myEloOrNull(f, "elo2v2"),
       } },
@@ -265,6 +288,7 @@ async function createLobby() {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
+        color: social.getSkin(), // the paint you bought and equipped
         e1: await myEloOrNull(f, "elo1"),
         e2: await myEloOrNull(f, "elo2v2"),
       } },
@@ -290,6 +314,7 @@ export async function joinLobby(code) {
       joinedAt: f.serverTimestamp(),
       name: social.getAccount()?.name ?? null,
       ukey: social.getAccount()?.key ?? null,
+      color: social.getSkin(), // the paint you bought and equipped
       e1: await myEloOrNull(f, "elo1"),
       e2: await myEloOrNull(f, "elo2v2"),
     });
@@ -439,7 +464,6 @@ async function cycleBot(id, level) {
   await f.update(current.lobbyRef, updates);
 }
 
-let openPaintFor = null; // which bot's swatch drawer is open
 
 async function removeBot(id) {
   if (!current) return;
@@ -475,7 +499,7 @@ function defaultSettings() {
   for (const w of WEAPON_TYPES) gear[w] = true;
   const sizes = {};
   for (const k of SIZE_KEYS) sizes[k] = true;
-  return { sizes, gear, gearMax: 24 };
+  return { sizes, gear, gearMax: 24, zone: false, zoneSec: 30 };
 }
 
 // Normalize whatever's on the lobby into a complete settings object —
@@ -489,7 +513,9 @@ function readSettings(lobby) {
   const gear = {};
   for (const w of WEAPON_TYPES) gear[w] = s.gear?.[w] ?? d.gear[w];
   const max = Math.max(1, Math.min(GEAR_CAP_LIMIT, s.gearMax ?? d.gearMax));
-  return { sizes, gear, gearMax: max };
+  const zone = s.zone ?? d.zone;
+  const zoneSec = Math.max(10, Math.min(60, s.zoneSec ?? d.zoneSec));
+  return { sizes, gear, gearMax: max, zone, zoneSec };
 }
 
 function settingsToOpts(lobby) {
@@ -500,6 +526,8 @@ function settingsToOpts(lobby) {
     sizePool: sizePool.length ? sizePool : SIZE_KEYS,
     gearPool, // may be empty — that means "no pickups this match"
     gearMax: s.gearMax,
+    zone: s.zone,
+    zonePeriod: s.zoneSec,
   };
 }
 
@@ -541,6 +569,26 @@ function renderSettings(lobby, isHost) {
   valEl.textContent = String(s.gearMax);
   slider.oninput = () => { valEl.textContent = slider.value; };
   slider.onchange = () => write("settings/gearMax", Math.max(1, Math.min(GEAR_CAP_LIMIT, +slider.value)));
+
+  // Closing zone: an on/off chip plus a 10–60 s timer that only shows
+  // when the zone is on.
+  const zoneChip = document.getElementById("set-zone");
+  if (zoneChip) {
+    zoneChip.classList.toggle("is-on", s.zone);
+    zoneChip.textContent = s.zone ? "ZONE: ON" : "ZONE: OFF";
+    zoneChip.onclick = () => write("settings/zone", !s.zone);
+  }
+  const zoneRow = document.getElementById("set-zone-timer");
+  if (zoneRow) zoneRow.hidden = !s.zone;
+  const zSlider = document.getElementById("set-zone-sec");
+  const zVal = document.getElementById("set-zone-val");
+  if (zSlider && zVal) {
+    zSlider.min = "10"; zSlider.max = "60"; zSlider.step = "5";
+    zSlider.value = String(s.zoneSec);
+    zVal.textContent = `${s.zoneSec}s`;
+    zSlider.oninput = () => { zVal.textContent = `${zSlider.value}s`; };
+    zSlider.onchange = () => write("settings/zoneSec", Math.max(10, Math.min(60, +zSlider.value)));
+  }
 
   const on = WEAPON_TYPES.filter((w) => s.gear[w]).length;
   const note = document.getElementById("set-note");
@@ -771,6 +819,8 @@ function beginOnlineGame(code, lobby) {
     sizePool: lobby.ranked ? null : setOpts.sizePool,
     gearPool: lobby.ranked ? null : setOpts.gearPool,
     gearMax: lobby.ranked ? null : setOpts.gearMax,
+    zone: lobby.ranked ? undefined : setOpts.zone,
+    zonePeriod: lobby.ranked ? undefined : setOpts.zonePeriod,
     teams: teamsById,
     winTarget: lobby.ranked ? 3 : null, // both ladders: first to 3
     casualPlayers: !lobby.ranked ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
@@ -956,28 +1006,17 @@ function renderLobby(code, lobby) {
 
     if (p.bot) {
       const locked = p.bot === "impossible";
+      // Bot paint isn't chosen any more — it's a random primary that
+      // dodges whatever the players are wearing.
       const controls = isHost
-        ? `${locked ? "" : `<button class="chip chip-btn" data-bot-paint="${id}" aria-label="Change bot color">PAINT</button>`}
-           <button class="chip chip-btn" data-bot-cycle="${id}" data-level="${p.bot}">BOT · ${p.bot.toUpperCase()}</button>
+        ? `<button class="chip chip-btn" data-bot-cycle="${id}" data-level="${p.bot}">BOT · ${p.bot.toUpperCase()}</button>
            <button class="chip chip-btn" data-bot-remove="${id}" aria-label="Remove bot">✕</button>`
         : `<span class="chip">BOT · ${p.bot.toUpperCase()}</span>`;
-      let strip = "";
-      if (openPaintFor === id && isHost && !locked) {
-        const used = new Set(Object.entries(resolved).filter(([k]) => k !== id).map(([, c]) => c));
-        strip = `<div class="swatches swatches-wide">` + PICKABLE.map((c) => `
-          <button class="swatch p-${c} ${resolved[id] === c ? "sel" : ""}"
-                  data-bot-paint-set="${id}" data-color="${c}"
-                  ${used.has(c) ? "disabled" : ""}
-                  aria-label="${COLOR_NAMES[c]}"></button>`).join("") + `</div>`;
-      }
       return `
-        <li class="lobby-row lobby-row-wrap p-${color}">
-          <div class="lobby-row-main">
-            ${tankSVG(color)}
-            <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot${locked ? " · locked" : ""}</em></span>
-            <span class="row-end">${controls}</span>
-          </div>
-          ${strip}
+        <li class="lobby-row p-${color}">
+          ${tankSVG(color)}
+          <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot${locked ? " · locked" : ""}</em></span>
+          <span class="row-end">${controls}</span>
         </li>`;
     }
 
@@ -993,22 +1032,6 @@ function renderLobby(code, lobby) {
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");
-
-  // My paint strip: every color, minus what the table already wears.
-  const paintEl = document.getElementById("lobby-paint");
-  const hintEl = document.getElementById("lobby-paint-hint");
-  if (mine && !mine[1].bot) {
-    paintEl.hidden = false;
-    hintEl.hidden = false;
-    const others = new Set(entries.filter(([id]) => id !== me).map(([id]) => resolved[id]));
-    paintEl.innerHTML = PICKABLE.map((c) => `
-      <button class="swatch p-${c} ${resolved[me] === c ? "sel" : ""}"
-              data-my-paint="${c}" ${others.has(c) ? "disabled" : ""}
-              aria-label="${COLOR_NAMES[c]}"></button>`).join("");
-  } else {
-    paintEl.hidden = true;
-    hintEl.hidden = true;
-  }
 
   document.getElementById("lobby-addbot").hidden = !(isHost && entries.length < MAX_PLAYERS);
 
@@ -1125,30 +1148,15 @@ export function initOnline() {
   startBtn.addEventListener("click", guard(startBtn, startMatch));
   addBotBtn.addEventListener("click", guard(addBotBtn, addBot));
 
-  // Bot difficulty / removal chips (host only; delegated).
+  // Bot difficulty / removal chips (host only; delegated). Paint is
+  // no longer touchable here — it comes from the shop.
   document.getElementById("screen-lobby").addEventListener("click", async (e) => {
     const cyc = e.target.closest("[data-bot-cycle]");
     const rem = e.target.closest("[data-bot-remove]");
-    const pnt = e.target.closest("[data-bot-paint]");
-    const bset = e.target.closest("[data-bot-paint-set]");
-    const my = e.target.closest("[data-my-paint]");
-    if (!cyc && !rem && !pnt && !my && !bset) return;
+    if (!cyc && !rem) return;
     try {
-      if (my) {
-        write(`players/${myId()}/color`, my.dataset.myPaint);
-        social.setLastColor(my.dataset.myPaint);
-      } else if (bset) {
-        openPaintFor = null;
-        write(`players/${bset.dataset.botPaintSet}/color`, bset.dataset.color);
-      } else if (pnt) {
-        // Toggle this bot's color drawer open/closed.
-        openPaintFor = openPaintFor === pnt.dataset.botPaint ? null : pnt.dataset.botPaint;
-        if (current?.lastLobby) renderLobby(current.code, current.lastLobby);
-      } else if (cyc) {
-        await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
-      } else {
-        await removeBot(rem.dataset.botRemove);
-      }
+      if (cyc) await cycleBot(cyc.dataset.botCycle, cyc.dataset.level);
+      else await removeBot(rem.dataset.botRemove);
     } catch (err) {
       toast(err?.message ?? "Couldn't update the bot.");
     }
