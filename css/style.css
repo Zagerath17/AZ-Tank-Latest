@@ -1491,3 +1491,38 @@ body {
   line-height: 1.5;
   text-align: center;
 }
+
+/* account settings — dev tools (only ever rendered for dev accounts) */
+.acct-dev {
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #4b3fd1;
+  background: rgba(75, 63, 209, .1);
+}
+.acct-dev-head {
+  margin: 0 0 8px;
+  font-family: "Black Ops One", system-ui;
+  font-size: .72rem;
+  letter-spacing: .1em;
+  color: #a89cff;
+}
+.dev-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.dev-label {
+  flex: 1;
+  font-size: .78rem;
+  letter-spacing: .04em;
+  color: #c3cbd9;
+}
+.dev-label b { color: #fff; }
+.dev-note {
+  margin: 6px 0 0;
+  font-size: .7rem;
+  letter-spacing: .04em;
+  color: #8b93a3;
+}
