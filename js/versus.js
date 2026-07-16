@@ -73,13 +73,13 @@ export async function showVersus(roster, myId, mode, teams = null, players = [],
     <div class="vs-fighter p-${r.color}${isMe ? " vs-me" : ""}">
       ${tankSVG(r.color)}
       <span class="vs-name">${r.name ?? "Player"}</span>
-      <span class="vs-score" data-fighter="${r.id}" data-side="${side}">${side ? "–" : ""}</span>
+      <span class="vs-score" data-fighter="${r.id}" data-side="${side}">${ranked && side ? "–" : ""}</span>
     </div>`;
 
   const mySide = [meRow ?? { id: "me", color: "slate", name: "You" }, ...allies];
   host.innerHTML = `
     <div class="vs-side">${mySide.map((r, i) => spriteBlock(r, r.id === myId, i === 0 ? "me" : "")).join("")}</div>
-    <div class="vs-mid"><span class="vs-vs">VS</span><span class="vs-ratio-dash">-</span></div>
+    <div class="vs-mid"><span class="vs-vs">VS</span>${ranked ? '<span class="vs-ratio-dash">-</span>' : ""}</div>
     <div class="vs-side vs-foes">${foes.map((f, i) => spriteBlock(f, false, i === 0 ? "foe" : "")).join("")}</div>`;
 
   if (!acc || !ranked) return; // custom lobby: card only, no records

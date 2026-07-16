@@ -115,12 +115,19 @@ function openAccountPanel() {
     msg.textContent = "";
     try {
       const a = await ensureAuth();
-      const f = await ensureFirebase();
-      const email = (await f.get(f.ref(f.db, `users/${account.key}/email`))).val();
+      // The signed-in user's OWN auth email is authoritative — with
+      // Firebase's email-enumeration protection, a reset to any other
+      // address just resolves silently without sending. Fall back to
+      // the stored profile email only if the SDK hasn't surfaced one.
+      let email = a.auth.currentUser?.email ?? null;
+      if (!email) {
+        const f = await ensureFirebase();
+        email = (await f.get(f.ref(f.db, `users/${account.key}/email`))).val();
+      }
       if (!email) throw new Error("No email on file — sign in with your email once first.");
       await a.sendReset(a.auth, email);
       msg.style.color = "#4bd08a";
-      msg.textContent = "Password-reset email sent.";
+      msg.textContent = `Reset email sent to ${email} — check spam too.`;
     } catch (e) {
       msg.style.color = "#ff6a4d";
       msg.textContent = e?.message ?? "Couldn't send the reset email.";
@@ -132,15 +139,63 @@ function openAccountPanel() {
   const resetBtn = document.getElementById("acct-reset");
   const logoutBtn = document.getElementById("acct-logout");
   const closeBtn = document.getElementById("acct-close");
+  const delBtn = document.getElementById("acct-delete");
+  const delWrap = document.getElementById("acct-delete-confirm");
+  const delGo = document.getElementById("acct-delete-go");
+  const delCancel = document.getElementById("acct-delete-cancel");
+  const passEl = document.getElementById("acct-pass");
+
+  // Deleting is a two-step: the first press only ARMS it (revealing
+  // what's about to be destroyed), and nothing happens until the
+  // password confirms it.
+  // Always reopen in the un-armed state.
+  if (delWrap) delWrap.hidden = true;
+  if (delBtn) delBtn.hidden = false;
+  if (delGo) delGo.disabled = false;
+  if (passEl) passEl.value = "";
+  const onDelArm = () => {
+    delWrap.hidden = false;
+    delBtn.hidden = true;
+    msg.textContent = "";
+    passEl.focus();
+  };
+  const onDelCancel = () => {
+    delWrap.hidden = true;
+    delBtn.hidden = false;
+    passEl.value = "";
+  };
+  const onDelGo = async () => {
+    msg.textContent = "";
+    delGo.disabled = true;
+    const gone = account.name;
+    try {
+      await deleteAccount(passEl.value);
+      close();
+      toast(`Account "${gone}" deleted — everything's gone for good.`, 6000);
+      showScreen("screen-title");
+    } catch (e) {
+      msg.style.color = "#ff6a4d";
+      msg.textContent = authErrorText(e);
+      delGo.disabled = false;
+    }
+  };
+
   saveBtn.addEventListener("click", onSave);
   resetBtn.addEventListener("click", onReset);
   logoutBtn.addEventListener("click", onLogout);
   closeBtn.addEventListener("click", close);
+  delBtn?.addEventListener("click", onDelArm);
+  delCancel?.addEventListener("click", onDelCancel);
+  delGo?.addEventListener("click", onDelGo);
   function cleanup() {
     saveBtn.removeEventListener("click", onSave);
     resetBtn.removeEventListener("click", onReset);
     logoutBtn.removeEventListener("click", onLogout);
     closeBtn.removeEventListener("click", close);
+    delBtn?.removeEventListener("click", onDelArm);
+    delCancel?.removeEventListener("click", onDelCancel);
+    delGo?.removeEventListener("click", onDelGo);
+    if (passEl) passEl.value = ""; // never leave a password sitting in the DOM
   }
 }
 
@@ -160,6 +215,9 @@ async function ensureAuth() {
     onAuthStateChanged: m.onAuthStateChanged,
     sendVerify: m.sendEmailVerification,
     sendReset: m.sendPasswordResetEmail,
+    deleteUser: m.deleteUser,
+    reauth: m.reauthenticateWithCredential,
+    emailCred: m.EmailAuthProvider,
   };
   return auth;
 }
@@ -169,6 +227,10 @@ function authErrorText(e) {
   if (c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found")) {
     return "Wrong email or password.";
   }
+  if (c.includes("requires-recent-login")) {
+    return "For safety this needs a fresh sign-in — log out, log back in, then try again.";
+  }
+  if (c.includes("too-many-requests")) return "Too many attempts — wait a minute, then try again.";
   if (c.includes("email-already-in-use")) return "That email already has an account — sign in instead.";
   if (c.includes("invalid-email")) return "That doesn't look like an email address.";
   if (c.includes("weak-password")) return "Password needs at least 6 characters.";
@@ -293,8 +355,96 @@ export async function doCreate(email, pass, name) {
 // Send a password-reset email for an existing account.
 export async function doPasswordReset(identifier) {
   const a = await ensureAuth();
-  const email = await resolveEmail(identifier);
+  // Prefer the authoritative signed-in email; otherwise resolve the
+  // typed identifier (email passes through, username → stored email).
+  const email = a.auth.currentUser?.email ?? await resolveEmail(identifier);
   await a.sendReset(a.auth, email);
+  return email;
+}
+
+// Permanently delete the signed-in account: the profile and all its
+// data, the username registration(s), the public leaderboard entries,
+// friends' links back to you, and finally the sign-in itself.
+//
+// The password is required for two reasons: it proves it's really you
+// before something irreversible happens, and Firebase refuses to
+// delete a user whose session isn't fresh — reauthenticating here is
+// what makes the delete go through on a days-old session.
+//
+// Order matters. The data is wiped BEFORE the auth user, while we're
+// still authenticated; deleting the login first could strand the data
+// with no way to reach it — and with the username still claimed.
+export async function deleteAccount(password) {
+  if (!account) throw new Error("You're not signed in.");
+  const a = await ensureAuth();
+  const user = a.auth.currentUser;
+  if (!user) throw new Error("Session expired — sign in again, then delete.");
+  if (!password) throw new Error("Enter your password to confirm.");
+
+  // 1. Prove identity (also refreshes the login recency Firebase wants).
+  const cred = a.emailCred.credential(user.email, password);
+  await a.reauth(user, cred);
+
+  const f = await ensureFirebase();
+  const key = account.key;
+  const uid = account.uid ?? user.uid;
+
+  // 2. Step out of anything live so no lobby/team is left holding a
+  //    seat for a player who no longer exists.
+  try {
+    const duoSnap = await f.get(f.ref(f.db, "duos"));
+    const duos = duoSnap.val() ?? {};
+    for (const [code, d] of Object.entries(duos)) {
+      if (!d?.members?.[key]) continue;
+      // Leader leaving dissolves the team; otherwise just free my seat.
+      if (d.leader === key) await f.remove(f.ref(f.db, `duos/${code}`));
+      else await f.remove(f.ref(f.db, `duos/${code}/members/${key}`));
+    }
+  } catch (e) { /* best-effort */ }
+
+  // 3. Gather every remaining path that mentions me.
+  const updates = {};
+  updates[`users/${key}`] = null;              // profile, elo, records, invites…
+  updates[`uids/${uid}`] = null;               // the uid → account mapping
+  updates[`leaderboard/elo1/${key}`] = null;   // public mirrors
+  updates[`leaderboard/elo2v2/${key}`] = null;
+  updates[`queue/1v1/${key}`] = null;          // any pending search
+  updates[`queue/2v2/${key}`] = null;
+
+  // Friends' links back to me — otherwise they'd keep a ghost in
+  // their list forever.
+  try {
+    const fr = await f.get(f.ref(f.db, `users/${key}/friends`));
+    for (const friendKey of Object.keys(fr.val() ?? {})) {
+      updates[`users/${friendKey}/friends/${key}`] = null;
+    }
+  } catch (e) { /* best-effort */ }
+
+  // Every username this account ever registered (renames leave the
+  // old alias behind, so clear them all — the names are freed for
+  // anyone else to take).
+  try {
+    const ns = await f.get(f.ref(f.db, "names"));
+    for (const [nameKey, owner] of Object.entries(ns.val() ?? {})) {
+      if (owner === key) updates[`names/${nameKey}`] = null;
+    }
+  } catch (e) { /* best-effort */ }
+
+  // 4. Wipe the data, then remove the login itself.
+  await f.update(f.ref(f.db), updates);
+  await a.deleteUser(user);
+
+  // 5. Forget them locally too (mirrors logout's device wipe).
+  stopListening();
+  account = null;
+  localStorage.removeItem(LS_NAME);
+  localStorage.removeItem(LS_DND);
+  localStorage.removeItem(LS_NOREQ);
+  localStorage.removeItem(LS_BLOCKS);
+  localStorage.removeItem(LS_VOICE);
+  blocks = {};
+  sessionStorage.clear();
+  refreshLoginButton();
 }
 
 export async function logout() {
@@ -813,8 +963,8 @@ export function initSocial() {
   if (fgBtn) fgBtn.addEventListener("click", async () => {
     fgBtn.disabled = true;
     try {
-      await doPasswordReset(val("login-ident"));
-      toast("Password-reset email sent — check your inbox.", 6000);
+      const to = await doPasswordReset(val("login-ident"));
+      toast(`Reset email sent to ${to} — check spam too.`, 6000);
     } catch (e) {
       toast(authErrorText(e), 5000);
     } finally {

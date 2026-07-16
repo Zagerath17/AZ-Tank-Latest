@@ -179,7 +179,7 @@ export const CANNON = {
   shrapN: 36,        // irregular shrapnel burst on expiry / tank hit
   shrapSpeed: 1.1,
   shrapR: 0.6,
-  wallSlow: 0.15,    // shrapnel crawls while phasing through a wall
+  wallSlow: 0.165,   // shrapnel crawls while phasing through a wall (+10%)
 };
 
 /* ================================================================

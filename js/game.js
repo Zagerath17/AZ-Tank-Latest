@@ -1487,7 +1487,7 @@ function launchMortar(byId, x0, y0, tx, ty, now) {
     distCells,
     landAt: now + mortarFlightMs(distCells),
   });
-  sfx.cannon?.(); // a heavy launch thump
+  sfx.cannon?.(0.75); // big-cannon report, a touch quieter
 }
 
 // Concentric damage rings, from the impact centre outward. Radii are
@@ -1513,7 +1513,7 @@ function detonateMortar(m, now) {
     for (const ring of MORTAR_RINGS) {
       if (d <= ring.r * CELL) { dmg = ring.dmg; break; }
     }
-    if (dmg > 0) applyHit(t, dmg, m.by, now);
+    if (dmg > 0) applyHit(t, dmg, m.by, now, "mortar");
   }
 }
 
@@ -1674,7 +1674,7 @@ function stepBullets(now, dt) {
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
           // Authority: in local mode we own everyone; online we only
           // pronounce deaths for tanks simulated on this device.
-          applyHit(t, b.mini ? DMG.mg : DMG.basic, b.by, now);
+          applyHit(t, b.mini ? DMG.mg : DMG.basic, b.by, now, "bullet");
           break;
         }
       }
@@ -2035,7 +2035,7 @@ function stepBeams(now) {
           // hit. 8 dmg fresh, −1 per bounce so far, floored at 1.
           bm.inside.add(t.id);
           const dmg = Math.max(1, DMG.laserBase - beamBouncesAt(bm, d));
-          applyHit(t, dmg, bm.by, now);
+          applyHit(t, dmg, bm.by, now, "laser");
         } else if (!touching && bm.inside.has(t.id)) {
           bm.inside.delete(t.id); // exited — a later re-entry hits again
         }
@@ -2138,7 +2138,7 @@ function stepRockets(now, dt) {
         if (t.id === rk.by && age < ROCKET.ownerGraceMs) continue;
         if (tankHitPoint(t, rk.x, rk.y, r)) {
           alive = false;
-          applyHit(t, DMG.rocket, rk.by, now);
+          applyHit(t, DMG.rocket, rk.by, now, "bullet");
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3.5 });
           addFade(rk.x, rk.y, r * 1.4, now);
           break;
@@ -2313,7 +2313,7 @@ function stepSnipes(now, dt) {
       if (tankHitPoint(t, s.x, s.y, r)) {
         alive = false;
         addFade(s.x, s.y, r * 1.4, now);
-        applyHit(t, DMG.sniper, s.by, now);
+        applyHit(t, DMG.sniper, s.by, now, "bullet");
         break;
       }
     }
@@ -2361,7 +2361,7 @@ function stepCannons(now, dt) {
       if (t.dead || t.gone) continue;
       if (t.id === c.by && now - c.born < 100) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
-        applyHit(t, DMG.cannonBall, c.by, now);
+        applyHit(t, DMG.cannonBall, c.by, now, "bullet");
         explodeCannon(c, now);
         alive = false;
         break;
@@ -2379,6 +2379,11 @@ function explodeCannon(c, now) {
   sfx.shrap();
   addFade(c.x, c.y, CANNON.r * BULLET_R, now);
   S.booms.push({ x: c.x, y: c.y, born: now, r: CANNON.r * BULLET_R * 4 });
+  // A small smoke puff at the point of detonation (reuses the mortar
+  // cloud, smaller — the same rising-and-fading render).
+  (S.mortarClouds ??= []).push({
+    x: c.x, y: c.y, born: now, scale: 0.55, seed: (Math.random() * 1e9) | 0,
+  });
   const speed = BULLET_SPEED * CANNON.shrapSpeed;
   // Irregular burst, not a perfect ring: seeded jitter on both angle
   // and speed (seeded so online clients all see the same pattern).
@@ -2416,7 +2421,7 @@ function stepShrapnel(now, dt) {
         if (tankHitPoint(t, sh.x, sh.y, r)) {
           alive = false;
           addFade(sh.x, sh.y, r * 1.2, now);
-          applyHit(t, DMG.shrapnel, sh.by, now);
+          applyHit(t, DMG.shrapnel, sh.by, now, "bullet");
           break;
         }
       }
@@ -2436,10 +2441,15 @@ function stepShrapnel(now, dt) {
 // A projectile connected with a tank. The FLASH, SPARKS, and SOUND
 // play on EVERY client (each simulates the collision locally); the
 // actual damage is applied only by the tank's authoritative client.
-function applyHit(t, amount, byId, now = performance.now()) {
+function applyHit(t, amount, byId, now = performance.now(), kind = "bullet") {
   t.lastHitAt = now;           // red damage flash (drawTank)
   addHitSparks(t.x, t.y, now); // metal sparks at the hull
-  sfx.hit?.();
+  // Weapon-specific impact: laser burns through metal; ballistic
+  // rounds clang off it; the mortar's own detonation boom covers its
+  // hit, so it plays no extra impact tone.
+  if (kind === "laser") sfx.hitLaser?.();
+  else if (kind === "mortar") { /* the boom is the hit */ }
+  else sfx.hitMetal?.();
   if (S.mode === "local" || t.local) damageTank(t, amount, byId);
 }
 
@@ -3470,7 +3480,7 @@ function drawMortarCloud(c, now) {
   const p = age / MORTAR.cloudMs;
   const grow = 0.5 + 0.5 * Math.min(1, p * 3);
   const fade = Math.max(0, 1 - p);
-  const R = CELL * 0.5 * grow;
+  const R = CELL * 0.5 * grow * (c.scale ?? 1);
   const rng = mulberry32(c.seed >>> 0);
   ctx.save();
   ctx.translate(c.x, c.y);
