@@ -15,7 +15,7 @@
 import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
 import { COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
 import { getBinds } from "./settings.js";
-import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon } from "./maze.js";
+import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon, snapSpawn } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
@@ -595,9 +595,12 @@ function startRound(seed) {
   } else pool = MAZE_SIZES;                                    // casual / offline
   const sizeStart = shape === "rect" ? 0 : Math.floor(pool.length * 0.5);
   const [cols, rows] = pool[sizeStart + Math.floor(rng() * (pool.length - sizeStart))];
-  // braid 0.1: roughly a third of the previous loopiness — fewer open
-  // cross-connections, so corridors read as corridors.
-  S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.1 });
+  // The arena is a battlefield, not a puzzle: braid 0.3 keeps corridors
+  // reading as corridors while opening plenty of cross-connections, and
+  // the generator then guarantees every cell has a second exit and that
+  // at least two INDEPENDENT routes link the spawns — so there's always
+  // a way around, and never one forced corridor.
+  S.maze = generateMaze(cols, rows, rng, { shape, braid: 0.3, minRoutes: 2 });
   S.rects = wallRects(S.maze, CELL, WALL_T);
   // Shaped arenas: the angled silhouette edge, as oriented wall slabs
   // (collision) plus the world-space polygon (for the floor + clip).
@@ -670,23 +673,10 @@ function startRound(seed) {
         [cols - 1, 0],
         [0, rows - 1],
       ];
-  const inside = S.maze.inside;
-  const cellInside = (c, r) =>
-    !inside || (r >= 0 && r < rows && c >= 0 && c < cols && inside[r][c]);
-  const snapInside = (c0, r0) => {
-    if (cellInside(c0, r0)) return [c0, r0];
-    // Spiral outward for the closest inside cell.
-    let best = [Math.floor(cols / 2), Math.floor(rows / 2)], bestD = Infinity;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        if (!cellInside(c, r)) continue;
-        const d = (c - c0) ** 2 + (r - r0) ** 2;
-        if (d < bestD) { bestD = d; best = [c, r]; }
-      }
-    }
-    return best;
-  };
-  const corners = rawCorners.map(([c, r]) => snapInside(c, r));
+  // snapSpawn is the maze generator's OWN rule (nearest playable cell
+  // with room to move), so the tanks land exactly on the cells the
+  // multi-route guarantee was computed for.
+  const corners = rawCorners.map(([c, r]) => snapSpawn(S.maze, c, r));
 
   // In a team match, hand out corners by TEAM (0 → left pair, 1 →
   // right pair) regardless of roster order.

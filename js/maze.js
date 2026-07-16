@@ -70,6 +70,30 @@ function shapeMask(cols, rows, shape) {
       inside[r][c] = pointInPoly((c + 0.5) / cols, (r + 0.5) / rows, poly);
     }
   }
+  // Trim one-cell nubs: a cell with a single playable neighbour is a
+  // spike off the silhouette (a triangle's apex, say). It can only ever
+  // be a dead end no matter how the maze is carved, and if a tank spawns
+  // beside one it eats half that tank's exits — so the shape sheds them
+  // before anything is carved. Capped at a few passes, and it never
+  // erodes a small arena away.
+  for (let pass = 0; pass < 3; pass++) {
+    const doomed = [];
+    let live = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (!inside[r][c]) continue;
+        live++;
+        const n =
+          (r > 0 && inside[r - 1][c] ? 1 : 0) +
+          (r < rows - 1 && inside[r + 1][c] ? 1 : 0) +
+          (c > 0 && inside[r][c - 1] ? 1 : 0) +
+          (c < cols - 1 && inside[r][c + 1] ? 1 : 0);
+        if (n < 2) doomed.push([c, r]);
+      }
+    }
+    if (!doomed.length || live - doomed.length < 12) break;
+    for (const [c, r] of doomed) inside[r][c] = false;
+  }
   // Convex shapes are always connected; this is just a safety net.
   return keepMainComponent(inside, cols, rows);
 }
@@ -214,6 +238,21 @@ export function generateMaze(cols, rows, rng, opts = {}) {
     else H[a][b] = false;
   }
 
+  const maze = { cols, rows, H, V, inside, shape };
+
+  // ---- DE-BRAID THE TRAPS: every cell gets at least two exits ----
+  // Random braiding sprinkles loops around the middle but leaves plenty
+  // of one-way pockets. Giving every dead end a second opening removes
+  // every trap and puts every cell on a loop.
+  killDeadEnds(maze, rng);
+
+  // ---- GUARANTEE MULTIPLE ROUTES BETWEEN SPAWNS ----
+  // The point of the arena is flanking, so a single choke corridor
+  // between two players is a bug, not a maze. Widen the tightest cut
+  // between every pair of spawn corners until at least `minRoutes`
+  // fully independent paths exist.
+  ensureRoutes(maze, rng, opts.minRoutes ?? 2);
+
   // ---- Seal the shape's border ----
   // Any wall on the boundary between an inside cell and an outside
   // cell (or the grid edge) must stand, so tanks can't leave the shape.
@@ -228,6 +267,196 @@ export function generateMaze(cols, rows, rng, opts = {}) {
   }
 
   return { cols, rows, H, V, inside, shape };
+}
+
+
+/* ================================================================
+   Connectivity — making the arena playable, not just solvable
+   ================================================================
+   A textbook "perfect" maze has exactly ONE path between any two
+   cells, which for a shooter means no flanking, no escape, and a
+   single corridor both players are forced down. These two passes fix
+   that: every cell gets a second exit (no traps), and the tightest
+   cut between spawn corners is widened until several genuinely
+   independent routes exist.
+   ================================================================ */
+
+// How many open sides a cell has.
+function cellDegree(m, c, r) {
+  const inB = (cc, rr) =>
+    cc >= 0 && cc < m.cols && rr >= 0 && rr < m.rows && (!m.inside || m.inside[rr][cc]);
+  let d = 0;
+  if (inB(c, r - 1) && !m.H[r][c]) d++;
+  if (inB(c, r + 1) && !m.H[r + 1][c]) d++;
+  if (inB(c - 1, r) && !m.V[r][c]) d++;
+  if (inB(c + 1, r) && !m.V[r][c + 1]) d++;
+  return d;
+}
+
+// Classic braiding: every dead end gets a second opening, so no cell
+// is a one-way pocket and every cell sits on a loop.
+function killDeadEnds(m, rng) {
+  const inB = (c, r) =>
+    c >= 0 && c < m.cols && r >= 0 && r < m.rows && (!m.inside || m.inside[r][c]);
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (let r = 0; r < m.rows; r++) {
+      for (let c = 0; c < m.cols; c++) {
+        if (!inB(c, r) || cellDegree(m, c, r) !== 1) continue;
+        const opts = [];
+        if (inB(c, r - 1) && m.H[r][c]) opts.push(() => { m.H[r][c] = false; });
+        if (inB(c, r + 1) && m.H[r + 1][c]) opts.push(() => { m.H[r + 1][c] = false; });
+        if (inB(c - 1, r) && m.V[r][c]) opts.push(() => { m.V[r][c] = false; });
+        if (inB(c + 1, r) && m.V[r][c + 1]) opts.push(() => { m.V[r][c + 1] = false; });
+        if (opts.length) { opts[Math.floor(rng() * opts.length)](); changed = true; }
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+// The cells tanks spawn in: the four grid corners, each snapped to the
+// nearest playable cell — but never onto a one-neighbour spike (the
+// apex of a triangle, say). A tank parked in a spike has a single way
+// out no matter how the maze is carved, so we step in to the nearest
+// cell with real room. game.js places tanks with this same function,
+// so spawns and the connectivity guarantee always agree.
+export function snapSpawn(m, c0, r0) {
+  const inB = (c, r) =>
+    c >= 0 && c < m.cols && r >= 0 && r < m.rows && (!m.inside || m.inside[r][c]);
+  // How many playable neighbours a cell has, walls ignored — the
+  // shape's own ceiling on how many exits that cell could ever get.
+  const room = (c, r) =>
+    (inB(c, r - 1) ? 1 : 0) + (inB(c, r + 1) ? 1 : 0) +
+    (inB(c - 1, r) ? 1 : 0) + (inB(c + 1, r) ? 1 : 0);
+  let best = null, bestD = Infinity;
+  for (let r = 0; r < m.rows; r++) {
+    for (let c = 0; c < m.cols; c++) {
+      if (!inB(c, r) || room(c, r) < 2) continue;
+      const d = (c - c0) ** 2 + (r - r0) ** 2;
+      if (d < bestD) { bestD = d; best = [c, r]; }
+    }
+  }
+  if (best) return best;
+  // Degenerate shape — fall back to any playable cell at all.
+  for (let r = 0; r < m.rows; r++) {
+    for (let c = 0; c < m.cols; c++) if (inB(c, r)) return [c, r];
+  }
+  return [0, 0];
+}
+
+// The cells tanks spawn in: the four grid corners, each snapped inward
+// to the nearest cell with real room. game.js places tanks with the
+// same snapSpawn, so spawns and the connectivity guarantee below can
+// never drift apart.
+export function spawnCells(m) {
+  const raw = [[0, 0], [m.cols - 1, m.rows - 1], [m.cols - 1, 0], [0, m.rows - 1]];
+  const out = [];
+  for (const [c, r] of raw) {
+    const s = snapSpawn(m, c, r);
+    if (s && !out.some(([oc, or]) => oc === s[0] && or === s[1])) out.push(s);
+  }
+  return out;
+}
+
+// Edge-disjoint paths between two cells (max-flow, unit capacities).
+// Returns { flow, reach } where `reach` is the source side of the
+// min-cut — the walls out of that set are exactly what's choking it.
+function maxFlow(m, src, snk) {
+  const inB = (c, r) =>
+    c >= 0 && c < m.cols && r >= 0 && r < m.rows && (!m.inside || m.inside[r][c]);
+  const id = (c, r) => r * m.cols + c;
+  const cap = new Map();
+  const adj = new Map();
+  const addEdge = (a, b) => {
+    cap.set(a + "," + b, (cap.get(a + "," + b) ?? 0) + 1);
+    cap.set(b + "," + a, (cap.get(b + "," + a) ?? 0) + 1);
+    if (!adj.has(a)) adj.set(a, new Set());
+    if (!adj.has(b)) adj.set(b, new Set());
+    adj.get(a).add(b);
+    adj.get(b).add(a);
+  };
+  for (let r = 0; r < m.rows; r++) {
+    for (let c = 0; c < m.cols; c++) {
+      if (!inB(c, r)) continue;
+      if (inB(c + 1, r) && !m.V[r][c + 1]) addEdge(id(c, r), id(c + 1, r));
+      if (inB(c, r + 1) && !m.H[r + 1][c]) addEdge(id(c, r), id(c, r + 1));
+    }
+  }
+  const S = id(src[0], src[1]);
+  const T = id(snk[0], snk[1]);
+  let flow = 0;
+  let reach = new Set([S]);
+  for (let guard = 0; guard < 64; guard++) {
+    // BFS along edges with spare capacity.
+    const prev = new Map([[S, -1]]);
+    const q = [S];
+    let hit = false;
+    for (let qi = 0; qi < q.length; qi++) {
+      const u = q[qi];
+      if (u === T) { hit = true; break; }
+      for (const v of (adj.get(u) ?? [])) {
+        if (!prev.has(v) && (cap.get(u + "," + v) ?? 0) > 0) { prev.set(v, u); q.push(v); }
+      }
+    }
+    reach = new Set(prev.keys());
+    if (!hit) break;
+    const path = [];
+    for (let v = T; v !== -1; v = prev.get(v)) path.push(v);
+    path.reverse();
+    let bn = Infinity;
+    for (let i = 0; i < path.length - 1; i++) {
+      bn = Math.min(bn, cap.get(path[i] + "," + path[i + 1]) ?? 0);
+    }
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i] + "," + path[i + 1];
+      const b = path[i + 1] + "," + path[i];
+      cap.set(a, cap.get(a) - bn);
+      cap.set(b, (cap.get(b) ?? 0) + bn);
+    }
+    flow += bn;
+  }
+  return { flow, reach };
+}
+
+// Widen the tightest cut between every pair of spawn corners until at
+// least `target` independent routes connect them. Each pass finds the
+// min-cut and knocks out a standing wall that spans it, which is
+// guaranteed to open a genuinely NEW route (not a parallel copy of an
+// existing one). A corner cell only has two neighbours, so two routes
+// is the ceiling from a corner — but two is the difference between
+// "one forced corridor" and "you can flank".
+function ensureRoutes(m, rng, target) {
+  if (target < 2) return;
+  const inB = (c, r) =>
+    c >= 0 && c < m.cols && r >= 0 && r < m.rows && (!m.inside || m.inside[r][c]);
+  const id = (c, r) => r * m.cols + c;
+  const spawns = spawnCells(m);
+
+  for (let i = 0; i < spawns.length; i++) {
+    for (let j = i + 1; j < spawns.length; j++) {
+      for (let guard = 0; guard < 24; guard++) {
+        const { flow, reach } = maxFlow(m, spawns[i], spawns[j]);
+        if (flow >= target) break;
+        // Every standing wall from the cut's source side to its sink
+        // side; removing any one raises the cut by exactly 1.
+        const spans = [];
+        for (let r = 0; r < m.rows; r++) {
+          for (let c = 0; c < m.cols; c++) {
+            if (!inB(c, r) || !reach.has(id(c, r))) continue;
+            if (inB(c + 1, r) && m.V[r][c + 1] && !reach.has(id(c + 1, r))) spans.push(["V", r, c + 1]);
+            if (inB(c, r + 1) && m.H[r + 1][c] && !reach.has(id(c, r + 1))) spans.push(["H", r + 1, c]);
+            if (inB(c - 1, r) && m.V[r][c] && !reach.has(id(c - 1, r))) spans.push(["V", r, c]);
+            if (inB(c, r - 1) && m.H[r][c] && !reach.has(id(c, r - 1))) spans.push(["H", r, c]);
+          }
+        }
+        if (!spans.length) break; // geometrically impossible — leave it
+        const [kind, a, b] = spans[Math.floor(rng() * spans.length)];
+        if (kind === "V") m.V[a][b] = false;
+        else m.H[a][b] = false;
+      }
+    }
+  }
 }
 
 // For a shrinking "zone", we need to know how many layers deep each
