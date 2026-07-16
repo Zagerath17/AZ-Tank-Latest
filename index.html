@@ -34,7 +34,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.7.6</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -373,6 +373,20 @@
         <button class="btn" id="acct-logout" type="button">LOG OUT</button>
       </div>
       <p class="acct-msg" id="acct-msg"></p>
+      <div class="acct-dev" id="acct-dev" hidden>
+        <p class="acct-dev-head">⚙ DEV TOOLS</p>
+        <div class="dev-row">
+          <span class="dev-label">1v1 Elo <b id="dev-elo1">—</b></span>
+          <button class="btn btn-small" data-dev-elo="1v1" data-delta="-100" type="button">−100</button>
+          <button class="btn btn-small" data-dev-elo="1v1" data-delta="100" type="button">+100</button>
+        </div>
+        <div class="dev-row">
+          <span class="dev-label">2v2 Elo <b id="dev-elo2">—</b></span>
+          <button class="btn btn-small" data-dev-elo="2v2" data-delta="-100" type="button">−100</button>
+          <button class="btn btn-small" data-dev-elo="2v2" data-delta="100" type="button">+100</button>
+        </div>
+        <p class="dev-note">Tags are unlimited on this account.</p>
+      </div>
       <div class="acct-danger">
         <button class="btn acct-danger-btn" id="acct-delete" type="button">DELETE ACCOUNT</button>
         <div id="acct-delete-confirm" hidden>
