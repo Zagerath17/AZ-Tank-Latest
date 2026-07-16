@@ -19,7 +19,7 @@
 // screen, including mid-game.
 // ================================================================
 
-import { toast, tankSVG, showScreen, onEnter, onLeave } from "./main.js";
+import { toast, tankSVG, showScreen, onEnter, onLeave, paintVar } from "./main.js";
 import { SKINS, DEFAULT_SKIN } from "./skins.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
@@ -818,8 +818,8 @@ async function renderFriends() {
       const canAsk = cls === "lobby" && !p.dnd;
       const why = p.dnd ? " · Do Not Disturb" : "";
       return `
-        <li class="friend-row p-${p.color ?? "slate"}">
-          ${tankSVG(p.color ?? "slate")}
+        <li class="friend-row" style="${paintVar(p.color)}">
+          ${tankSVG(p.color)}
           <span class="friend-name">${p.name ?? p.key}
             <em class="status status-${cls}">● ${label}${why}</em></span>
           <button class="btn btn-small" data-ask="${p.key}" ${canAsk ? "" : "disabled"}>
@@ -862,8 +862,8 @@ async function renderRequests() {
       const key = keys[i];
       const name = p?.name ?? key;
       return `
-        <li class="friend-row p-${p?.color ?? "slate"}">
-          ${tankSVG(p?.color ?? "slate")}
+        <li class="friend-row" style="${paintVar(p?.color)}">
+          ${tankSVG(p?.color)}
           <span class="friend-name">${name}</span>
           <button class="btn btn-small" data-req-yes="${key}">ACCEPT</button>
           <button class="btn btn-small" data-req-no="${key}">DECLINE</button>
@@ -915,8 +915,8 @@ async function searchPlayer() {
     const blocked = (p.dnd || p.noRequests) && !already;
     const blockLabel = p.noRequests ? "REQUESTS OFF" : "DO NOT DISTURB";
     out.innerHTML = `
-      <li class="friend-row p-${p.color ?? "slate"}">
-        ${tankSVG(p.color ?? "slate")}
+      <li class="friend-row" style="${paintVar(p.color)}">
+        ${tankSVG(p.color)}
         <span class="friend-name">${p.name}</span>
         <button class="btn btn-small" id="friend-add-btn" ${already || blocked ? "disabled" : ""}>
           ${already ? "FRIENDS ✓" : blocked ? blockLabel : "ADD FRIEND"}
@@ -977,8 +977,8 @@ export async function toggleInvitePanel() {
     }
     const room = info.players < 4;
     panel.innerHTML = invitable.map((p) => `
-      <li class="friend-row p-${p.color ?? "slate"}">
-        ${tankSVG(p.color ?? "slate")}
+      <li class="friend-row" style="${paintVar(p.color)}">
+        ${tankSVG(p.color)}
         <span class="friend-name">${p.name}</span>
         <button class="btn btn-small" data-invite="${p.key}" ${room && !p.dnd ? "" : "disabled"}>
           ${!room ? "LOBBY FULL" : p.dnd ? "DND" : "INVITE"}

@@ -10,7 +10,7 @@
 // swing for each player.
 // ================================================================
 
-import { showScreen } from "./main.js";
+import { showScreen, paintVar } from "./main.js";
 import { ensureFirebase } from "./online.js";
 import { rankBadge } from "./ranked.js";
 import { awardTags } from "./social.js";
@@ -125,7 +125,7 @@ function render(body, rMode, players, myKey, results, dmgByPlayer, killsByPlayer
     const dmg = Math.round(dmgByPlayer[p.id] ?? 0);
     const kills = killsByPlayer[p.id] ?? 0;
     return `
-      <div class="res-row p-${p.color} ${p.key === myKey ? "res-me" : ""} ${rMode === "2v2" ? "team-" + (p.team ?? 0) : ""}">
+      <div class="res-row ${p.key === myKey ? "res-me" : ""} ${rMode === "2v2" ? "team-" + (p.team ?? 0) : ""}" style="${paintVar(p.color)}">
         <span class="res-name">${res ? rankBadge(res.after, 16) : ""} ${p.name}</span>
         <span class="res-stat"><b>${dmg}</b><em>dmg</em></span>
         <span class="res-stat"><b>${kills}</b><em>kills</em></span>

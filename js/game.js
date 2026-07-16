@@ -12,7 +12,7 @@
 //                            client (host) also drives the bots.
 // ================================================================
 
-import { showScreen, toast, tankSVG, setInMatch } from "./main.js";
+import { showScreen, toast, tankSVG, setInMatch, paintVar } from "./main.js";
 import { COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
 import { skinFinish } from "./skins.js";
 import { getBinds } from "./settings.js";
@@ -2616,7 +2616,7 @@ function updateScoreHUD() {
   scoreEl.innerHTML = order
     .map((p) => {
       const label = p.name ?? (S.mode === "local" ? SLOT_NAMES[p.slot ?? p.color] : null) ?? COLOR_NAMES[p.color];
-      return `<div class="sc-card p-${p.color}">
+      return `<div class="sc-card" style="${paintVar(p.color)}">
         <span class="sc-name">${label}</span>
         ${tankSVG(p.color)}
         <span class="sc">${S.scores[p.id] ?? 0}</span>

@@ -4,7 +4,7 @@
 // Other modules read them with getBinds().
 // ================================================================
 
-import { onEnter, onLeave, toast, SLOT_NAMES, tankSVG } from "./main.js";
+import { onEnter, onLeave, toast, SLOT_NAMES, tankSVG, paintVar } from "./main.js";
 import { getAudioLevels, setAudioLevel, sfx } from "./audio.js";
 import { getDnd, setDnd, getNoRequests, setNoRequests } from "./social.js";
 
@@ -84,7 +84,7 @@ export function keyLabel(code) {
 function render() {
   const host = document.getElementById("binds");
   host.innerHTML = BIND_SLOTS.map((color) => `
-    <section class="panel bind-panel p-${color}">
+    <section class="panel bind-panel" style="${paintVar(color)}">
       <header class="bind-head">
         ${tankSVG(color)}
         <h3>Keyboard controls</h3>

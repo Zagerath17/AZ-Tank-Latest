@@ -23,7 +23,7 @@
 // Colors come from join order. Max 4 players (bots count).
 // ================================================================
 
-import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG } from "./main.js";
+import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG, paintVar } from "./main.js";
 import { SKINS, BOT_SKINS, DEFAULT_SKIN } from "./skins.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
@@ -240,7 +240,7 @@ export function lobbyPeers() {
   const resolved = current.resolvedCache ?? {};
   return entries
     .filter(([id, p]) => id !== me && !p.bot)
-    .map(([id, p]) => ({ id, name: p.name ?? "Player", color: resolved[id] ?? "slate", ukey: p.ukey ?? null }));
+    .map(([id, p]) => ({ id, name: p.name ?? "Player", color: resolved[id] ?? DEFAULT_SKIN, ukey: p.ukey ?? null }));
 }
 
 // Fire-and-forget write helper used by the in-game streams.
@@ -832,7 +832,7 @@ function beginOnlineGame(code, lobby) {
       if (current) current.rankedSettled = true; // decided — no abort charge
       const merged = placements.map((pl) => ({
         ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000, team: null }),
-        color: (roster.find((r) => r.id === pl.id) ?? {}).color ?? "slate",
+        color: (roster.find((r) => r.id === pl.id) ?? {}).color ?? DEFAULT_SKIN,
         score: pl.score,
       }));
       const savedCode = code;
@@ -984,7 +984,7 @@ function renderLobby(code, lobby) {
   // live when someone changes paint.
   if (!lobby.ranked) {
     const colorMap = {};
-    for (const [id, p] of entries) colorMap[id] = resolved[id] ?? p.color ?? "slate";
+    for (const [id, p] of entries) colorMap[id] = resolved[id] ?? p.color ?? DEFAULT_SKIN;
     updateChatColors(colorMap);
   }
 
@@ -1013,7 +1013,7 @@ function renderLobby(code, lobby) {
            <button class="chip chip-btn" data-bot-remove="${id}" aria-label="Remove bot">✕</button>`
         : `<span class="chip">BOT · ${p.bot.toUpperCase()}</span>`;
       return `
-        <li class="lobby-row p-${color}">
+        <li class="lobby-row" style="${paintVar(color)}">
           ${tankSVG(color)}
           <span class="lobby-name">${COLOR_NAMES[color]} <em>· bot${locked ? " · locked" : ""}</em></span>
           <span class="row-end">${controls}</span>
@@ -1021,7 +1021,7 @@ function renderLobby(code, lobby) {
     }
 
     return `
-      <li class="lobby-row p-${color}">
+      <li class="lobby-row" style="${paintVar(color)}">
         ${tankSVG(color)}
         <span class="lobby-name">${(() => {
           // 4-player ranked lobbies show the 4p rating; everywhere

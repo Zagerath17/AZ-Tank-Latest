@@ -21,7 +21,10 @@ let settingsReturn = "screen-menu";
 export {
   COLORS, SLOT_NAMES, PALETTE, COLOR_NAMES, freeColor,
 } from "./palette.js";
-import { COLORS } from "./palette.js"; // used below for the menu row
+// `export ... from` re-exports WITHOUT binding anything locally, so
+// anything this module actually uses must be imported as well.
+import { COLORS, PALETTE } from "./palette.js";
+import { DEFAULT_SKIN } from "./skins.js";
 
 /* ---------- screen router ---------- */
 
@@ -77,9 +80,16 @@ export function toast(msg, ms = 3000) {
 
 // Blend a hex colour toward the dark base (matches the in-game shade).
 function shade(hex, f) {
-  const n = parseInt(hex.slice(1), 16);
+  const n = parseInt(String(hex ?? PALETTE[DEFAULT_SKIN]).slice(1), 16);
   const mix = (x, t) => Math.round(x + (t - x) * f);
   return `rgb(${mix((n >> 16) & 255, 16)}, ${mix((n >> 8) & 255, 19)}, ${mix(n & 255, 26)})`;
+}
+
+// The `--p` custom property for a paint id, as an inline style. The
+// stylesheet only ships .p-<name> classes for the original handful of
+// colours; the shop has forty, so callers set the variable directly.
+export function paintVar(color) {
+  return `--p:${PALETTE[color] ?? PALETTE[DEFAULT_SKIN]}`;
 }
 
 // A tank sprite that mirrors what you actually drive: treads with
@@ -87,7 +97,7 @@ function shade(hex, f) {
 // FRONT and a darker engine deck with grille + twin exhausts at the
 // REAR, a turret, and a barrel. Drawn pointing UP (barrel at top).
 export function tankSVG(color) {
-  const hull = PALETTE[color] ?? PALETTE.slate;
+  const hull = PALETTE[color] ?? PALETTE[DEFAULT_SKIN];
   const light = shade(hull, -0.2);   // glacis (lighter)
   const dark = shade(hull, 0.34);    // engine deck (darker)
   const edge = shade(hull, 0.5);

@@ -9,6 +9,7 @@
 // ================================================================
 
 import { toast } from "./main.js";
+import { DEFAULT_SKIN } from "./skins.js";
 import { ensureFirebase, lobbyInfo } from "./online.js";
 import { getAccount, isBlocked } from "./social.js";
 import { PALETTE } from "./palette.js";
@@ -67,7 +68,7 @@ async function sendText() {
     await f.set(f.ref(f.db, `lobbies/${info.code}/chat/${key}`), {
       id: acc?.key ?? "guest",
       name: acc?.name ?? "Guest",
-      color: window.__myLobbyColor ?? "slate",
+      color: window.__myLobbyColor ?? DEFAULT_SKIN,
       text: censor(raw).slice(0, 240),
       at: Date.now(),
     });
@@ -88,7 +89,7 @@ function appendLine(msg) {
   const line = document.createElement("div");
   line.className = "chat-line";
   line.dataset.senderId = msg.id ?? "";
-  line.dataset.fallbackColor = msg.color ?? "slate";
+  line.dataset.fallbackColor = msg.color ?? DEFAULT_SKIN;
   line.innerHTML =
     `<span class="chat-who" style="color:${colorForLine(msg)}">[${escapeHtml(msg.name)}]:</span> ` +
     `${escapeHtml(censor(msg.text ?? ""))}`;

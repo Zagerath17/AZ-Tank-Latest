@@ -27,7 +27,7 @@
 // team-wide: if your teammate is the last one standing, you both won.
 // ================================================================
 
-import { toast, onEnter, onLeave, tankSVG } from "./main.js";
+import { toast, onEnter, onLeave, tankSVG, paintVar } from "./main.js";
 import { ensureFirebase, createRankedLobby } from "./online.js";
 import { getAccount, getInvitableFriends, sendInvite } from "./social.js";
 import { isConfigured } from "./firebase-config.js";
@@ -339,8 +339,8 @@ async function toggleDuoInvites() {
       return;
     }
     list.innerHTML = friends.map((p) => `
-      <li class="friend-row p-${p.color ?? "slate"}">
-        ${tankSVG(p.color ?? "slate")}
+      <li class="friend-row" style="${paintVar(p.color)}">
+        ${tankSVG(p.color)}
         <span class="friend-name">${p.name}</span>
         <button class="btn btn-small" data-duo-invite="${p.key}" ${p.dnd ? "disabled" : ""}>
           ${p.dnd ? "DND" : "INVITE"}

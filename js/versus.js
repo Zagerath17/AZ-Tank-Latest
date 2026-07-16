@@ -16,7 +16,8 @@
 //         Bill & Frank.
 // ================================================================
 
-import { tankSVG } from "./main.js";
+import { tankSVG, paintVar } from "./main.js";
+import { DEFAULT_SKIN } from "./skins.js";
 import { ensureFirebase } from "./online.js";
 import { getAccount } from "./social.js";
 
@@ -70,13 +71,13 @@ export async function showVersus(roster, myId, mode, teams = null, players = [],
   // ONE giant number sits under each side — your (team's) wins under
   // yours, the opponents' under theirs — with a hyphen between.
   const spriteBlock = (r, isMe, side) => `
-    <div class="vs-fighter p-${r.color}${isMe ? " vs-me" : ""}">
+    <div class="vs-fighter${isMe ? " vs-me" : ""}" style="${paintVar(r.color)}">
       ${tankSVG(r.color)}
       <span class="vs-name">${r.name ?? "Player"}</span>
       <span class="vs-score" data-fighter="${r.id}" data-side="${side}">${ranked && side ? "–" : ""}</span>
     </div>`;
 
-  const mySide = [meRow ?? { id: "me", color: "slate", name: "You" }, ...allies];
+  const mySide = [meRow ?? { id: "me", color: DEFAULT_SKIN, name: "You" }, ...allies];
   host.innerHTML = `
     <div class="vs-side">${mySide.map((r, i) => spriteBlock(r, r.id === myId, i === 0 ? "me" : "")).join("")}</div>
     <div class="vs-mid"><span class="vs-vs">VS</span>${ranked ? '<span class="vs-ratio-dash">-</span>' : ""}</div>
