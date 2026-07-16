@@ -22,6 +22,7 @@ input, textarea {
    ================================================================ */
 
 :root {
+  --tp-size: clamp(96px, 26vw, 128px); /* thumb-stick diameter */
   --gunmetal: #12151b;
   --steel:    #1c212b;
   --rivet:    #39424f;
@@ -662,7 +663,11 @@ body {
   background: #ffffff;
   border: 1px solid #2a313d;
   border-radius: var(--radius);
-  touch-action: none;
+  /* Dragging the arena scrolls the screen on a phone (the sticks and
+     buttons set touch-action: none on themselves, so driving and
+     aiming still take priority wherever a control actually sits).
+     Desktop aiming is mouse-driven and unaffected. */
+  touch-action: pan-y;
 }
 
 /* ---- the paint shop: every pickable color + the Impossible black ---- */
@@ -947,6 +952,12 @@ body {
 .notice .notice-x { opacity: .6; }
 
 .arena-wrap { position: relative; }
+/* With the controls overlaid on the arena, the bottom corners belong
+   to the sticks — lift the corner HUDs above them so nothing is
+   hidden behind a thumb. */
+.arena-wrap.has-touch .loadout-hud,
+.arena-wrap.has-touch .health-hud { bottom: calc(var(--tp-size) + 14px); }
+.arena-wrap.has-touch .armour-hud { bottom: calc(var(--tp-size) + 40px); }
 /* Loadout readout, bottom-right of the arena: the enlarged icons of
    your three equipped items (offense · defense · agility), each with
    its activation control captioned beneath. */
@@ -1081,19 +1092,37 @@ body {
   text-shadow: 0 2px 0 rgba(0, 0, 0, .5);
 }
 
+/* The controls float ON the arena's bottom edge rather than taking a
+   strip of their own, so the battlefield gets the whole panel. The
+   container itself is click-through — only the sticks and buttons
+   catch touches, which leaves the white space between them free to
+   scroll the screen. */
 .touch-pad {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-end;
   gap: 10px;
-  padding-bottom: max(0px, env(safe-area-inset-bottom));
-  touch-action: none;
+  padding: 0 clamp(8px, 2vw, 18px) max(8px, env(safe-area-inset-bottom));
+  pointer-events: none;
+  z-index: 4;
+}
+/* The aim stick and its fire buttons ride together on the right, with
+   the buttons OUTBOARD of the stick (thumb rolls off the stick onto
+   them). */
+.tp-right {
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 2vw, 16px);
 }
 /* Analog thumb sticks: a fixed base ring with a draggable knob. */
 .tp-stick {
   position: relative;
-  width: clamp(96px, 26vw, 128px);
-  height: clamp(96px, 26vw, 128px);
+  width: var(--tp-size);
+  height: var(--tp-size);
   border-radius: 50%;
   background: radial-gradient(circle at 50% 42%, #2a3140, #1c212c);
   border: 1px solid var(--rivet);
@@ -1103,6 +1132,8 @@ body {
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
   flex: 0 0 auto;
+  opacity: .6;          /* see the battlefield through the controls */
+  pointer-events: auto; /* ...but still catch the thumb */
 }
 .tp-stick-label {
   position: absolute;
@@ -1134,6 +1165,7 @@ body {
   flex-direction: column;
   gap: clamp(6px, 1.6vh, 12px);
   align-items: center;
+  pointer-events: auto;
 }
 .tp-fire {
   width: clamp(52px, 14vw, 66px);
@@ -1151,11 +1183,18 @@ body {
   user-select: none;
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
+  opacity: .6;
+  pointer-events: auto;
 }
 .tp-off { color: #ff6a4d; border-color: #7a3a34; background: linear-gradient(#3a2a2c, #2c2124); }
 .tp-def { color: #c79a6a; border-color: #6a4a2a; background: linear-gradient(#33291f, #262019); }
 .tp-agi { color: #ffe11f; border-color: #7a6a1a; background: linear-gradient(#332f1a, #262214); }
-.tp-fire.held { transform: translateY(3px); box-shadow: 0 1px 0 var(--shadow); filter: brightness(1.35); }
+.tp-fire.held {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--shadow);
+  filter: brightness(1.35);
+  opacity: 1; /* a pressed button reads clearly */
+}
 
 /* ---------- motion safety ---------- */
 @media (prefers-reduced-motion: reduce) {
@@ -1348,4 +1387,107 @@ body {
   background: #0f1218;
   color: var(--chalk);
   font-family: "Chakra Petch", system-ui;
+}
+
+/* ---------- shop ---------- */
+.tag-purse {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #161a22;
+  border: 1px solid var(--rivet);
+  font-family: "Black Ops One", system-ui;
+  letter-spacing: .06em;
+  color: #e7c66a;
+  white-space: nowrap;
+}
+.tag-coin { font-size: .95em; filter: saturate(0) brightness(1.6); }
+.shop-rank {
+  margin: 6px 0 2px;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  color: #8b93a3;
+  text-align: center;
+}
+.shop-group { margin-bottom: 18px; }
+.shop-group.locked { opacity: .72; }
+.shop-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-family: "Black Ops One", system-ui;
+  font-size: .82rem;
+  letter-spacing: .08em;
+  color: #c3cbd9;
+}
+.shop-group-note {
+  font-family: "Chakra Petch", system-ui;
+  font-size: .72rem;
+  letter-spacing: .04em;
+  color: #7d8595;
+  white-space: nowrap;
+}
+.shop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px;
+}
+.shop-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 9px 5px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--rivet);
+  background: #161a22;
+  color: var(--chalk);
+  cursor: pointer;
+  font-family: "Chakra Petch", system-ui;
+  transition: border-color .12s, transform .08s;
+}
+.shop-tile:active { transform: translateY(1px); }
+.shop-chip {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid rgba(0,0,0,.45);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.35), 0 2px 0 var(--shadow);
+}
+.shop-name {
+  font-size: .66rem;
+  letter-spacing: .03em;
+  text-align: center;
+  line-height: 1.15;
+  min-height: 2.3em;
+  display: flex;
+  align-items: center;
+}
+.shop-foot {
+  font-size: .64rem;
+  letter-spacing: .06em;
+  font-weight: 700;
+  color: #8b93a3;
+  white-space: nowrap;
+}
+.shop-tile.is-worn { border-color: #4bd08a; }
+.shop-tile.is-worn .shop-foot { color: #4bd08a; }
+.shop-tile.is-owned .shop-foot { color: #c3cbd9; }
+.shop-tile.is-broke { opacity: .6; }
+.shop-tile.is-broke .shop-foot { color: #ff8f78; }
+.shop-tile.is-locked { opacity: .42; cursor: not-allowed; }
+.shop-tile.is-locked .shop-chip { filter: grayscale(.85); }
+.shop-empty {
+  margin: 10px 0;
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--rivet);
+  color: #7d8595;
+  font-size: .82rem;
+  line-height: 1.5;
+  text-align: center;
 }
