@@ -22,9 +22,7 @@
     <!-- ============ MAIN MENU ============ -->
     <section class="screen screen-center is-active" id="screen-menu" aria-label="Main menu">
       <div class="menu-hero">
-        <h1 class="logo">
-          <span class="l-red">T</span><span class="l-green">A</span><span class="l-blue">N</span><span class="l-yellow">K</span><span class="l-word">BRAWL</span>
-        </h1>
+        <h1 class="logo"><span class="logo-fill">TANK BRAWL</span></h1>
         <p class="tagline">Last tank rolling wins</p>
         <div class="tank-row" id="menu-tanks" aria-hidden="true"></div>
       </div>
@@ -36,7 +34,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.7</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -357,6 +355,25 @@
         <button class="btn" id="acct-logout" type="button">LOG OUT</button>
       </div>
       <p class="acct-msg" id="acct-msg"></p>
+      <div class="acct-danger">
+        <button class="btn acct-danger-btn" id="acct-delete" type="button">DELETE ACCOUNT</button>
+        <div id="acct-delete-confirm" hidden>
+          <p class="acct-warn">
+            <b>This cannot be undone.</b> Your username, email, rating,
+            match records, and friends list are erased for good, and the
+            username is freed for someone else.
+          </p>
+          <label class="acct-label" for="acct-pass">Enter your password to confirm</label>
+          <input type="password" id="acct-pass" autocomplete="current-password"
+                 placeholder="password">
+          <div class="acct-actions">
+            <button class="btn" id="acct-delete-cancel" type="button">CANCEL</button>
+            <button class="btn acct-danger-btn" id="acct-delete-go" type="button">
+              DELETE FOREVER
+            </button>
+          </div>
+        </div>
+      </div>
       <button class="btn btn-go" id="acct-close" type="button">CLOSE</button>
     </div>
   </div>
