@@ -145,10 +145,12 @@ let mouseWorld = { x: 0, y: 0 };
 let hasMouseAim = false;
 let mouseFire = false;  // LMB — offense (special gun, else basic shots)
 let mouseDef = false;   // RMB — defense (wall)
-// Mobile: left stick drives the hull (moveVec, components in [-1,1]),
+// Mobile: left stick drives the hull directionally (moveVec, components
+// in [-1,1] — the hull turns to face the stick and drives that way),
 // right stick aims the turret (touchAim = world angle, held after
 // release once engaged), and three buttons trigger the categories.
 let moveVec = { x: 0, y: 0 };
+let moveVecActive = false; // is the move stick currently deflected?
 let touchAim = 0;
 let touchAimActive = false;
 let touchFire = false, touchDef = false, touchAgi = false;
@@ -224,8 +226,8 @@ export function initGame() {
   const aimStick = document.getElementById("tp-aim");
   if (moveStick) {
     setupStick(moveStick,
-      (dx, dy) => { moveVec.x = dx; moveVec.y = dy; },
-      () => { moveVec.x = 0; moveVec.y = 0; });
+      (dx, dy) => { moveVec.x = dx; moveVec.y = dy; moveVecActive = Math.hypot(dx, dy) > 0.001; },
+      () => { moveVec.x = 0; moveVec.y = 0; moveVecActive = false; });
   }
   if (aimStick) {
     setupStick(aimStick,
@@ -286,6 +288,8 @@ export function startLocalGame(specs) {
       id: s.slot ?? s.color,
       slot: s.slot ?? s.color,
       color: s.color,
+      pattern: s.pattern ?? "solid",
+      patColors: s.patColors ?? [],
       bot: s.bot ?? null,
     })),
   });
@@ -516,6 +520,8 @@ function begin(opts) {
     gearPool: opts.gearPool ?? null,   // greenlit ability types
     gearMax: opts.gearMax ?? null,     // field cap (≤ GEAR_CAP_LIMIT)
     sizePool: opts.sizePool ?? null,   // allowed map size groups
+    zoneOn: !!opts.zone,               // custom lobby: closing zone?
+    zoneSec: opts.zonePeriod ?? 30,    // ...and how often it steps in
     teams: opts.teams ?? null, // { [playerId]: 0|1 } in team modes (2v2)
     winTarget: opts.winTarget ?? 5,
     onRankedEnd: opts.onRankedEnd ?? null,
@@ -560,7 +566,7 @@ function begin(opts) {
   mouseFire = false;
   mouseDef = false;
   hasMouseAim = false;
-  moveVec.x = 0; moveVec.y = 0;
+  moveVec.x = 0; moveVec.y = 0; moveVecActive = false;
   touchAim = 0; touchAimActive = false;
   touchFire = false; touchDef = false; touchAgi = false;
   window.addEventListener("keydown", onKeydown);
@@ -644,10 +650,10 @@ function startRound(seed) {
   // only if the host enabled it, and at the host's chosen period
   // (clamped 10–60 s). The warning blink can't outrun the period, so a
   // fast 10 s zone still gets a sensible heads-up.
-  const zoneOn = S.ranked || !!opts.zone;
+  const zoneOn = S.ranked || !!S.zoneOn;
   S.zonePeriod = S.ranked
     ? ZONE_PERIOD
-    : Math.max(ZONE_MIN_PERIOD, Math.min(ZONE_MAX_PERIOD, (opts.zonePeriod ?? 30) * 1000));
+    : Math.max(ZONE_MIN_PERIOD, Math.min(ZONE_MAX_PERIOD, (S.zoneSec ?? 30) * 1000));
   S.zoneWarn = Math.min(ZONE_WARN_MS, Math.max(2000, S.zonePeriod - 2000));
   S.zoneNextAt = zoneOn ? S.freezeUntil + S.zonePeriod : Infinity;
   S.zoneWarnUntil = 0;
@@ -782,7 +788,7 @@ function clearHeld() {
   held.clear();
   mouseFire = false;
   mouseDef = false;
-  moveVec.x = 0; moveVec.y = 0;
+  moveVec.x = 0; moveVec.y = 0; moveVecActive = false;
   touchAim = 0; touchAimActive = false;
   touchFire = false; touchDef = false; touchAgi = false;
 }
@@ -811,12 +817,16 @@ function readActions(tank, binds) {
 
   // Touch pad only ever drives the single local human tank.
   if (!tank.bot) {
-    // Left stick → hull (thresholded so a centred stick is neutral).
+    // Left stick → DIRECTIONAL drive: the hull turns to face the stick
+    // and moves that way (twin-stick style), rather than tank-style
+    // turn/forward. We hand the movement code the stick's world angle
+    // and how far it's pushed; it does the steering + throttle.
     const DZ = 0.28;
-    if (moveVec.y < -DZ) acts.up = true;
-    if (moveVec.y > DZ) acts.down = true;
-    if (moveVec.x < -DZ) acts.left = true;
-    if (moveVec.x > DZ) acts.right = true;
+    const mag = Math.hypot(moveVec.x, moveVec.y);
+    if (moveVecActive && mag > DZ) {
+      acts.moveAngle = Math.atan2(moveVec.y, moveVec.x);
+      acts.moveMag = Math.min(1, (mag - DZ) / (1 - DZ)); // 0..1 past deadzone
+    }
     // Three activation controls, one per loadout category:
     //   LMB / offense button  → offense (special gun, else basic shot)
     //   RMB / defense button  → defense (wall)
@@ -1035,10 +1045,40 @@ function stepTanks(now, dt) {
       // Rotation uses the real rectangular hitbox: if the swing would
       // clip a wall, the turn is blocked until the tank backs off.
       const phasing = now < (t.phaseUntil ?? 0);
-      const turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
-      if (turn !== 0) {
-        const na = t.a + turn * TURN_SPEED * mul.turn * dt;
+
+      // Directional (mobile stick) drive takes precedence: steer the
+      // hull toward the stick's world angle by the shortest arc, capped
+      // at the normal turn rate, and set forward throttle from how far
+      // the stick is pushed. Reversing a full 180° would be slow, so if
+      // the target is behind the tank we drive in reverse instead of
+      // spinning all the way around.
+      let turn = 0;              // for tread animation / engine below
+      let dirThrottle = null;    // 0..1 forward throttle when steering
+      let dirReverse = false;
+      if (acts.moveAngle != null) {
+        let diff = angleDiff(t.a, acts.moveAngle); // signed shortest arc
+        // If the stick points behind us, it's quicker to reverse: aim
+        // the REAR at the target and mark reverse.
+        if (Math.abs(diff) > Math.PI / 2) {
+          diff = angleDiff(t.a, acts.moveAngle + Math.PI);
+          dirReverse = true;
+        }
+        const maxStep = TURN_SPEED * mul.turn * dt;
+        const step = Math.max(-maxStep, Math.min(maxStep, diff));
+        const na = t.a + step;
         if (phasing || !tankHitsAnyWall(t, t.x, t.y, na)) t.a = na;
+        turn = Math.sign(step) * (Math.abs(step) > 1e-4 ? 1 : 0);
+        // Throttle scales with deflection, and eases off while the hull
+        // is still swinging onto heading so it doesn't veer wide.
+        const align = Math.max(0, 1 - Math.abs(diff) / Math.PI);
+        dirThrottle = (acts.moveMag ?? 1) * (0.35 + 0.65 * align);
+      } else {
+        // Keyboard tank-style turn.
+        turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
+        if (turn !== 0) {
+          const na = t.a + turn * TURN_SPEED * mul.turn * dt;
+          if (phasing || !tankHitsAnyWall(t, t.x, t.y, na)) t.a = na;
+        }
       }
 
       let v = 0;
@@ -1048,8 +1088,15 @@ function stepTanks(now, dt) {
       const inMud = S.mudPits.some((m) =>
         now - m.born < MUD.lifeMs && (t.x - m.x) ** 2 + (t.y - m.y) ** 2 < m.r * m.r);
       const mudMul = inMud ? MUD.slow : 1;
-      if (acts.up) v += MOVE_SPEED * mul.speed * boostMul * mudMul;
-      if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul;
+      if (dirThrottle != null) {
+        // Directional stick throttle (forward, or reverse if the target
+        // was behind us).
+        if (dirReverse) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul * dirThrottle;
+        else v += MOVE_SPEED * mul.speed * boostMul * mudMul * dirThrottle;
+      } else {
+        if (acts.up) v += MOVE_SPEED * mul.speed * boostMul * mudMul;
+        if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul;
+      }
 
       // The engine is "running" whenever the tank drives OR turns in
       // place — a stationary spin still spins the treads.
@@ -3620,41 +3667,76 @@ function drawWall(w, now) {
 // a raked gradient for the shop's metals. Called per tank per frame,
 // so the flat path stays a plain string and only the metals build a
 // gradient object.
+//
+// Each premium finish is a distinct MATERIAL and has to read as one at
+// tank size, so the gradients are high-contrast with hard specular
+// edges — a gentle ramp on a ~50px hull just looks like uneven paint.
+// The sweep drifts with time so the surface catches the light as the
+// tank moves and turns.
 function hullPaint(color, R, now) {
   const hex = HULL[color] ?? HULL.red;
   const finish = skinFinish(color);
   if (finish === "flat") return hex;
-  // A slow drift so the sheen lives rather than sitting frozen.
-  const t = (now / 2600) % 1;
-  const sweep = -R + t * R * 0.5;
-  const g = ctx.createLinearGradient(sweep - R, -R, sweep + R, R);
+
+  const drift = ((now / 2600) % 1) * 2 - 1;   // -1 → 1, a touch faster
+  const off = drift * R * 1.1;
+  const g = ctx.createLinearGradient(-R + off, -R * 1.2, R + off, R * 1.2);
+  // Clean ramps: `lit` heads toward WHITE, `dim` toward near-black, so
+  // highlights read as real light rather than washed-out paint.
+  const lit = (f) => mix(hex, "#ffffff", f);
+  const dim = (f) => mix(hex, "#0b0d12", f);
+
   if (finish === "metallic") {
-    g.addColorStop(0, shade(hex, 0.45));
-    g.addColorStop(0.34, hex);
-    g.addColorStop(0.5, shade(hex, -0.62));
-    g.addColorStop(0.66, hex);
-    g.addColorStop(1, shade(hex, 0.45));
+    // Brushed metal (copper / platinum): tight alternating light-dark
+    // bands with a couple of bright brushed streaks — anisotropic, no
+    // single mirror.
+    g.addColorStop(0.00, dim(0.55));
+    g.addColorStop(0.12, lit(0.55));
+    g.addColorStop(0.20, dim(0.42));
+    g.addColorStop(0.34, lit(0.85));   // bright brushed streak
+    g.addColorStop(0.42, hex);
+    g.addColorStop(0.55, dim(0.55));
+    g.addColorStop(0.66, lit(0.70));   // second streak
+    g.addColorStop(0.78, dim(0.36));
+    g.addColorStop(0.90, lit(0.50));
+    g.addColorStop(1.00, dim(0.58));
   } else if (finish === "reflective") {
-    g.addColorStop(0, shade(hex, 0.55));
-    g.addColorStop(0.3, hex);
-    g.addColorStop(0.46, "#ffffff");
-    g.addColorStop(0.6, hex);
-    g.addColorStop(0.78, shade(hex, 0.5));
-    g.addColorStop(1, hex);
+    // Chrome / mirror (silver): a dark "ground" and a bright "sky"
+    // meeting at a razor horizon, with a blown-out mirror line on it.
+    g.addColorStop(0.00, dim(0.70));
+    g.addColorStop(0.38, dim(0.52));
+    g.addColorStop(0.44, lit(0.65));   // hard horizon
+    g.addColorStop(0.48, "#ffffff");   // the mirror line
+    g.addColorStop(0.52, "#ffffff");
+    g.addColorStop(0.56, lit(0.55));
+    g.addColorStop(0.60, dim(0.42));   // hard edge back down
+    g.addColorStop(0.82, dim(0.30));
+    g.addColorStop(1.00, dim(0.66));
   } else if (finish === "shiny") {
-    g.addColorStop(0, shade(hex, 0.4));
-    g.addColorStop(0.38, hex);
-    g.addColorStop(0.52, "#fffbe6");
-    g.addColorStop(0.68, hex);
-    g.addColorStop(1, shade(hex, 0.42));
-  } else { // prismatic — diamond
-    g.addColorStop(0, hex);
-    g.addColorStop(0.18, "#ffd9f2");
-    g.addColorStop(0.34, "#d9fff0");
-    g.addColorStop(0.5, "#ffffff");
-    g.addColorStop(0.66, "#d9ecff");
-    g.addColorStop(0.84, hex);
-    g.addColorStop(1, "#ffe9fb");
+    // High gloss (gold): saturated body with one big blown specular
+    // bloom — the classic "polished" look.
+    g.addColorStop(0.00, dim(0.50));
+    g.addColorStop(0.24, hex);
+    g.addColorStop(0.42, lit(0.85));
+    g.addColorStop(0.49, "#ffffff");   // hot spot
+    g.addColorStop(0.53, "#fffef7");
+    g.addColorStop(0.60, lit(0.75));
+    g.addColorStop(0.78, hex);
+    g.addColorStop(1.00, dim(0.52));
+  } else { // shinyReflective — diamond: faceted, multiple prismatic glints
+    g.addColorStop(0.00, dim(0.55));
+    g.addColorStop(0.14, lit(0.55));
+    g.addColorStop(0.22, dim(0.50));   // facet edge
+    g.addColorStop(0.26, "#ffffff");   // glint 1
+    g.addColorStop(0.30, lit(0.30));
+    g.addColorStop(0.42, hex);
+    g.addColorStop(0.50, "#eaf7ff");   // cool glint 2
+    g.addColorStop(0.56, lit(0.45));
+    g.addColorStop(0.64, dim(0.48));   // facet edge
+    g.addColorStop(0.68, "#ffffff");   // glint 3
+    g.addColorStop(0.74, lit(0.35));
+    g.addColorStop(0.88, dim(0.42));
+    g.addColorStop(1.00, lit(0.25));
   }
   return g;
 }
@@ -3713,8 +3795,25 @@ function drawTank(t, now) {
   // highlight for metallic, a hard mirror band for reflective, a bright
   // bloom for shiny, a spectral sweep for diamond. The finish scrolls
   // very slowly with time so it catches the light as the tank turns.
-  ctx.fillStyle = hullPaint(t.color, R, now);
+  //
+  // A two-tone PATTERN (Splotchy, Camo, Lightning…) paints its second
+  // colour over this base, clipped to the hull. When a pattern is worn
+  // the base is drawn in the FIRST chosen colour and the pattern shapes
+  // in the SECOND; with no pattern it's just the equipped paint.
+  const pat = t.pattern && t.pattern !== "solid" ? t.pattern : null;
+  const pc = Array.isArray(t.patColors) ? t.patColors : [];
+  const baseColor = pat && pc[0] ? pc[0] : t.color;
+  ctx.fillStyle = hullPaint(baseColor, R, now);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+  if (pat && pc[0] && pc[1]) {
+    ctx.save();
+    // Clip to the hull rectangle so the pattern never spills onto treads.
+    ctx.beginPath();
+    rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+    ctx.clip();
+    drawPattern(pat, pc[1], R, now, t.id);
+    ctx.restore();
+  }
 
   // ---- Directional detail: the FRONT and REAR read differently ----
   // Front (+x): a lighter sloped glacis plate ending in a nose chevron.
@@ -3765,7 +3864,10 @@ function drawTank(t, now) {
   const turret = t.turret ?? t.a;
   ctx.save();
   ctx.rotate(turret - t.a);
-  drawBarrel(ctx, wtype, R, shade(hull, 0.35), shade(hull, 0.6));
+  // The barrel matches the turret: with a pattern equipped it takes the
+  // pattern's primary colour so the whole turret assembly reads as one.
+  const barrelBase = pat && pc[0] ? (HULL[pc[0]] ?? hull) : hull;
+  drawBarrel(ctx, wtype, R, shade(barrelBase, 0.35), shade(barrelBase, 0.6));
 
   // Machine gun wind-up: the muzzle glows while it spins up.
   if (t.weapon === "mg" && t.mgReadyAt && now < t.mgReadyAt) {
@@ -3780,10 +3882,32 @@ function drawTank(t, now) {
   }
   ctx.restore();
 
-  ctx.fillStyle = shade(hull, 0.42);
-  ctx.beginPath();
-  ctx.arc(0, 0, R * 0.5, 0, Math.PI * 2);
-  ctx.fill();
+  // Turret cap. With no pattern it's the usual darkened hull dome. With
+  // a two-colour PATTERN equipped, the pattern carries across the turret
+  // too: base in colour 1, the pattern shapes in colour 2, clipped to
+  // the cap circle so the whole tank — hull and turret — reads as one
+  // painted piece.
+  const capR = R * 0.5;
+  if (pat && pc[0] && pc[1]) {
+    const capBase = HULL[pc[0]] ?? hull;
+    ctx.fillStyle = shade(capBase, 0.18); // a touch darker than the hull
+    ctx.beginPath();
+    ctx.arc(0, 0, capR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, capR, 0, Math.PI * 2);
+    ctx.clip();
+    // Reuse the same pattern painter; scaled to the cap so shapes sit
+    // sensibly on the smaller circle.
+    drawPattern(pat, pc[1], capR * 1.6, now, t.id + "cap");
+    ctx.restore();
+  } else {
+    ctx.fillStyle = shade(hull, 0.42);
+    ctx.beginPath();
+    ctx.arc(0, 0, capR, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   // Bots get a small "chip" dot so you can tell them apart.
   if (t.bot) {
@@ -3914,6 +4038,107 @@ function rr(x, y, w, h, r) {
   ctx.fill();
 }
 
+// Build a rounded-rect PATH without filling (for clipping).
+function rrPath(x, y, w, h, r) {
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+  else ctx.rect(x, y, w, h);
+}
+
+// A tiny deterministic RNG so a given tank's random-ish pattern (camo
+// blobs, lightning forks) stays identical every frame instead of
+// shimmering. Seeded from the tank id.
+function patRng(seed) {
+  let a = 0;
+  for (let i = 0; i < String(seed).length; i++) a = (a * 31 + String(seed).charCodeAt(i)) | 0;
+  a = (a ^ 0x9e3779b9) >>> 0;
+  return () => {
+    a ^= a << 13; a >>>= 0;
+    a ^= a >> 17;
+    a ^= a << 5; a >>>= 0;
+    return a / 4294967296;
+  };
+}
+
+// Paint a pattern's SECOND colour over the (already clipped) hull. The
+// caller has clipped to the hull, so these can draw freely. `col` is
+// the second colour id (rendered with its finish, so a metal second
+// colour still shines). `now` lets the lightning flicker.
+function drawPattern(id, col, R, now, seedId) {
+  const paint = hullPaint(col, R, now);
+  ctx.fillStyle = paint;
+  ctx.strokeStyle = paint;
+  const W = R * 1.8, H = R * 1.16;
+  const L = -R * 0.9, T = -R * 0.58;
+
+  if (id === "twoTone") {
+    // Clean split: the rear half of the hull in the second colour.
+    ctx.fillRect(L, T, W * 0.5, H);
+
+  } else if (id === "splotchy") {
+    // A scatter of soft round blobs.
+    const rng = patRng(seedId + "splotch");
+    for (let i = 0; i < 7; i++) {
+      const bx = L + rng() * W;
+      const by = T + rng() * H;
+      const br = R * (0.16 + rng() * 0.22);
+      ctx.beginPath();
+      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+  } else if (id === "camo") {
+    // Classic camo: a few large organic patches (overlapping blobs).
+    const rng = patRng(seedId + "camo");
+    for (let i = 0; i < 5; i++) {
+      const cx = L + rng() * W, cy = T + rng() * H;
+      ctx.beginPath();
+      const lobes = 5 + Math.floor(rng() * 3);
+      for (let k = 0; k <= lobes; k++) {
+        const ang = (k / lobes) * Math.PI * 2;
+        const rad = R * (0.2 + rng() * 0.22);
+        const px = cx + Math.cos(ang) * rad;
+        const py = cy + Math.sin(ang) * rad * 0.8;
+        if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
+  } else if (id === "modernCamo") {
+    // Digital/pixel camo: a grid of randomly-filled cells.
+    const rng = patRng(seedId + "modern");
+    const cols = 7, rows = 5;
+    const cw = W / cols, ch = H / rows;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (rng() < 0.4) ctx.fillRect(L + c * cw, T + r * ch, cw + 0.5, ch + 0.5);
+      }
+    }
+
+  } else if (id === "lightning") {
+    // Jagged bolts across the hull, flickering slightly over time.
+    const rng = patRng(seedId + "bolt");
+    const flicker = 0.6 + 0.4 * Math.sin(now / 90 + (seedId ? seedId.length : 0));
+    ctx.globalAlpha = flicker;
+    ctx.lineWidth = Math.max(1.5, R * 0.09);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    for (let b = 0; b < 2; b++) {
+      let x = L, y = T + H * (0.3 + b * 0.4);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      const steps = 6;
+      for (let s = 1; s <= steps; s++) {
+        x = L + (W * s) / steps;
+        y = T + H * (0.2 + 0.6 * rng());
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
 /* ================================================================
    Small helpers
    ================================================================ */
@@ -3940,4 +4165,17 @@ function shade(hex, f) {
   const g = mix((n >> 8) & 255, 19);
   const b = mix(n & 255, 26);
   return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Blend hexA toward hexB by fraction f (0 = A, 1 = B). Used by the
+// metal finishes so highlights ramp cleanly to white and shadows to a
+// true near-black, instead of the muddy extrapolation `shade` gives.
+function mix(hexA, hexB, f) {
+  const a = parseInt(hexA.slice(1), 16);
+  const b = parseInt(hexB.slice(1), 16);
+  const t = Math.max(0, Math.min(1, f));
+  const r = Math.round(((a >> 16) & 255) + (((b >> 16) & 255) - ((a >> 16) & 255)) * t);
+  const g = Math.round(((a >> 8) & 255) + (((b >> 8) & 255) - ((a >> 8) & 255)) * t);
+  const c = Math.round((a & 255) + ((b & 255) - (a & 255)) * t);
+  return `rgb(${r}, ${g}, ${c})`;
 }

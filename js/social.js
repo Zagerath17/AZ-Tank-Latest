@@ -20,7 +20,7 @@
 // ================================================================
 
 import { toast, tankSVG, showScreen, onEnter, onLeave, paintVar } from "./main.js";
-import { SKINS, DEFAULT_SKIN } from "./skins.js";
+import { SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors } from "./skins.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
 
@@ -121,25 +121,34 @@ function openAccountPanel() {
   const paintDevElo = () => {
     const a = document.getElementById("dev-elo1");
     const b = document.getElementById("dev-elo2");
+    const tg = document.getElementById("dev-tags");
     if (a) a.textContent = devElo("1v1") ?? "—";
     if (b) b.textContent = devElo("2v2") ?? "—";
+    if (tg) tg.textContent = devTags();
   };
   if (devWrap) {
     devWrap.hidden = !isDev();
     if (isDev()) paintDevElo();
   }
   const onDevElo = async (e) => {
-    const btn = e.target.closest("[data-dev-elo]");
-    if (!btn || !isDev()) return;
+    const eloBtn = e.target.closest("[data-dev-elo]");
+    const tagBtn = e.target.closest("[data-dev-tags]");
+    if ((!eloBtn && !tagBtn) || !isDev()) return;
+    const btn = eloBtn ?? tagBtn;
     btn.disabled = true;
     try {
-      await devAdjustElo(btn.dataset.devElo, +btn.dataset.delta);
+      if (eloBtn) {
+        await devAdjustElo(eloBtn.dataset.devElo, +eloBtn.dataset.delta);
+        msg.textContent = "Elo updated.";
+      } else {
+        await devAdjustTags(+tagBtn.dataset.delta);
+        msg.textContent = "Tags updated.";
+      }
       paintDevElo();
       msg.style.color = "#4bd08a";
-      msg.textContent = "Elo updated.";
     } catch (err) {
       msg.style.color = "#ff6a4d";
-      msg.textContent = err?.message ?? "Couldn't change Elo.";
+      msg.textContent = err?.message ?? "Couldn't apply that change.";
     } finally {
       btn.disabled = false;
     }
@@ -328,6 +337,11 @@ async function adoptProfile(uid, wantName = null, email = null) {
     skin: SKINS[prof.color] && !SKINS[prof.color].reserved ? prof.color : DEFAULT_SKIN,
     tags: Math.max(0, prof.tags ?? 0),
     owned: { ...(prof.owned ?? {}), [DEFAULT_SKIN]: true },
+    // Patterns: which two-tone design is equipped, the two colours it
+    // uses, and everything owned. Solid (no pattern) is always owned.
+    pattern: PATTERNS[prof.pattern] ? prof.pattern : DEFAULT_PATTERN,
+    patColors: Array.isArray(prof.patColors) ? prof.patColors.slice(0, 2) : [],
+    ownedPatterns: { ...(prof.ownedPatterns ?? {}), [DEFAULT_PATTERN]: true },
     elo1: prof.elo1 ?? null,
     elo2v2: prof.elo2v2 ?? null,
   };
@@ -607,12 +621,55 @@ export function devElo(mode) {
   return account?.[field] ?? null;
 }
 
+// Nudge MY OWN tag balance by ±10. Dev-only, and it only ever writes
+// this account's own row. Devs earn/spend tags like anyone else now;
+// this is just a convenience to top up or drain the balance for testing.
+export async function devAdjustTags(delta) {
+  if (!account?.dev) throw new Error("Not a dev account.");
+  const f = await ensureFirebase();
+  const cur = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val();
+  const next = Math.max(0, Math.round((cur ?? 0) + delta));
+  await f.set(f.ref(f.db, `users/${account.key}/tags`), next);
+  account.tags = next;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  return next;
+}
+
+export function devTags() {
+  return account?.tags ?? 0;
+}
+
 /* ---------- the shop: tags, ownership, equipped paint ---------- */
 
 // The paint this device wears. Signed out, that's always the default —
 // paint is account property, earned and bought.
 export function getSkin() {
   return account?.skin ?? DEFAULT_SKIN;
+}
+
+// The equipped pattern id (or "solid") and the two colours it paints
+// with. Returned together so the renderer/roster can carry them.
+export function getPattern() {
+  return account?.pattern ?? DEFAULT_PATTERN;
+}
+export function getPatternColors() {
+  return Array.isArray(account?.patColors) ? account.patColors.slice(0, 2) : [];
+}
+// A compact bundle the roster hands to the renderer: everything needed
+// to paint this player's tank.
+export function getLook() {
+  return {
+    color: getSkin(),
+    pattern: getPattern(),
+    patColors: getPatternColors(),
+  };
+}
+export function ownsPattern(id) {
+  if (id === DEFAULT_PATTERN) return true;
+  return !!account?.ownedPatterns?.[id];
+}
+export function ownedPatterns() {
+  return { ...(account?.ownedPatterns ?? {}), [DEFAULT_PATTERN]: true };
 }
 
 // Is the signed-in account on the dev roster? False for everyone else,
@@ -622,7 +679,6 @@ export function isDev() {
 }
 
 export function getTags() {
-  if (account?.dev) return Infinity; // dev accounts never run out
   return account?.tags ?? 0;
 }
 
@@ -665,14 +721,6 @@ export async function buySkin(id) {
   if (ownsSkin(id)) throw new Error("You already own that.");
   const cost = skin.cost ?? 0;
   const f = await ensureFirebase();
-  // Dev accounts have infinite tags: grant the paint, charge nothing,
-  // and don't touch the balance.
-  if (account.dev) {
-    await f.set(f.ref(f.db, `users/${account.key}/owned/${id}`), true);
-    account.owned = { ...(account.owned ?? {}), [id]: true };
-    localStorage.setItem(LS_NAME, JSON.stringify(account));
-    return Infinity;
-  }
   if (account.tags < cost) throw new Error(`Not enough tags — you need ${cost - account.tags} more.`);
   // Re-read the balance before spending: tags are earned on other
   // devices too, and the cached number can be stale.
@@ -691,12 +739,62 @@ export async function buySkin(id) {
   return account.tags;
 }
 
+// Equip a pattern you own, choosing the colours it paints with. A
+// two-colour pattern needs two DIFFERENT owned colours; solid needs
+// none. Colours are validated against what you actually own.
+export async function equipPattern(id, colors = []) {
+  if (!account) throw new Error("Log in to change your pattern.");
+  const pat = PATTERNS[id];
+  if (!pat) throw new Error("That pattern doesn't exist.");
+  if (!ownsPattern(id)) throw new Error("You don't own that pattern yet.");
+  const need = patternColors(id);
+  let chosen = [];
+  if (need >= 2) {
+    chosen = (colors ?? []).slice(0, 2);
+    if (chosen.length < 2) throw new Error("Pick two colours for this pattern.");
+    if (chosen[0] === chosen[1]) throw new Error("Pick two DIFFERENT colours.");
+    for (const c of chosen) {
+      if (!ownsSkin(c)) throw new Error("You don't own one of those colours.");
+    }
+  }
+  account.pattern = id;
+  account.patColors = chosen;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  const f = await ensureFirebase();
+  await f.update(f.ref(f.db), {
+    [`users/${account.key}/pattern`]: id,
+    [`users/${account.key}/patColors`]: chosen,
+  });
+}
+
+// Buy a pattern. Rank gate + price checked here, not just in the UI.
+export async function buyPattern(id) {
+  if (!account) throw new Error("Log in to use the shop.");
+  const pat = PATTERNS[id];
+  if (!pat) throw new Error("That pattern doesn't exist.");
+  if (ownsPattern(id)) throw new Error("You already own that.");
+  const cost = pat.cost ?? 0;
+  const f = await ensureFirebase();
+  const live = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val() ?? 0;
+  if (live < cost) {
+    account.tags = Math.max(0, live);
+    throw new Error(`Not enough tags — you need ${cost - live} more.`);
+  }
+  await f.update(f.ref(f.db), {
+    [`users/${account.key}/tags`]: live - cost,
+    [`users/${account.key}/ownedPatterns/${id}`]: true,
+  });
+  account.tags = live - cost;
+  account.ownedPatterns = { ...(account.ownedPatterns ?? {}), [id]: true };
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  return account.tags;
+}
+
 // Award tags for ranked kills. Called once per ranked match, with the
 // number of enemy tanks this player destroyed.
 export async function awardTags(kills) {
   const n = Math.max(0, Math.floor(kills ?? 0));
   if (!account || !n) return account?.tags ?? 0;
-  if (account.dev) return Infinity; // already infinite; nothing to bank
   try {
     const f = await ensureFirebase();
     const live = (await f.get(f.ref(f.db, `users/${account.key}/tags`))).val() ?? 0;

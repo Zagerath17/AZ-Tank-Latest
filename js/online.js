@@ -212,6 +212,8 @@ export async function createRankedLobby(mode, expect, teams = null) {
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
         color: social.getSkin(), // the paint you bought and equipped
+        pattern: social.getPattern(),
+        patColors: social.getPatternColors(),
         e1: await myEloOrNull(f, "elo1"),
         e2: await myEloOrNull(f, "elo2v2"),
       } },
@@ -289,6 +291,8 @@ async function createLobby() {
         name: social.getAccount()?.name ?? null,
         ukey: social.getAccount()?.key ?? null,
         color: social.getSkin(), // the paint you bought and equipped
+        pattern: social.getPattern(),
+        patColors: social.getPatternColors(),
         e1: await myEloOrNull(f, "elo1"),
         e2: await myEloOrNull(f, "elo2v2"),
       } },
@@ -315,6 +319,8 @@ export async function joinLobby(code) {
       name: social.getAccount()?.name ?? null,
       ukey: social.getAccount()?.key ?? null,
       color: social.getSkin(), // the paint you bought and equipped
+      pattern: social.getPattern(),
+      patColors: social.getPatternColors(),
       e1: await myEloOrNull(f, "elo1"),
       e2: await myEloOrNull(f, "elo2v2"),
     });
@@ -773,7 +779,13 @@ function beginOnlineGame(code, lobby) {
   const resolved = resolveColors(entries);
   const roster = entries
     .slice(0, MAX_PLAYERS)
-    .map(([id, p]) => ({ id, color: resolved[id], bot: p.bot ?? null, name: p.name ?? null }));
+    .map(([id, p]) => ({
+      id, color: resolved[id], bot: p.bot ?? null, name: p.name ?? null,
+      // Patterns ride along so remote tanks show the same two-tone look.
+      // Bots always run solid.
+      pattern: p.bot ? "solid" : (p.pattern ?? "solid"),
+      patColors: p.bot ? [] : (Array.isArray(p.patColors) ? p.patColors : []),
+    }));
 
   if (!roster.some((p) => p.id === me && !p.bot)) {
     toast("The match started without you.");

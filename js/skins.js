@@ -58,25 +58,52 @@ export const SKINS = {
   pastelIndigo: { name: "Pastel Indigo", hex: "#b8b0e3", tier: "Platinum", cost: 40, finish: "flat", fam: "pastel" },
   pastelViolet: { name: "Pastel Violet", hex: "#d2b0e3", tier: "Platinum", cost: 40, finish: "flat", fam: "pastel" },
 
-  // ---- Light Pastel ROYGBIV — Diamond rank, 50 tags each ----
-  paleRed: { name: "Light Pastel Red", hex: "#ecd5d5", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
-  paleOrange: { name: "Light Pastel Orange", hex: "#ece0d5", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
-  paleYellow: { name: "Light Pastel Yellow", hex: "#ece8d5", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
-  paleGreen: { name: "Light Pastel Green", hex: "#d5ecd9", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
-  paleBlue: { name: "Light Pastel Blue", hex: "#d5e0ec", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
-  paleIndigo: { name: "Light Pastel Indigo", hex: "#d9d5ec", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
-  paleViolet: { name: "Light Pastel Violet", hex: "#e4d5ec", tier: "Diamond", cost: 50, finish: "flat", fam: "pale" },
+  // ---- Neon ROYGBIV — Diamond rank, 50 tags each ----
+  neonRed: { name: "Neon Red", hex: "#ff1745", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
+  neonOrange: { name: "Neon Orange", hex: "#ff7a00", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
+  neonYellow: { name: "Neon Yellow", hex: "#f5ff00", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
+  neonGreen: { name: "Neon Green", hex: "#39ff14", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
+  neonBlue: { name: "Neon Blue", hex: "#00d5ff", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
+  neonIndigo: { name: "Neon Indigo", hex: "#4400ff", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
+  neonViolet: { name: "Neon Violet", hex: "#d400ff", tier: "Diamond", cost: 50, finish: "flat", fam: "neon" },
 
   // ---- the metals: one showpiece finish per rank ----
   copper: { name: "Copper", hex: "#b87333", tier: "Copper", cost: 50, finish: "metallic", fam: "metal" },
-  silver: { name: "Silver", hex: "#c8ced8", tier: "Silver", cost: 100, finish: "reflective", fam: "metal" },
+  silver: { name: "Silver", hex: "#aab4c4", tier: "Silver", cost: 100, finish: "reflective", fam: "metal" },
   gold: { name: "Gold", hex: "#ffcf40", tier: "Gold", cost: 150, finish: "shiny", fam: "metal" },
-  platinum: { name: "Platinum", hex: "#dfe4e8", tier: "Platinum", cost: 200, finish: "metallic", fam: "metal" },
-  diamond: { name: "Diamond", hex: "#b9f2ff", tier: "Diamond", cost: 250, finish: "prismatic", fam: "metal" },
+  platinum: { name: "Platinum", hex: "#9fe6d4", tier: "Platinum", cost: 200, finish: "metallic", fam: "metal" },
+  diamond: { name: "Diamond", hex: "#a8ecff", tier: "Diamond", cost: 250, finish: "shinyReflective", fam: "metal" },
 
   // ---- reserved: the Impossible bot's paint, not for sale ----
   black: { name: "Black", hex: "#20242e", tier: null, cost: 0, finish: "flat", fam: "reserved", reserved: true },
 };
+
+// ---- PATTERNS ----------------------------------------------------
+// A pattern is a two-tone design painted over the tank using TWO
+// colours the player already owns. Like paint, each is gated behind a
+// rank and a price. The renderer (drawTank) knows how to draw each id;
+// this catalogue is just the economy + metadata.
+export const PATTERNS = {
+  solid: { name: "Solid", tier: null, cost: 0, colors: 1 },
+  splotchy: { name: "Splotchy", tier: "Silver", cost: 40, colors: 2 },
+  twoTone: { name: "Two Tone", tier: "Silver", cost: 40, colors: 2 },
+  camo: { name: "Camo", tier: "Gold", cost: 60, colors: 2 },
+  modernCamo: { name: "Modern Camo", tier: "Platinum", cost: 80, colors: 2 },
+  lightning: { name: "Lightning", tier: "Diamond", cost: 100, colors: 2 },
+};
+
+export const DEFAULT_PATTERN = "solid";
+
+// Everything the shop lists, in catalogue order.
+export const SHOP_PATTERNS = Object.keys(PATTERNS);
+
+export function patternName(id) {
+  return (PATTERNS[id] ?? PATTERNS[DEFAULT_PATTERN]).name;
+}
+export function patternColors(id) {
+  return (PATTERNS[id] ?? PATTERNS[DEFAULT_PATTERN]).colors ?? 1;
+}
+
 
 // Bots take a randomized PRIMARY colour — never a metal, never a
 // tinted variant, and (see freeBotSkin) never a colour a player wears.

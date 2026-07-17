@@ -11,7 +11,7 @@
 
 import { onEnter, onLeave, COLORS, SLOT_NAMES, tankSVG, paintVar } from "./main.js";
 import { freeBotSkin } from "./skins.js";
-import { getSkin } from "./social.js";
+import { getSkin, getPattern, getPatternColors } from "./social.js";
 import { startLocalGame } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
 
@@ -125,7 +125,14 @@ export function initLocal() {
   document.getElementById("local-start").addEventListener("click", () => {
     const specs = COLORS
       .filter((c) => active(c))
-      .map((c) => ({ slot: c, color: paint[c], bot: c === HUMAN ? null : bots[c] }));
+      .map((c) => ({
+        slot: c,
+        color: paint[c],
+        bot: c === HUMAN ? null : bots[c],
+        // Only the human carries a bought pattern; bots run solid.
+        pattern: c === HUMAN ? getPattern() : "solid",
+        patColors: c === HUMAN ? getPatternColors() : [],
+      }));
     sessionStorage.setItem("tank.localPlayers", JSON.stringify(specs));
     startLocalGame(specs);
   });
