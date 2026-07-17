@@ -953,11 +953,40 @@ body {
 
 .arena-wrap { position: relative; }
 /* With the controls overlaid on the arena, the bottom corners belong
-   to the sticks — lift the corner HUDs above them so nothing is
-   hidden behind a thumb. */
-.arena-wrap.has-touch .loadout-hud,
+   to the move stick (left) and the loadout indicators (right, which
+   double as the fire buttons on touch). Keep the health/armour readouts
+   clear of the move stick. */
 .arena-wrap.has-touch .health-hud { bottom: calc(var(--tp-size) + 14px); }
 .arena-wrap.has-touch .armour-hud { bottom: calc(var(--tp-size) + 40px); }
+/* On touch the loadout indicators ARE the fire controls: enlarge them
+   into proper thumb targets in the bottom-right corner, and turn on
+   pointer events so taps register. */
+.arena-wrap.has-touch .loadout-hud {
+  right: clamp(12px, 3vw, 28px);
+  bottom: clamp(16px, 4vh, 36px);
+  gap: clamp(10px, 2.4vw, 22px);
+  pointer-events: auto;
+}
+.arena-wrap.has-touch .loadout-slot {
+  pointer-events: auto;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 16px;
+  background: rgba(20, 24, 32, 0.5);
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  transition: transform .06s, background .06s, border-color .06s;
+}
+.arena-wrap.has-touch .loadout-slot.held {
+  transform: scale(0.92);
+  background: rgba(80, 120, 200, 0.4);
+  border-color: rgba(150, 190, 255, 0.7);
+}
+.arena-wrap.has-touch .loadout-icon {
+  width: clamp(54px, 12vw, 76px);
+  height: clamp(54px, 12vw, 76px);
+}
 /* Loadout readout, bottom-right of the arena: the enlarged icons of
    your three equipped items (offense · defense · agility), each with
    its activation control captioned beneath. */
@@ -1118,11 +1147,6 @@ body {
   align-items: center;
   gap: clamp(8px, 2vw, 16px);
 }
-.tp-right {
-  display: flex;
-  align-items: center;
-  gap: clamp(8px, 2vw, 16px);
-}
 /* Analog thumb sticks: a fixed base ring with a draggable knob. */
 .tp-stick {
   position: relative;
@@ -1161,44 +1185,6 @@ body {
   border: 1px solid var(--rivet);
   box-shadow: 0 3px 0 var(--shadow), inset 0 1px 0 rgba(255,255,255,.08);
   pointer-events: none;
-}
-#tp-aim { background: radial-gradient(circle at 50% 42%, #2f2a40, #201c2c); }
-#tp-aim .tp-knob { background: linear-gradient(#4a3a56, #342a40); }
-
-.tp-fires {
-  display: flex;
-  flex-direction: column;
-  gap: clamp(6px, 1.6vh, 12px);
-  align-items: center;
-  pointer-events: auto;
-}
-.tp-fire {
-  width: clamp(52px, 14vw, 66px);
-  height: clamp(52px, 14vw, 66px);
-  border-radius: 50%;
-  font-family: "Black Ops One", system-ui;
-  font-size: 1.35rem;
-  line-height: 1;
-  color: var(--chalk);
-  background: linear-gradient(#2a3140, #232936);
-  border: 1px solid var(--rivet);
-  box-shadow: 0 4px 0 var(--shadow), inset 0 1px 0 rgba(255,255,255,.07);
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-tap-highlight-color: transparent;
-  opacity: .6;
-  pointer-events: auto;
-}
-.tp-off { color: #ff6a4d; border-color: #7a3a34; background: linear-gradient(#3a2a2c, #2c2124); }
-.tp-def { color: #c79a6a; border-color: #6a4a2a; background: linear-gradient(#33291f, #262019); }
-.tp-agi { color: #ffe11f; border-color: #7a6a1a; background: linear-gradient(#332f1a, #262214); }
-.tp-fire.held {
-  transform: translateY(3px);
-  box-shadow: 0 1px 0 var(--shadow);
-  filter: brightness(1.35);
-  opacity: 1; /* a pressed button reads clearly */
 }
 
 /* ---------- motion safety ---------- */
@@ -1321,9 +1307,15 @@ body {
   display: flex; align-items: center; justify-content: center;
   background: rgba(6, 8, 12, 0.72);
   padding: 20px;
+  overflow-y: auto;            /* let the whole modal scroll on short screens */
+  -webkit-overflow-scrolling: touch;
 }
 .acct-card {
   width: min(94vw, 420px);
+  max-height: calc(100dvh - 40px); /* never taller than the viewport… */
+  overflow-y: auto;                /* …scroll inside if content is long   */
+  -webkit-overflow-scrolling: touch;
+  margin: auto;                    /* centre when short, scroll when tall  */
   background: #161a22;
   border: 1px solid var(--rivet);
   border-radius: 14px;
@@ -1331,6 +1323,26 @@ body {
   box-shadow: 0 18px 50px rgba(0,0,0,.55);
 }
 .acct-card h3 { margin: 0 0 14px; font-family: "Black Ops One", system-ui; letter-spacing: .04em; }
+/* Always-visible close X in the top-right of the account card, so
+   there's an obvious way out even before scrolling to the CLOSE
+   button (which matters on short mobile screens). */
+.acct-x {
+  position: sticky;
+  top: -20px;               /* cancel the card's top padding so it hugs the corner */
+  float: right;
+  margin: -8px -6px 0 0;
+  width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; line-height: 1;
+  color: var(--chalk);
+  background: rgba(40, 46, 58, 0.9);
+  border: 1px solid var(--rivet);
+  border-radius: 10px;
+  cursor: pointer;
+  z-index: 2;
+  -webkit-tap-highlight-color: transparent;
+}
+.acct-x:hover { background: rgba(60, 68, 84, 0.95); }
 .acct-label { display: block; font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; color: #808896; margin-bottom: 5px; }
 .acct-row { display: flex; gap: 8px; margin-bottom: 14px; }
 .acct-row input {
