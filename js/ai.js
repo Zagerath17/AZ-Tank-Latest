@@ -479,6 +479,11 @@ export function botActions(t, world, dt, now) {
     const wantW = laserAim != null
       ? laserAim // aim straight down the (possibly reflected) beam
       : Math.atan2(aimY - t.y, aimX - t.x) + ai.wobble;
+    // Remember where the AI wants to point so the RENDERER can aim the
+    // turret there independently of the hull — bots track the target
+    // with the barrel, not just by turning the whole body.
+    ai.aimW = wantW;
+    t.aiAim = wantW;
 
     // Combat movement (when not busy dodging): hold the standoff
     // band — advance when far, KITE backward when the enemy pushes
@@ -527,7 +532,10 @@ export function botActions(t, world, dt, now) {
         if (pushed) {
           // closing in — nothing else to do this frame
         } else if (dist > band * 1.15) {
-          if (Math.abs(errW) < 0.7) acts.up = true;
+          // Far from the target: CLOSE the gap. The turret aims
+          // independently now, so the hull is free to just drive at the
+          // enemy — advance as long as we're not pointed badly wrong.
+          if (Math.abs(errW) < 1.1) acts.up = true;
         } else if (dist < band * 0.75) {
           // Back off ONLY down a verified-open lane; with a wall at
           // our back, plant and fight.
@@ -568,7 +576,10 @@ export function botActions(t, world, dt, now) {
     // Fire when aligned and in effective range — but VERIFY the
     // ricochet path first, and respect the ammo count: never
     // dry-fire; on reserve rounds, only shots verified to land.
-    const aligned = Math.abs(angleDiff(t.a, wantW)) < P.aimTol;
+    // Alignment is checked on the TURRET (where the barrel actually
+    // points) since bots now aim the turret independently of the hull.
+    const aimNow = t.turret ?? t.a;
+    const aligned = Math.abs(angleDiff(aimNow, wantW)) < P.aimTol;
     // The sniper's own range caps where its round actually reaches;
     // otherwise use the tier's effective fire range.
     const fireRangeCells = t.weapon === "sniper" ? SNIPER.rangeCells
@@ -700,6 +711,19 @@ export function botActions(t, world, dt, now) {
       ai.gearKey = null;
     }
     navigate(t, ai, goal, world, P, rBody, now, acts);
+  }
+
+  // Anti-freeze safety net: if we have a target but somehow ended this
+  // frame with NO movement and NO turn — and we're not deliberately
+  // sitting in our firing band with a clean shot — make sure we at
+  // least steer toward the enemy. This closes the rare gap where a
+  // combat/hazard branch claimed the frame but issued no motion,
+  // which looked like the tank randomly freezing until approached.
+  if (!acts.up && !acts.down && !acts.left && !acts.right) {
+    const holdingBand = combatSteered && shotLos && dist <= (P.standoff * cell) * 1.15;
+    if (!holdingBand) {
+      steerTo(t, target.x, target.y, acts, world, rBody, false);
+    }
   }
 
   return finish(ai, acts);

@@ -1151,22 +1151,30 @@ function stepTanks(now, dt) {
       }
 
       // ---- Turret aim (barrel points independently of the hull) ----
-      // Human: slew the barrel toward the mouse, capped at 20% above
-      // the hull's turn speed (so it can out-track the body but isn't
-      // an instant-snap). Bots aim with the hull (their AI already
-      // turns the body onto the target), so the turret tracks it.
-      // Before the first mouse move — or on touch, where the aim comes
-      // from the right stick — fall back appropriately.
+      // Human on desktop: slew the barrel toward the mouse, capped at
+      // 20% above the hull's turn speed. Human on TOUCH: there's no aim
+      // stick, so the turret is LOCKED facing forward (same heading as
+      // the hull) — you aim by pointing the whole tank. Bots aim with
+      // the hull (their AI turns the body onto the target).
       if (t.bot) {
-        t.turret = t.a;
-      } else {
-        const aimTarget = hasMouseAim
-          ? Math.atan2(mouseWorld.y - t.y, mouseWorld.x - t.x)
-          : (touchAimActive ? touchAim : t.a);
+        // Bots aim the barrel at their target INDEPENDENTLY of the hull
+        // (the AI stores its desired aim in t.aiAim). The turret slews
+        // at the capped turret speed, so it tracks smoothly rather than
+        // snapping — and can hold on a target while the body maneuvers.
+        const aimTarget = (t.aiAim != null) ? t.aiAim : t.a;
         const cur = t.turret ?? t.a;
         const step = TURRET_TURN_SPEED * dt;
         const d = angleDiff(cur, aimTarget);
         t.turret = cur + Math.max(-step, Math.min(step, d));
+      } else if (hasMouseAim) {
+        const aimTarget = Math.atan2(mouseWorld.y - t.y, mouseWorld.x - t.x);
+        const cur = t.turret ?? t.a;
+        const step = TURRET_TURN_SPEED * dt;
+        const d = angleDiff(cur, aimTarget);
+        t.turret = cur + Math.max(-step, Math.min(step, d));
+      } else {
+        // Touch (or before the first mouse move): turret faces forward.
+        t.turret = t.a;
       }
 
       // Three activation controls, edge-triggered (press, not hold):
@@ -3678,7 +3686,10 @@ function hullPaint(color, R, now) {
   const finish = skinFinish(color);
   if (finish === "flat") return hex;
 
-  const drift = ((now / 2600) % 1) * 2 - 1;   // -1 → 1, a touch faster
+  // Drift the sweep with a SINE wave (not a sawtooth `% 1`, which
+  // snapped back at the wrap and made the finish stutter). Half the old
+  // speed for a slow, smooth shimmer.
+  const drift = Math.sin(now / 5200 * Math.PI * 2); // -1 → 1, smooth
   const off = drift * R * 1.1;
   const g = ctx.createLinearGradient(-R + off, -R * 1.2, R + off, R * 1.2);
   // Clean ramps: `lit` heads toward WHITE, `dim` toward near-black, so
@@ -3794,16 +3805,22 @@ function drawTank(t, now) {
   // A gradient raked across the hull sells the material: a swept
   // highlight for metallic, a hard mirror band for reflective, a bright
   // bloom for shiny, a spectral sweep for diamond. The finish scrolls
-  // very slowly with time so it catches the light as the tank turns.
+  // slowly with time so it catches the light as the tank turns.
   //
   // A two-tone PATTERN (Splotchy, Camo, Lightning…) paints its second
   // colour over this base, clipped to the hull. When a pattern is worn
   // the base is drawn in the FIRST chosen colour and the pattern shapes
   // in the SECOND; with no pattern it's just the equipped paint.
+  //
+  // IMPORTANT: every piece of hull detail below (glacis, rear deck,
+  // grille) derives from `bodyColor` — the effective base — NOT the raw
+  // equipped skin. Otherwise a metal skin worn UNDER a pattern would
+  // show through on the nose and tail.
   const pat = t.pattern && t.pattern !== "solid" ? t.pattern : null;
   const pc = Array.isArray(t.patColors) ? t.patColors : [];
-  const baseColor = pat && pc[0] ? pc[0] : t.color;
-  ctx.fillStyle = hullPaint(baseColor, R, now);
+  const bodyColor = pat && pc[0] ? pc[0] : t.color;   // colour id
+  const bodyHex = HULL[bodyColor] ?? hull;            // its hex, for shade()
+  ctx.fillStyle = hullPaint(bodyColor, R, now);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
   if (pat && pc[0] && pc[1]) {
     ctx.save();
@@ -3816,33 +3833,31 @@ function drawTank(t, now) {
   }
 
   // ---- Directional detail: the FRONT and REAR read differently ----
-  // Front (+x): a lighter sloped glacis plate ending in a nose chevron.
-  ctx.fillStyle = shade(hull, -0.18); // lighter
-  ctx.beginPath();
-  ctx.moveTo(R * 0.32, -R * 0.5);
-  ctx.lineTo(R * 0.86, -R * 0.28);
-  ctx.lineTo(R * 0.86, R * 0.28);
-  ctx.lineTo(R * 0.32, R * 0.5);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = shade(hull, 0.45);
-  ctx.lineWidth = Math.max(1.5, R * 0.07);
-  ctx.beginPath(); // nose chevron
+  // The nose is NOT a separate lighter plate any more (that covered the
+  // paint/pattern and looked pasted-on). Instead we just etch a subtle
+  // chevron OUTLINE on the front so you can read facing, letting the
+  // hull's own colour/pattern carry all the way to the tip.
+  ctx.strokeStyle = shade(bodyHex, 0.42);
+  ctx.lineWidth = Math.max(1.5, R * 0.06);
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath(); // nose chevron (etched line only)
   ctx.moveTo(R * 0.52, -R * 0.3);
-  ctx.lineTo(R * 0.78, 0);
+  ctx.lineTo(R * 0.82, 0);
   ctx.lineTo(R * 0.52, R * 0.3);
   ctx.stroke();
-  // Rear (−x): darker engine deck with grille slats + twin exhausts.
-  ctx.fillStyle = shade(hull, 0.35); // darker
-  rr(-R * 0.9, -R * 0.46, R * 0.42, R * 0.92, R * 0.1);
-  ctx.strokeStyle = shade(hull, 0.6);
+  ctx.globalAlpha = 1;
+  // Rear (−x): a light grille etch (no filled plate, so the paint shows
+  // through) plus exhaust stubs poking past the tail.
+  ctx.strokeStyle = shade(bodyHex, 0.55);
   ctx.lineWidth = Math.max(1, R * 0.05);
+  ctx.globalAlpha = 0.55;
   ctx.beginPath();
   for (let i = -2; i <= 2; i++) {
     ctx.moveTo(-R * 0.84, i * R * 0.16);
-    ctx.lineTo(-R * 0.54, i * R * 0.16);
+    ctx.lineTo(-R * 0.58, i * R * 0.16);
   }
   ctx.stroke();
+  ctx.globalAlpha = 1;
   ctx.fillStyle = "#3a3f4c"; // exhaust stubs poking past the tail
   rr(-R * 1.0, -R * 0.36, R * 0.14, R * 0.16, R * 0.05);
   rr(-R * 1.0, R * 0.2, R * 0.14, R * 0.16, R * 0.05);
@@ -3857,57 +3872,65 @@ function drawTank(t, now) {
     ctx.restore();
   }
 
-  // Barrel sprite = barrel hitbox, drawn in the TURRET's frame so it
-  // aims independently of the hull. We're already rotated by the hull
-  // angle, so rotate the extra delta onto the turret heading.
+  // ---- The ENTIRE turret assembly (barrel + cap) ----
+  // Drawn inside ONE turret-rotation frame so the whole thing — cap and
+  // barrel — turns with the turret. Both carry the tank's paint: the
+  // skin's finish (metal shine and all) and, if worn, the two-tone
+  // pattern. So a gold tank has a gold barrel; a camo tank's barrel and
+  // cap are camo too, and they rotate together.
   const wtype = t.weapon ?? "normal";
   const turret = t.turret ?? t.a;
+  const bl = BARRELS[wtype] ?? BARRELS.normal;
   ctx.save();
   ctx.rotate(turret - t.a);
-  // The barrel matches the turret: with a pattern equipped it takes the
-  // pattern's primary colour so the whole turret assembly reads as one.
-  const barrelBase = pat && pc[0] ? (HULL[pc[0]] ?? hull) : hull;
-  drawBarrel(ctx, wtype, R, shade(barrelBase, 0.35), shade(barrelBase, 0.6));
+
+  // Barrel: draw its base shape, then paint the skin/pattern over just
+  // the barrel's footprint (clipped) so a metal barrel shines and a
+  // pattern shows, matching the hull.
+  drawBarrel(ctx, wtype, R, shade(bodyHex, 0.2), shade(bodyHex, 0.5));
+  {
+    const bL = bl.len * R, bW = bl.hw * R;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, -bW, bL, bW * 2);
+    ctx.clip();
+    ctx.globalAlpha = 0.9; // let a little of the barrel's shading show through
+    ctx.fillStyle = hullPaint(bodyColor, R, now);
+    ctx.fillRect(0, -bW, bL, bW * 2);
+    if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id);
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
 
   // Machine gun wind-up: the muzzle glows while it spins up.
   if (t.weapon === "mg" && t.mgReadyAt && now < t.mgReadyAt) {
-    const bl = BARRELS.mg;
+    const bml = BARRELS.mg;
     const f = 1 - (t.mgReadyAt - now) / MG.windupMs;
     ctx.fillStyle = "#e8452e";
     ctx.globalAlpha = 0.35 + 0.6 * Math.abs(Math.sin(f * 14));
     ctx.beginPath();
-    ctx.arc(bl.len * R, 0, R * 0.16, 0, Math.PI * 2);
+    ctx.arc(bml.len * R, 0, R * 0.16, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   }
-  ctx.restore();
 
-  // Turret cap. With no pattern it's the usual darkened hull dome. With
-  // a two-colour PATTERN equipped, the pattern carries across the turret
-  // too: base in colour 1, the pattern shapes in colour 2, clipped to
-  // the cap circle so the whole tank — hull and turret — reads as one
-  // painted piece.
+  // Turret cap — same rotated frame, so its paint/pattern turns with
+  // the turret. Base painted with the skin (finish and all), then the
+  // pattern's second colour clipped to the cap circle.
   const capR = R * 0.5;
-  if (pat && pc[0] && pc[1]) {
-    const capBase = HULL[pc[0]] ?? hull;
-    ctx.fillStyle = shade(capBase, 0.18); // a touch darker than the hull
-    ctx.beginPath();
-    ctx.arc(0, 0, capR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, 0, capR, 0, Math.PI * 2);
-    ctx.clip();
-    // Reuse the same pattern painter; scaled to the cap so shapes sit
-    // sensibly on the smaller circle.
-    drawPattern(pat, pc[1], capR * 1.6, now, t.id + "cap");
-    ctx.restore();
-  } else {
-    ctx.fillStyle = shade(hull, 0.42);
-    ctx.beginPath();
-    ctx.arc(0, 0, capR, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  ctx.beginPath();
+  ctx.arc(0, 0, capR, 0, Math.PI * 2);
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = hullPaint(bodyColor, R, now);
+  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
+  if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id);
+  ctx.restore();
+  // A thin rim so the turret still reads as a distinct part sitting on
+  // the hull.
+  ctx.strokeStyle = shade(bodyHex, 0.5);
+  ctx.lineWidth = Math.max(1, R * 0.04);
+  ctx.stroke();
 
   // Bots get a small "chip" dot so you can tell them apart.
   if (t.bot) {
@@ -3916,8 +3939,8 @@ function drawTank(t, now) {
     ctx.arc(0, 0, R * 0.16, 0, Math.PI * 2);
     ctx.fill();
   }
-
-  ctx.restore();
+  ctx.restore(); // turret rotation frame
+  ctx.restore(); // tank translate/rotate frame
 }
 
 function drawWreck(t) {
@@ -4116,25 +4139,50 @@ function drawPattern(id, col, R, now, seedId) {
     }
 
   } else if (id === "lightning") {
-    // Jagged bolts across the hull, flickering slightly over time.
-    const rng = patRng(seedId + "bolt");
-    const flicker = 0.6 + 0.4 * Math.sin(now / 90 + (seedId ? seedId.length : 0));
-    ctx.globalAlpha = flicker;
-    ctx.lineWidth = Math.max(1.5, R * 0.09);
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    for (let b = 0; b < 2; b++) {
-      let x = L, y = T + H * (0.3 + b * 0.4);
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      const steps = 6;
-      for (let s = 1; s <= steps; s++) {
-        x = L + (W * s) / steps;
-        y = T + H * (0.2 + 0.6 * rng());
-        ctx.lineTo(x, y);
-      }
-      ctx.stroke();
+    // A proper lightning bolt: one bold jagged spine running across the
+    // hull with a couple of forked branches, drawn with a soft outer
+    // glow under a bright core. The jag is DETERMINISTIC (seeded once)
+    // so it doesn't stutter; a gentle sine only breathes the glow.
+    const rng = patRng(seedId + "bolt2");
+    // Build the main bolt path as a list of points, left → right.
+    const pts = [];
+    const segs = 7;
+    let y = T + H * (0.35 + 0.3 * rng());
+    for (let s = 0; s <= segs; s++) {
+      const x = L + (W * s) / segs;
+      pts.push([x, y]);
+      // step the zig with a bounded random walk, kept inside the hull
+      y += (rng() - 0.5) * H * 0.7;
+      y = Math.max(T + H * 0.12, Math.min(T + H * 0.88, y));
     }
+    // Forks: short branches peeling off a couple of interior nodes.
+    const forks = [];
+    for (let s = 2; s < segs - 1; s++) {
+      if (rng() < 0.5) {
+        const [bx, by] = pts[s];
+        const fx = bx + W * (0.10 + rng() * 0.12);
+        const fy = by + (rng() < 0.5 ? -1 : 1) * H * (0.18 + rng() * 0.16);
+        forks.push([[bx, by], [fx, Math.max(T + H * 0.06, Math.min(T + H * 0.94, fy))]]);
+      }
+    }
+    const drawBolt = (w, alpha) => {
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = w;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      for (const [a, b] of forks) { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+      ctx.stroke();
+    };
+    const breathe = 0.75 + 0.25 * Math.sin(now / 380); // slow, smooth
+    // Outer glow (soft, wide, the second colour), then a bright white core.
+    ctx.strokeStyle = paint;
+    drawBolt(Math.max(4, R * 0.34), 0.30 * breathe);
+    drawBolt(Math.max(2.5, R * 0.18), 0.65 * breathe);
+    ctx.strokeStyle = "#ffffff";
+    drawBolt(Math.max(1.2, R * 0.07), 0.9 * breathe);
     ctx.globalAlpha = 1;
   }
 }

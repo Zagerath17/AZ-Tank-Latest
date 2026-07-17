@@ -419,6 +419,24 @@ async function leaveLobby() {
   try {
     const f = await ensureFirebase();
     try { await c.disc.cancel(); } catch { /* fine */ }
+    // If I'm the host and other humans remain, hand the crown to the
+    // earliest-joined human BEFORE I drop out. Doing it here (rather
+    // than only relying on a survivor noticing the empty host seat)
+    // makes reassignment reliable even if snapshots race.
+    try {
+      const myKey = myId();
+      const liveHost = (await f.get(f.ref(f.db, `lobbies/${c.code}/hostId`))).val();
+      if (liveHost === myKey) {
+        const before = await f.get(f.ref(f.db, `lobbies/${c.code}/players`));
+        const bp = before.val() ?? {};
+        const others = Object.entries(bp)
+          .filter(([id, p]) => id !== myKey && !p.bot)
+          .sort((a, b) => (a[1].joinedAt ?? 0) - (b[1].joinedAt ?? 0) || a[0].localeCompare(b[0]));
+        if (others.length) {
+          await f.set(f.ref(f.db, `lobbies/${c.code}/hostId`), others[0][0]);
+        }
+      }
+    } catch { /* best-effort handoff */ }
     await f.remove(c.playerRef);
     const rest = await f.get(f.ref(f.db, `lobbies/${c.code}/players`));
     const players = rest.val();
