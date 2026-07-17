@@ -34,7 +34,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.7.8</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -45,6 +45,32 @@
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
       </header>
       <div class="slots" id="local-slots"></div>
+      <div class="panel host-settings" id="local-settings">
+        <button class="btn settings-head" id="loc-settings-toggle" type="button">
+          MATCH SETTINGS <span id="loc-settings-caret">▾</span>
+        </button>
+        <div id="loc-settings-body" hidden>
+          <p class="set-label">Map sizes</p>
+          <div class="set-chips" id="loc-set-sizes"></div>
+          <p class="set-label">Abilities in rotation</p>
+          <div class="set-chips" id="loc-set-gear"></div>
+          <div class="set-row">
+            <button class="btn btn-small" id="loc-set-gear-all" type="button">ALL</button>
+            <button class="btn btn-small" id="loc-set-gear-none" type="button">NONE</button>
+          </div>
+          <p class="set-label">Max abilities on the field: <b id="loc-set-max-val">24</b></p>
+          <input type="range" id="loc-set-max" min="1" max="30" value="24" step="1">
+          <p class="hint" id="loc-set-note"></p>
+          <p class="set-label">Closing zone</p>
+          <div class="set-row">
+            <button class="btn btn-small set-chip" id="loc-set-zone" type="button">ZONE: OFF</button>
+          </div>
+          <div id="loc-set-zone-timer" hidden>
+            <p class="set-label">Shrinks every: <b id="loc-set-zone-val">30s</b></p>
+            <input type="range" id="loc-set-zone-sec" min="10" max="60" value="30" step="5">
+          </div>
+        </div>
+      </div>
       <p class="hint" id="local-hint"></p>
       <button class="btn btn-big btn-go" id="local-start" disabled>Start battle</button>
     </section>
@@ -326,15 +352,15 @@
         <span class="armour-hud" id="armour-hud" hidden></span>
         <span class="health-hud" id="health-hud" hidden></span>
         <div class="loadout-hud" id="loadout-hud" hidden>
-          <div class="loadout-slot">
+          <div class="loadout-slot" data-fire="off" data-cat="offense">
             <canvas class="loadout-icon" data-cat="offense" width="112" height="112"></canvas>
             <span class="loadout-key" data-cat="offense"></span>
           </div>
-          <div class="loadout-slot">
+          <div class="loadout-slot" data-fire="def" data-cat="defense">
             <canvas class="loadout-icon" data-cat="defense" width="112" height="112"></canvas>
             <span class="loadout-key" data-cat="defense"></span>
           </div>
-          <div class="loadout-slot">
+          <div class="loadout-slot" data-fire="agi" data-cat="agility">
             <canvas class="loadout-icon" data-cat="agility" width="112" height="112"></canvas>
             <span class="loadout-key" data-cat="agility"></span>
           </div>
@@ -344,13 +370,6 @@
             <div class="tp-stick" id="tp-move" aria-label="Move">
               <span class="tp-stick-label">MOVE</span>
               <div class="tp-knob"></div>
-            </div>
-          </div>
-          <div class="tp-right">
-            <div class="tp-fires">
-              <button class="tp-fire tp-off" data-fire="off" aria-label="Offense">✦</button>
-              <button class="tp-fire tp-def" data-fire="def" aria-label="Defense">▤</button>
-              <button class="tp-fire tp-agi" data-fire="agi" aria-label="Agility">➤</button>
             </div>
           </div>
         </div>
@@ -374,6 +393,7 @@
   </div>
   <div id="account-modal" class="acct-modal" hidden>
     <div class="acct-card">
+      <button class="acct-x" id="acct-x" type="button" aria-label="Close">✕</button>
       <h3>Account — <span id="acct-who"></span></h3>
       <label class="acct-label" for="acct-newname">Username</label>
       <div class="acct-row">
