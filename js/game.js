@@ -223,33 +223,32 @@ export function initGame() {
   };
 
   const moveStick = document.getElementById("tp-move");
-  const aimStick = document.getElementById("tp-aim");
   if (moveStick) {
     setupStick(moveStick,
       (dx, dy) => { moveVec.x = dx; moveVec.y = dy; moveVecActive = Math.hypot(dx, dy) > 0.001; },
       () => { moveVec.x = 0; moveVec.y = 0; moveVecActive = false; });
   }
-  if (aimStick) {
-    setupStick(aimStick,
-      (dx, dy) => {
-        if (Math.hypot(dx, dy) > 0.3) { touchAim = Math.atan2(dy, dx); touchAimActive = true; }
-      },
-      () => { /* hold last aim on release */ });
-  }
 
-  touchPad.querySelectorAll(".tp-fire").forEach((btn) => {
-    const which = btn.dataset.fire; // off | def | agi
+  // On touch, the three LOADOUT INDICATORS double as the fire buttons —
+  // tapping the offense/defense/agility slot triggers that category.
+  // (Separate fire buttons were redundant.) The same press-and-hold
+  // model as before: hold to keep firing (e.g. the MG), release to stop.
+  loadoutHudEl?.querySelectorAll(".loadout-slot").forEach((slot) => {
+    const which = slot.dataset.fire; // off | def | agi
     const set = (v) => {
       if (which === "off") touchFire = v;
       else if (which === "def") touchDef = v;
       else touchAgi = v;
-      btn.classList.toggle("held", v);
+      slot.classList.toggle("held", v);
     };
-    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); btn.setPointerCapture(e.pointerId); set(true); });
+    slot.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return; // desktop fires with the mouse
+      e.preventDefault(); slot.setPointerCapture(e.pointerId); set(true);
+    });
     const off = () => set(false);
-    btn.addEventListener("pointerup", off);
-    btn.addEventListener("pointercancel", off);
-    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    slot.addEventListener("pointerup", off);
+    slot.addEventListener("pointercancel", off);
+    slot.addEventListener("contextmenu", (e) => e.preventDefault());
   });
 
   // Turret aim: track the mouse over the arena in WORLD space using the
@@ -279,11 +278,18 @@ export function initGame() {
 }
 
 // specs: [{ color, bot: null | 'easy' | 'medium' | 'hard' }]
-export function startLocalGame(specs) {
+// opts (all optional): { sizePool, gearPool, gearMax, zone, zonePeriod }
+// — the same match rules a custom lobby host can set.
+export function startLocalGame(specs, opts = {}) {
   begin({
     mode: "local",
     seed: randomSeed(),
     roundN: 1,
+    sizePool: opts.sizePool ?? null,
+    gearPool: opts.gearPool ?? null,
+    gearMax: opts.gearMax ?? null,
+    zone: opts.zone ?? false,
+    zonePeriod: opts.zonePeriod ?? 30,
     roster: specs.map((s) => ({
       id: s.slot ?? s.color,
       slot: s.slot ?? s.color,

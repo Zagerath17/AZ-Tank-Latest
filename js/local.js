@@ -12,8 +12,132 @@
 import { onEnter, onLeave, COLORS, SLOT_NAMES, tankSVG, paintVar } from "./main.js";
 import { freeBotSkin } from "./skins.js";
 import { getSkin, getPattern, getPatternColors } from "./social.js";
-import { startLocalGame } from "./game.js";
+import { startLocalGame, GEAR_CAP_LIMIT } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
+import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
+
+/* ---------- offline match settings (same knobs as a custom lobby) ---------- */
+
+const SIZE_KEYS = ["small", "medium", "large", "xl"];
+const SIZE_LABEL = { small: "Small", medium: "Medium", large: "Large", xl: "Extra large" };
+const LS_LOCAL_SET = "tank.localSettings.v1";
+
+function defaultLocalSettings() {
+  const gear = {};
+  for (const w of WEAPON_TYPES) gear[w] = true;
+  const sizes = {};
+  for (const k of SIZE_KEYS) sizes[k] = true;
+  return { sizes, gear, gearMax: 24, zone: false, zoneSec: 30 };
+}
+
+// Load saved offline settings, normalised so a partial/old blob can't
+// break the setup screen.
+function loadLocalSettings() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(LS_LOCAL_SET) || "{}") ?? {}; } catch { saved = {}; }
+  const d = defaultLocalSettings();
+  const sizes = {};
+  for (const k of SIZE_KEYS) sizes[k] = saved.sizes?.[k] ?? d.sizes[k];
+  const gear = {};
+  for (const w of WEAPON_TYPES) gear[w] = saved.gear?.[w] ?? d.gear[w];
+  const gearMax = Math.max(1, Math.min(GEAR_CAP_LIMIT, saved.gearMax ?? d.gearMax));
+  const zone = saved.zone ?? d.zone;
+  const zoneSec = Math.max(10, Math.min(60, saved.zoneSec ?? d.zoneSec));
+  return { sizes, gear, gearMax, zone, zoneSec };
+}
+
+let localSettings = loadLocalSettings();
+function saveLocalSettings() {
+  try { localStorage.setItem(LS_LOCAL_SET, JSON.stringify(localSettings)); } catch { /* ignore */ }
+}
+
+// Turn the settings into the opts startLocalGame expects.
+function localSettingsToOpts() {
+  const s = localSettings;
+  const sizePool = SIZE_KEYS.filter((k) => s.sizes[k]);
+  const gearPool = WEAPON_TYPES.filter((w) => s.gear[w]);
+  return {
+    sizePool: sizePool.length ? sizePool : SIZE_KEYS,
+    gearPool, // empty = no pickups this match
+    gearMax: s.gearMax,
+    zone: s.zone,
+    zonePeriod: s.zoneSec,
+  };
+}
+
+// Paint the offline settings panel from `localSettings` and wire the
+// controls. Every edit updates the object, saves it, and repaints.
+function renderLocalSettings() {
+  const s = localSettings;
+
+  const sizesEl = document.getElementById("loc-set-sizes");
+  if (sizesEl) {
+    sizesEl.innerHTML = SIZE_KEYS.map((k) => `
+      <button class="btn btn-small set-chip ${s.sizes[k] ? "is-on" : ""}"
+              data-size="${k}" type="button">${SIZE_LABEL[k]}</button>`).join("");
+    sizesEl.querySelectorAll("[data-size]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const k = b.dataset.size;
+        const next = !s.sizes[k];
+        if (!next && !SIZE_KEYS.some((x) => x !== k && s.sizes[x])) {
+          document.getElementById("local-hint").textContent = "Keep at least one map size.";
+          return;
+        }
+        s.sizes[k] = next; saveLocalSettings(); renderLocalSettings();
+      });
+    });
+  }
+
+  const gearEl = document.getElementById("loc-set-gear");
+  if (gearEl) {
+    gearEl.innerHTML = WEAPON_TYPES.map((w) => `
+      <button class="btn btn-small set-chip ${s.gear[w] ? "is-on" : ""}"
+              data-gear="${w}" type="button">${WEAPON_LABEL[w] ?? w}</button>`).join("");
+    gearEl.querySelectorAll("[data-gear]").forEach((b) => {
+      b.addEventListener("click", () => {
+        s.gear[b.dataset.gear] = !s.gear[b.dataset.gear];
+        saveLocalSettings(); renderLocalSettings();
+      });
+    });
+  }
+
+  const slider = document.getElementById("loc-set-max");
+  const valEl = document.getElementById("loc-set-max-val");
+  if (slider && valEl) {
+    slider.max = String(GEAR_CAP_LIMIT);
+    slider.value = String(s.gearMax);
+    valEl.textContent = String(s.gearMax);
+    slider.oninput = () => { valEl.textContent = slider.value; };
+    slider.onchange = () => {
+      s.gearMax = Math.max(1, Math.min(GEAR_CAP_LIMIT, +slider.value));
+      saveLocalSettings();
+    };
+  }
+
+  const zoneChip = document.getElementById("loc-set-zone");
+  if (zoneChip) {
+    zoneChip.classList.toggle("is-on", s.zone);
+    zoneChip.textContent = s.zone ? "ZONE: ON" : "ZONE: OFF";
+    zoneChip.onclick = () => { s.zone = !s.zone; saveLocalSettings(); renderLocalSettings(); };
+  }
+  const zoneRow = document.getElementById("loc-set-zone-timer");
+  if (zoneRow) zoneRow.hidden = !s.zone;
+  const zSlider = document.getElementById("loc-set-zone-sec");
+  const zVal = document.getElementById("loc-set-zone-val");
+  if (zSlider && zVal) {
+    zSlider.value = String(s.zoneSec);
+    zVal.textContent = `${s.zoneSec}s`;
+    zSlider.oninput = () => { zVal.textContent = `${zSlider.value}s`; };
+    zSlider.onchange = () => {
+      s.zoneSec = Math.max(10, Math.min(60, +zSlider.value));
+      saveLocalSettings();
+    };
+  }
+
+  const on = WEAPON_TYPES.filter((w) => s.gear[w]).length;
+  const note = document.getElementById("loc-set-note");
+  if (note) note.textContent = on ? "" : "No abilities selected — this match spawns no pickups.";
+}
 
 const HUMAN = COLORS[0];           // seat 1 is always the human ("You")
 const BOT_SEATS = COLORS.slice(1); // the rest can hold bots
@@ -118,9 +242,28 @@ export function initLocal() {
   onEnter("screen-local", () => {
     ensureAllPaint(); // picks up any paint swapped in the shop since
     render();
+    renderLocalSettings();
   });
 
   onLeave("screen-local", () => {});
+
+  // Collapsible settings header (mirrors the custom-lobby panel).
+  const setToggle = document.getElementById("loc-settings-toggle");
+  setToggle?.addEventListener("click", () => {
+    const body = document.getElementById("loc-settings-body");
+    const caret = document.getElementById("loc-settings-caret");
+    if (!body) return;
+    body.hidden = !body.hidden;
+    if (caret) caret.textContent = body.hidden ? "▾" : "▴";
+  });
+  document.getElementById("loc-set-gear-all")?.addEventListener("click", () => {
+    for (const w of WEAPON_TYPES) localSettings.gear[w] = true;
+    saveLocalSettings(); renderLocalSettings();
+  });
+  document.getElementById("loc-set-gear-none")?.addEventListener("click", () => {
+    for (const w of WEAPON_TYPES) localSettings.gear[w] = false;
+    saveLocalSettings(); renderLocalSettings();
+  });
 
   document.getElementById("local-start").addEventListener("click", () => {
     const specs = COLORS
@@ -134,6 +277,6 @@ export function initLocal() {
         patColors: c === HUMAN ? getPatternColors() : [],
       }));
     sessionStorage.setItem("tank.localPlayers", JSON.stringify(specs));
-    startLocalGame(specs);
+    startLocalGame(specs, localSettingsToOpts());
   });
 }

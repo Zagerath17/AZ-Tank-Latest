@@ -196,6 +196,7 @@ function openAccountPanel() {
   const resetBtn = document.getElementById("acct-reset");
   const logoutBtn = document.getElementById("acct-logout");
   const closeBtn = document.getElementById("acct-close");
+  const closeX = document.getElementById("acct-x");
   const delBtn = document.getElementById("acct-delete");
   const delWrap = document.getElementById("acct-delete-confirm");
   const delGo = document.getElementById("acct-delete-go");
@@ -241,6 +242,10 @@ function openAccountPanel() {
   resetBtn.addEventListener("click", onReset);
   logoutBtn.addEventListener("click", onLogout);
   closeBtn.addEventListener("click", close);
+  closeX?.addEventListener("click", close);
+  // Tapping the dark backdrop (outside the card) also closes it.
+  const onBackdrop = (e) => { if (e.target === modal) close(); };
+  modal.addEventListener("click", onBackdrop);
   delBtn?.addEventListener("click", onDelArm);
   delCancel?.addEventListener("click", onDelCancel);
   delGo?.addEventListener("click", onDelGo);
@@ -250,6 +255,8 @@ function openAccountPanel() {
     resetBtn.removeEventListener("click", onReset);
     logoutBtn.removeEventListener("click", onLogout);
     closeBtn.removeEventListener("click", close);
+    closeX?.removeEventListener("click", close);
+    modal.removeEventListener("click", onBackdrop);
     delBtn?.removeEventListener("click", onDelArm);
     delCancel?.removeEventListener("click", onDelCancel);
     delGo?.removeEventListener("click", onDelGo);
