@@ -137,6 +137,20 @@
       <p class="shop-rank" id="shop-rank"></p>
       <div id="shop-colours"></div>
       <div id="shop-patterns" hidden></div>
+
+      <!-- Two-colour picker for equipping a pattern -->
+      <div class="modal" id="pattern-picker" hidden>
+        <div class="modal-card pattern-picker-card">
+          <h3>Pick two colours</h3>
+          <p class="pattern-picker-hint">Tap two different colours you own.</p>
+          <div class="pp-grid" id="pattern-picker-grid"></div>
+          <p class="pattern-picker-msg" id="pattern-picker-msg"></p>
+          <div class="pattern-picker-actions">
+            <button class="btn" id="pattern-picker-cancel" type="button">Cancel</button>
+            <button class="btn btn-go" id="pattern-picker-apply" type="button">Wear it</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="screen" id="screen-social" aria-label="Social">
@@ -326,19 +340,21 @@
           </div>
         </div>
         <div class="touch-pad" id="touch-pad" hidden>
-          <div class="tp-stick" id="tp-move" aria-label="Move">
-            <span class="tp-stick-label">MOVE</span>
-            <div class="tp-knob"></div>
+          <div class="tp-left">
+            <div class="tp-fires">
+              <button class="tp-fire tp-off" data-fire="off" aria-label="Offense">✦</button>
+              <button class="tp-fire tp-def" data-fire="def" aria-label="Defense">▤</button>
+              <button class="tp-fire tp-agi" data-fire="agi" aria-label="Agility">➤</button>
+            </div>
+            <div class="tp-stick" id="tp-move" aria-label="Move">
+              <span class="tp-stick-label">MOVE</span>
+              <div class="tp-knob"></div>
+            </div>
           </div>
           <div class="tp-right">
             <div class="tp-stick" id="tp-aim" aria-label="Aim">
               <span class="tp-stick-label">AIM</span>
               <div class="tp-knob"></div>
-            </div>
-            <div class="tp-fires">
-              <button class="tp-fire tp-off" data-fire="off" aria-label="Offense">✦</button>
-              <button class="tp-fire tp-def" data-fire="def" aria-label="Defense">▤</button>
-              <button class="tp-fire tp-agi" data-fire="agi" aria-label="Agility">➤</button>
             </div>
           </div>
         </div>
@@ -385,7 +401,11 @@
           <button class="btn btn-small" data-dev-elo="2v2" data-delta="-100" type="button">−100</button>
           <button class="btn btn-small" data-dev-elo="2v2" data-delta="100" type="button">+100</button>
         </div>
-        <p class="dev-note">Tags are unlimited on this account.</p>
+        <div class="dev-row">
+          <span class="dev-label">Tags <b id="dev-tags">—</b></span>
+          <button class="btn btn-small" data-dev-tags data-delta="-10" type="button">−10</button>
+          <button class="btn btn-small" data-dev-tags data-delta="10" type="button">+10</button>
+        </div>
       </div>
       <div class="acct-danger">
         <button class="btn acct-danger-btn" id="acct-delete" type="button">DELETE ACCOUNT</button>
