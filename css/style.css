@@ -1110,9 +1110,14 @@ body {
   pointer-events: none;
   z-index: 4;
 }
-/* The aim stick and its fire buttons ride together on the right, with
+/* The move stick and the fire buttons ride together on the LEFT, with
    the buttons OUTBOARD of the stick (thumb rolls off the stick onto
-   them). */
+   them). The aim stick sits alone on the right. */
+.tp-left {
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 2vw, 16px);
+}
 .tp-right {
   display: flex;
   align-items: center;
@@ -1491,6 +1496,50 @@ body {
   line-height: 1.5;
   text-align: center;
 }
+
+/* pattern colour picker */
+.modal {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 8, 12, 0.72);
+  padding: 20px;
+}
+.modal[hidden] { display: none; }
+.pattern-picker-card {
+  width: min(94vw, 460px);
+  background: #161a22;
+  border: 1px solid var(--rivet);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.55);
+}
+.pattern-picker-card h3 { margin: 0 0 6px; font-family: "Black Ops One", system-ui; letter-spacing: .04em; }
+.pattern-picker-hint { margin: 0 0 14px; font-size: .82rem; color: #808896; }
+.pp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 8px;
+  max-height: 46vh; overflow-y: auto;
+  margin-bottom: 10px;
+}
+.pp-swatch {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 8px;
+  border: 2px solid var(--rivet);
+  background: #0f1218;
+  padding: 3px; cursor: pointer;
+}
+.pp-swatch.is-picked { border-color: #4bd08a; box-shadow: 0 0 0 2px rgba(75,208,138,.35); }
+.pp-chip { display: block; width: 100%; height: 100%; border-radius: 5px; }
+.pp-badge {
+  position: absolute; top: -6px; right: -6px;
+  font-size: .85rem; font-weight: 700; color: #4bd08a;
+  text-shadow: 0 1px 2px #000;
+}
+.pattern-picker-msg { min-height: 1.1em; margin: 4px 0 10px; font-size: .82rem; color: #ff8f78; }
+.pattern-picker-actions { display: flex; gap: 8px; }
+.pattern-picker-actions .btn { flex: 1; }
 
 /* account settings — dev tools (only ever rendered for dev accounts) */
 .acct-dev {
