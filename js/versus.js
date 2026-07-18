@@ -17,6 +17,7 @@
 // ================================================================
 
 import { tankSVG, paintVar } from "./main.js";
+import { tankSpriteCanvas } from "./tanksprite.js";
 import { DEFAULT_SKIN } from "./skins.js";
 import { ensureFirebase } from "./online.js";
 import { getAccount } from "./social.js";
@@ -72,7 +73,9 @@ export async function showVersus(roster, myId, mode, teams = null, players = [],
   // yours, the opponents' under theirs — with a hyphen between.
   const spriteBlock = (r, isMe, side) => `
     <div class="vs-fighter${isMe ? " vs-me" : ""}" style="${paintVar(r.color)}">
-      ${tankSVG(r.color)}
+      <span class="vs-sprite" data-sprite="${r.id}"
+            data-color="${r.color}" data-pattern="${r.pattern ?? "solid"}"
+            data-patcolors="${(r.patColors ?? []).join(",")}"></span>
       <span class="vs-name">${r.name ?? "Player"}</span>
       <span class="vs-score" data-fighter="${r.id}" data-side="${side}">${ranked && side ? "–" : ""}</span>
     </div>`;
@@ -82,6 +85,17 @@ export async function showVersus(roster, myId, mode, teams = null, players = [],
     <div class="vs-side">${mySide.map((r, i) => spriteBlock(r, r.id === myId, i === 0 ? "me" : "")).join("")}</div>
     <div class="vs-mid"><span class="vs-vs">VS</span>${ranked ? '<span class="vs-ratio-dash">-</span>' : ""}</div>
     <div class="vs-side vs-foes">${foes.map((f, i) => spriteBlock(f, false, i === 0 ? "foe" : "")).join("")}</div>`;
+
+  // Swap the placeholders for live, animated tank sprites (metal shimmer
+  // + pattern), so the head-to-head matches the tanks you'll drive.
+  host.querySelectorAll(".vs-sprite").forEach((ph) => {
+    const look = {
+      color: ph.dataset.color,
+      pattern: ph.dataset.pattern,
+      patColors: ph.dataset.patcolors ? ph.dataset.patcolors.split(",") : [],
+    };
+    ph.appendChild(tankSpriteCanvas(look, 64, ph.dataset.sprite));
+  });
 
   if (!acc || !ranked) return; // custom lobby: card only, no records
   try {

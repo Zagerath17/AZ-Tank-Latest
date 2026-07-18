@@ -13,7 +13,8 @@
 // ================================================================
 
 import { showScreen, toast, tankSVG, setInMatch, paintVar } from "./main.js";
-import { COLOR_NAMES, SLOT_NAMES, PALETTE } from "./palette.js";
+import { tankSpriteCanvas } from "./tanksprite.js";
+import { COLOR_NAMES, PALETTE } from "./palette.js";
 import { skinFinish } from "./skins.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon, snapSpawn } from "./maze.js";
@@ -143,6 +144,10 @@ const held = new Set();
 // touch / before first move), and whether the fire button (LMB) is down.
 let mouseWorld = { x: 0, y: 0 };
 let hasMouseAim = false;
+// True on phones/tablets: mouse events here are SYNTHESISED from taps,
+// so we ignore them for aiming — the mobile turret stays locked forward.
+const IS_TOUCH_DEVICE = (typeof navigator !== "undefined" && navigator.maxTouchPoints > 0)
+  || (typeof window !== "undefined" && "ontouchstart" in window);
 let mouseFire = false;  // LMB — offense (special gun, else basic shots)
 let mouseDef = false;   // RMB — defense (wall)
 // Mobile: left stick drives the hull directionally (moveVec, components
@@ -255,6 +260,7 @@ export function initGame() {
   // same view transform draw() lays down (stored on S.view each frame).
   const toWorld = (e) => {
     if (!S || !S.view) return;
+    if (IS_TOUCH_DEVICE) return; // taps on a phone must NOT aim the turret
     const r = canvas.getBoundingClientRect();
     const cx = e.clientX - r.left;
     const cy = e.clientY - r.top;
@@ -266,6 +272,7 @@ export function initGame() {
   // Left mouse button = FIRE (default). Right-click menu is suppressed
   // over the arena so aiming near the edge never pops a context menu.
   canvas.addEventListener("mousedown", (e) => {
+    if (IS_TOUCH_DEVICE) return; // touch fires via the loadout buttons
     toWorld(e);
     if (e.button === 0) { mouseFire = true; e.preventDefault(); }
     if (e.button === 2) { mouseDef = true; e.preventDefault(); }
@@ -412,7 +419,7 @@ export function onlineLobbyUpdate(lobby) {
     if (!p) {
       if (!t.gone) {
         t.gone = true;
-        if (!t.bot) toast(`${COLOR_NAMES[t.color]} left the battle.`);
+        if (!t.bot) toast(`${t.name ?? COLOR_NAMES[t.color]} left the battle.`);
       }
       continue;
     }
@@ -2668,22 +2675,60 @@ function maybeEndRound(now) {
   updateScoreHUD();
 }
 
+function rosterLabel(p, order) {
+  // A player's display name. In LOCAL play the human is "Player 1" and
+  // each bot is numbered "Bot 1", "Bot 2", … in roster order. Online,
+  // real usernames win; otherwise fall back to the colour name.
+  if (p.name) return p.name;
+  if (S.mode === "local") {
+    if (p.bot) {
+      const bots = order.filter((x) => x.bot);
+      const n = bots.indexOf(p) + 1;
+      return `Bot ${n}`;
+    }
+    return "Player 1";
+  }
+  return COLOR_NAMES[p.color];
+}
+
 function updateScoreHUD() {
   if (!scoreEl || !S) return;
   // Team matches list teammates side by side (team 0 first).
   const order = S.teams
     ? [...S.roster].sort((a, b) => (S.teams[a.id] ?? 0) - (S.teams[b.id] ?? 0))
     : S.roster;
-  scoreEl.innerHTML = order
-    .map((p) => {
-      const label = p.name ?? (S.mode === "local" ? SLOT_NAMES[p.slot ?? p.color] : null) ?? COLOR_NAMES[p.color];
-      return `<div class="sc-card" style="${paintVar(p.color)}">
-        <span class="sc-name">${label}</span>
-        ${tankSVG(p.color)}
-        <span class="sc">${S.scores[p.id] ?? 0}</span>
-      </div>`;
-    })
-    .join("");
+
+  // Build the card shells once (identified by a signature). Rebuilding
+  // every score change would trash the animated sprite canvases, so we
+  // only lay them out when the roster/labels change and otherwise just
+  // poke the score numbers.
+  const sig = order.map((p) => `${p.id}:${p.color}:${p.pattern ?? "solid"}:${(p.patColors ?? []).join("-")}`).join("|");
+  if (scoreEl._sig !== sig) {
+    scoreEl._sig = sig;
+    scoreEl.innerHTML = "";
+    scoreEl._scoreEls = {};
+    for (const p of order) {
+      const card = document.createElement("div");
+      card.className = "sc-card";
+      card.style.cssText = paintVar(p.color);
+      const name = document.createElement("span");
+      name.className = "sc-name";
+      name.textContent = rosterLabel(p, order);
+      const sprite = tankSpriteCanvas(
+        { color: p.color, pattern: p.pattern, patColors: p.patColors }, 34, p.id);
+      const sc = document.createElement("span");
+      sc.className = "sc";
+      sc.textContent = S.scores[p.id] ?? 0;
+      card.append(name, sprite, sc);
+      scoreEl.appendChild(card);
+      scoreEl._scoreEls[p.id] = sc;
+    }
+  } else {
+    for (const p of order) {
+      const el = scoreEl._scoreEls?.[p.id];
+      if (el) el.textContent = S.scores[p.id] ?? 0;
+    }
+  }
 }
 
 // A projectile just died — leave a quick expanding ghost behind.
@@ -3740,6 +3785,30 @@ function hullPaint(color, R, now) {
     g.addColorStop(0.60, lit(0.75));
     g.addColorStop(0.78, hex);
     g.addColorStop(1.00, dim(0.52));
+  } else if (finish === "ruby") {
+    // RUBY — the top-50 exclusive, and the richest finish in the game.
+    // A cut gemstone rather than a metal: a deep crimson body broken by
+    // sharp facet edges, three white fire-glints, and an INNER FIRE that
+    // pulses on its own slow cycle (independent of the sweep) so the
+    // stone looks lit from within rather than merely polished.
+    const fire = 0.5 + 0.5 * Math.sin(now / 900);      // slow heartbeat
+    const hot = mix(hex, "#ffd9a0", 0.30 + 0.28 * fire); // warm core glow
+    const deep = mix(hex, "#3a0010", 0.55);              // wine-dark shadow
+    g.addColorStop(0.00, deep);
+    g.addColorStop(0.09, lit(0.28));
+    g.addColorStop(0.15, dim(0.62));   // facet edge
+    g.addColorStop(0.19, "#ffffff");   // glint 1
+    g.addColorStop(0.24, hot);         // inner fire
+    g.addColorStop(0.33, deep);        // facet edge
+    g.addColorStop(0.40, lit(0.50));
+    g.addColorStop(0.47, "#fff2f5");   // glint 2 (cool white)
+    g.addColorStop(0.52, hot);         // inner fire
+    g.addColorStop(0.60, hex);
+    g.addColorStop(0.66, dim(0.58));   // facet edge
+    g.addColorStop(0.71, "#ffffff");   // glint 3
+    g.addColorStop(0.77, lit(0.38));
+    g.addColorStop(0.87, deep);
+    g.addColorStop(1.00, lit(0.20 + 0.20 * fire));
   } else { // shinyReflective — diamond: faceted, multiple prismatic glints
     g.addColorStop(0.00, dim(0.55));
     g.addColorStop(0.14, lit(0.55));
@@ -4094,6 +4163,7 @@ function patRng(seed) {
 // colour still shines). `now` lets the lightning flicker.
 function drawPattern(id, col, R, now, seedId) {
   const paint = hullPaint(col, R, now);
+  const colHex = HULL[col] ?? HULL.red; // the 2nd colour as a hex, for shade/mix
   ctx.fillStyle = paint;
   ctx.strokeStyle = paint;
   const W = R * 1.8, H = R * 1.16;
@@ -4190,6 +4260,188 @@ function drawPattern(id, col, R, now, seedId) {
     ctx.strokeStyle = "#ffffff";
     drawBolt(Math.max(1.2, R * 0.07), 0.9 * breathe);
     ctx.globalAlpha = 1;
+
+  } else if (id === "stripes") {
+    // Racing stripes: two bold diagonal bands sweeping across the hull.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(L, T, W, H);
+    ctx.clip();
+    ctx.lineWidth = R * 0.34;
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = paint;
+    for (const off of [-0.18, 0.14]) {
+      ctx.beginPath();
+      ctx.moveTo(L + W * (0.30 + off), T - R * 0.3);
+      ctx.lineTo(L + W * (0.62 + off), T + H + R * 0.3);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+  } else if (id === "hexScale") {
+    // Honeycomb / scale mail: rows of hexagons in the second colour.
+    const s = R * 0.26;               // hex "radius"
+    const hw = s * Math.sqrt(3) / 2;  // half-width of a flat-top hex
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(L, T, W, H);
+    ctx.clip();
+    ctx.lineWidth = Math.max(1, R * 0.04);
+    ctx.strokeStyle = shade(colHex, 0.4);
+    ctx.fillStyle = paint;
+    let row = 0;
+    for (let cy = T; cy < T + H + s; cy += s * 1.5, row++) {
+      const xoff = row % 2 ? hw : 0;
+      for (let cx = L - hw; cx < L + W + hw * 2; cx += hw * 2) {
+        const x = cx + xoff, y = cy;
+        ctx.beginPath();
+        for (let k = 0; k < 6; k++) {
+          const a = Math.PI / 180 * (60 * k - 90);
+          const px = x + Math.cos(a) * s, py = y + Math.sin(a) * s;
+          if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+
+  } else if (id === "flames") {
+    // Flame licks reaching forward from the rear of the hull.
+    const rng = patRng(seedId + "flame");
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(L, T, W, H);
+    ctx.clip();
+    ctx.fillStyle = paint;
+    const tongues = 5;
+    for (let i = 0; i < tongues; i++) {
+      const y0 = T + H * ((i + 0.5) / tongues);
+      const reach = W * (0.35 + rng() * 0.4);        // how far forward
+      const hh = H * (0.10 + rng() * 0.06);          // tongue half-height
+      ctx.beginPath();
+      ctx.moveTo(L, y0 - hh);
+      // wavy upper edge to a point, then back — a licking flame
+      ctx.quadraticCurveTo(L + reach * 0.5, y0 - hh * 2.2, L + reach, y0);
+      ctx.quadraticCurveTo(L + reach * 0.5, y0 + hh * 2.2, L, y0 + hh);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+  } else if (id === "circuit") {
+    // Circuit board: right-angle traces with solder nodes.
+    const rng = patRng(seedId + "circ");
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(L, T, W, H);
+    ctx.clip();
+    ctx.strokeStyle = paint;
+    ctx.fillStyle = paint;
+    ctx.lineWidth = Math.max(1, R * 0.05);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const lines = 6;
+    for (let i = 0; i < lines; i++) {
+      let x = L + rng() * W, y = T + rng() * H;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      const legs = 2 + Math.floor(rng() * 3);
+      for (let k = 0; k < legs; k++) {
+        if (rng() < 0.5) x += (rng() - 0.5) * W * 0.5;
+        else y += (rng() - 0.5) * H * 0.6;
+        x = Math.max(L, Math.min(L + W, x));
+        y = Math.max(T, Math.min(T + H, y));
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      // solder node at the end
+      ctx.beginPath();
+      ctx.arc(x, y, R * 0.06, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+  } else if (id === "tiger") {
+    // Tiger stripes: tapered vertical claw-marks down the flanks.
+    const rng = patRng(seedId + "tiger");
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(L, T, W, H);
+    ctx.clip();
+    ctx.fillStyle = paint;
+    const stripes = 7;
+    for (let i = 0; i < stripes; i++) {
+      const x = L + W * ((i + 0.5) / stripes) + (rng() - 0.5) * W * 0.06;
+      const topW = R * (0.05 + rng() * 0.05);
+      const botW = R * (0.02 + rng() * 0.03);
+      const bend = (rng() - 0.5) * R * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x - topW, T);
+      ctx.quadraticCurveTo(x + bend - botW, T + H * 0.5, x - botW, T + H);
+      ctx.lineTo(x + botW, T + H);
+      ctx.quadraticCurveTo(x + bend + botW, T + H * 0.5, x + topW, T);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+  } else if (id === "galaxy") {
+    // GALAXY (the flashy Diamond one): a deep nebula wash in the second
+    // colour, a bright spiral core, and a scatter of twinkling stars —
+    // the stars shimmer slowly so it always looks alive.
+    const rng = patRng(seedId + "galaxy");
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(L, T, W, H);
+    ctx.clip();
+    const cx = L + W * 0.5, cy = T + H * 0.5;
+    // nebula: soft radial cloud of the second colour
+    const neb = ctx.createRadialGradient(cx, cy, R * 0.05, cx, cy, R * 0.95);
+    neb.addColorStop(0, mix(colHex, "#ffffff", 0.5));
+    neb.addColorStop(0.4, paintHexToRGBA(colHex, 0.85));
+    neb.addColorStop(1, paintHexToRGBA(colHex, 0.12));
+    ctx.fillStyle = neb;
+    ctx.fillRect(L, T, W, H);
+    // spiral arms: a couple of faint logarithmic-ish sweeps
+    ctx.strokeStyle = mix(colHex, "#ffffff", 0.55);
+    ctx.lineWidth = Math.max(1, R * 0.05);
+    ctx.globalAlpha = 0.5;
+    for (let arm = 0; arm < 2; arm++) {
+      ctx.beginPath();
+      for (let t2 = 0; t2 < 1; t2 += 0.05) {
+        const ang = arm * Math.PI + t2 * Math.PI * 2.2;
+        const rad = t2 * R * 0.7;
+        const px = cx + Math.cos(ang) * rad, py = cy + Math.sin(ang) * rad * 0.7;
+        if (t2 === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    // bright core
+    const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.2);
+    core.addColorStop(0, "#ffffff");
+    core.addColorStop(1, paintHexToRGBA(colHex, 0));
+    ctx.fillStyle = core;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    // twinkling stars
+    const stars = 16;
+    for (let i = 0; i < stars; i++) {
+      const sx = L + rng() * W, sy = T + rng() * H;
+      const ph = rng() * Math.PI * 2;
+      const tw = 0.4 + 0.6 * Math.abs(Math.sin(now / 520 + ph)); // slow twinkle
+      ctx.globalAlpha = tw;
+      ctx.fillStyle = "#ffffff";
+      const sr = R * (0.02 + rng() * 0.03);
+      ctx.beginPath();
+      ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 }
 
@@ -4232,4 +4484,11 @@ function mix(hexA, hexB, f) {
   const g = Math.round(((a >> 8) & 255) + (((b >> 8) & 255) - ((a >> 8) & 255)) * t);
   const c = Math.round((a & 255) + ((b & 255) - (a & 255)) * t);
   return `rgb(${r}, ${g}, ${c})`;
+}
+
+// A hex colour as an rgba() string at the given alpha (for soft washes
+// like the galaxy nebula).
+function paintHexToRGBA(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }

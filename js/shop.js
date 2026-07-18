@@ -14,12 +14,14 @@ import { onEnter, toast } from "./main.js";
 import {
   SKINS, SHOP_SKINS, TIER_ORDER, DEFAULT_SKIN, tierUnlocked, skinFinish,
   PATTERNS, SHOP_PATTERNS, DEFAULT_PATTERN, patternColors,
+  isEliteSkin, ELITE_TIER,
 } from "./skins.js";
 import {
   getAccount, getSkin, getTags, ownsSkin, bestElo, buySkin, equipSkin,
   ownsPattern, getPattern, getPatternColors, buyPattern, equipPattern, ownedSkins,
 } from "./social.js";
-import { rankOf } from "./ranked.js";
+import { rankOf, isTop50, myBoardPosition, refreshBoardPosition } from "./ranked.js";
+import { finishSwatchCanvas } from "./tanksprite.js";
 
 let tab = "colours";
 
@@ -48,6 +50,10 @@ function swatchStyle(id) {
     case "shinyReflective": // diamond: faceted mirror + gloss
       return `background: linear-gradient(128deg, #0008 0%, #fff5 22%, #0007 30%, #ffffff 32%,
         #fff4 38%, transparent 52%, #ffffff 62%, #fff6 66%, #0006 80%, #fff4 100%), ${hex};`;
+    case "ruby": // gemstone: dark facets, inner fire, hard glints
+      return `background: linear-gradient(128deg, #3a0010 0%, #fff5 12%, #3a0010 22%,
+        #ffffff 26%, #ffcf9e 34%, #3a0010 44%, #fff2f5 50%, #ffcf9e 58%,
+        ${hex} 66%, #3a0010 76%, #ffffff 82%, #fff6 90%, #3a0010 100%), ${hex};`;
     default:
       return `background: ${hex};`;
   }
@@ -66,7 +72,7 @@ function tile(id, { owned, worn, afford, unlocked }) {
   return `
     <button class="shop-tile ${state}" data-skin="${id}" type="button"
             aria-label="${s.name}${owned ? "" : `, ${cost} tags`}">
-      <span class="shop-chip" style="${swatchStyle(id)}"></span>
+      <span class="shop-chip" data-chip="${id}" style="${swatchStyle(id)}"></span>
       <span class="shop-name">${s.name}</span>
       <span class="shop-foot">${foot}</span>
     </button>`;
@@ -89,17 +95,29 @@ function renderColours() {
     const ids = SHOP_SKINS.filter((id) => SKINS[id].tier === t);
     if (ids.length) groups.push({ tier: t, label: `${t} rank`, ids });
   }
+  // ELITE sits last: leaderboard-gated, not rank-gated.
+  const eliteIds = SHOP_SKINS.filter((id) => isEliteSkin(id));
+  if (eliteIds.length) {
+    groups.push({ tier: ELITE_TIER, label: "Elite — world top 50", ids: eliteIds, elite: true });
+  }
+
+  const top50 = isTop50();
+  const myPos = myBoardPosition();
 
   host.innerHTML = groups.map((g) => {
-    const unlocked = tierUnlocked(g.tier, rank);
+    // Elite unlocks on leaderboard standing; everything else on rank.
+    const unlocked = g.elite ? top50 : tierUnlocked(g.tier, rank);
     const ownedN = g.ids.filter((id) => ownsSkin(id)).length;
+    const note = unlocked
+      ? `${ownedN}/${g.ids.length} owned`
+      : g.elite
+        ? (myPos ? `🔒 Top 50 only — you're #${myPos}` : "🔒 Top 50 only")
+        : `🔒 Reach ${g.tier}`;
     return `
-      <section class="shop-group ${unlocked ? "" : "locked"}">
+      <section class="shop-group ${unlocked ? "" : "locked"} ${g.elite ? "shop-group-elite" : ""}">
         <h3 class="shop-group-head">
           <span>${g.label}</span>
-          <span class="shop-group-note">
-            ${unlocked ? `${ownedN}/${g.ids.length} owned` : `🔒 Reach ${g.tier}`}
-          </span>
+          <span class="shop-group-note">${note}</span>
         </h3>
         <div class="shop-grid">
           ${g.ids.map((id) => tile(id, {
@@ -120,9 +138,17 @@ function renderColours() {
         ? "Play a ranked match to set your rank. Copper paint is open to you now."
         : `${rank} rank · paint up to ${rank} is open to you.`;
   }
-}
 
-/* ---------- the patterns tab ---------- */
+  // Replace the metal chips' static CSS gradient with a live animated
+  // finish swatch, so the shop shimmers exactly like the tank will. The
+  // CSS gradient stays as the instant, pre-animation fallback.
+  host.querySelectorAll(".shop-chip[data-chip]").forEach((chip) => {
+    const id = chip.dataset.chip;
+    if (skinFinish(id) === "flat") return; // flat paints keep the plain fill
+    const cv = finishSwatchCanvas(id, 40);
+    chip.replaceWith(cv);
+  });
+}
 
 // A little swatch showing the pattern shape in neutral tones, so the
 // tile reads as "camo" / "lightning" etc. before you pick colours.
@@ -147,6 +173,29 @@ function patternChip(id) {
     case "lightning":
       return `background: linear-gradient(115deg, ${light} 46%, ${dark} 47%, ${dark} 53%, ${light} 54%),
         linear-gradient(65deg, transparent 60%, ${dark} 61%, ${dark} 66%, transparent 67%), ${light};`;
+    case "stripes":
+      return `background: repeating-linear-gradient(125deg, ${light} 0 22%, ${dark} 22% 34%, ${light} 34% 44%);`;
+    case "hexScale":
+      return `background:
+        radial-gradient(circle at 50% 0, ${dark} 22%, transparent 24%) 0 0 / 40% 40%,
+        radial-gradient(circle at 50% 0, ${dark} 22%, transparent 24%) 20% 20% / 40% 40%, ${light};`;
+    case "flames":
+      return `background:
+        radial-gradient(ellipse 60% 22% at 0 30%, ${dark} 55%, transparent 57%),
+        radial-gradient(ellipse 55% 22% at 0 70%, ${dark} 55%, transparent 57%), ${light};`;
+    case "circuit":
+      return `background:
+        linear-gradient(${dark}, ${dark}) 20% 0 / 8% 60% no-repeat,
+        linear-gradient(${dark}, ${dark}) 20% 55% / 55% 8% no-repeat,
+        linear-gradient(${dark}, ${dark}) 70% 20% / 8% 55% no-repeat, ${light};`;
+    case "tiger":
+      return `background: repeating-linear-gradient(92deg, ${light} 0 14%, ${dark} 14% 20%, ${light} 20% 30%);`;
+    case "galaxy":
+      return `background:
+        radial-gradient(circle at 50% 50%, #fff 4%, transparent 6%),
+        radial-gradient(circle at 22% 30%, #fff 3%, transparent 5%),
+        radial-gradient(circle at 74% 68%, #fff 3%, transparent 5%),
+        radial-gradient(circle at 50% 50%, ${light} 8%, ${dark} 70%);`;
     default:
       return `background: ${light};`;
   }
@@ -290,7 +339,15 @@ function pickTab(which) {
 }
 
 export function initShop() {
-  onEnter("screen-shop", () => { pickTab(tab); });
+  onEnter("screen-shop", () => {
+    pickTab(tab);
+    // Elite paint depends on live leaderboard standing, so re-check it
+    // on open and repaint if it changed the answer.
+    const was = isTop50();
+    refreshBoardPosition().then(() => {
+      if (isTop50() !== was && tab === "colours") renderColours();
+    }).catch(() => {});
+  });
 
   document.getElementById("shop-tab-colours")?.addEventListener("click", () => pickTab("colours"));
   document.getElementById("shop-tab-patterns")?.addEventListener("click", () => pickTab("patterns"));
@@ -317,13 +374,25 @@ export function initShop() {
     }
     const elo = bestElo();
     const rank = elo == null ? "Copper" : rankOf(elo).name;
-    if (!tierUnlocked(s.tier, rank)) {
+    if (isEliteSkin(id)) {
+      // Elite paint is leaderboard-gated. Re-check standing live so a
+      // stale cache can't hand out (or wrongly withhold) Ruby.
+      await refreshBoardPosition().catch(() => {});
+      if (!isTop50()) {
+        const pos = myBoardPosition();
+        toast(pos
+          ? `${s.name} is for the world top 50 — you're #${pos}.`
+          : `${s.name} is for the world top 50 only.`);
+        renderColours();
+        return;
+      }
+    } else if (!tierUnlocked(s.tier, rank)) {
       toast(`${s.name} needs ${s.tier} rank.`);
       return;
     }
     btn.disabled = true;
     try {
-      await buySkin(id);
+      await buySkin(id, { eliteOk: isEliteSkin(id) && isTop50() });
       await equipSkin(id); // buying it means you want to wear it
       toast(`${s.name} bought — you're wearing it.`);
       refresh();

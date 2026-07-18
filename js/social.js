@@ -20,7 +20,7 @@
 // ================================================================
 
 import { toast, tankSVG, showScreen, onEnter, onLeave, paintVar } from "./main.js";
-import { SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors } from "./skins.js";
+import { SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors, isEliteSkin } from "./skins.js";
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
 
@@ -721,11 +721,17 @@ export async function equipSkin(id) {
 
 // Buy paint. The rank gate and the price are both checked here, not
 // just in the UI — the button being enabled is never the authority.
-export async function buySkin(id) {
+export async function buySkin(id, opts = {}) {
   if (!account) throw new Error("Log in to use the shop.");
   const skin = SKINS[id];
   if (!skin || skin.reserved) throw new Error("That paint doesn't exist.");
   if (ownsSkin(id)) throw new Error("You already own that.");
+  // Elite paint (Ruby) is leaderboard-gated. The shop verifies standing
+  // live and passes eliteOk; refuse any path that didn't, so a stale or
+  // skipped check can't quietly sell it.
+  if (isEliteSkin(id) && !opts.eliteOk) {
+    throw new Error(`${skin.name} is for the world top 50 only.`);
+  }
   const cost = skin.cost ?? 0;
   const f = await ensureFirebase();
   if (account.tags < cost) throw new Error(`Not enough tags — you need ${cost - account.tags} more.`);

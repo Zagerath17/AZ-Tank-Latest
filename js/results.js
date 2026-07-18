@@ -11,6 +11,7 @@
 // ================================================================
 
 import { showScreen, paintVar } from "./main.js";
+import { tankSpriteCanvas } from "./tanksprite.js";
 import { ensureFirebase } from "./online.js";
 import { rankBadge } from "./ranked.js";
 import { awardTags } from "./social.js";
@@ -126,6 +127,7 @@ function render(body, rMode, players, myKey, results, dmgByPlayer, killsByPlayer
     const kills = killsByPlayer[p.id] ?? 0;
     return `
       <div class="res-row ${p.key === myKey ? "res-me" : ""} ${rMode === "2v2" ? "team-" + (p.team ?? 0) : ""}" style="${paintVar(p.color)}">
+        <span class="res-sprite" data-color="${p.color}" data-pattern="${p.pattern ?? "solid"}" data-patcolors="${(p.patColors ?? []).join(",")}" data-seed="${p.id ?? p.key ?? p.color}"></span>
         <span class="res-name">${res ? rankBadge(res.after, 16) : ""} ${p.name}</span>
         <span class="res-stat"><b>${dmg}</b><em>dmg</em></span>
         <span class="res-stat"><b>${kills}</b><em>kills</em></span>
@@ -139,4 +141,14 @@ function render(body, rMode, players, myKey, results, dmgByPlayer, killsByPlayer
       <span>Player</span><span>Damage</span><span>Kills</span><span>Elo</span>
     </div>
     <div class="res-rows">${rows.map(cell).join("")}</div>`;
+
+  // Swap in the live animated tank sprites (metal shimmer + patterns).
+  body.querySelectorAll(".res-sprite").forEach((ph) => {
+    const look = {
+      color: ph.dataset.color,
+      pattern: ph.dataset.pattern,
+      patColors: ph.dataset.patcolors ? ph.dataset.patcolors.split(",") : [],
+    };
+    ph.appendChild(tankSpriteCanvas(look, 30, ph.dataset.seed));
+  });
 }

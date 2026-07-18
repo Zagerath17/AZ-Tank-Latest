@@ -13,6 +13,12 @@
 // Rank gates, weakest first. A skin needs its tier REACHED to buy.
 export const TIER_ORDER = ["Copper", "Silver", "Gold", "Platinum", "Diamond"];
 
+// ELITE paint isn't rank-gated — it's LEADERBOARD-gated. This label is
+// deliberately NOT in TIER_ORDER, so tierUnlocked() fails it closed and
+// the only way to unlock it is the explicit top-50 check.
+export const ELITE_TIER = "Top 50";
+export const TOP50_CUTOFF = 50;
+
 // The paint you start with, free, forever.
 export const DEFAULT_SKIN = "red";
 
@@ -74,6 +80,15 @@ export const SKINS = {
   platinum: { name: "Platinum", hex: "#9fe6d4", tier: "Platinum", cost: 200, finish: "metallic", fam: "metal" },
   diamond: { name: "Diamond", hex: "#a8ecff", tier: "Diamond", cost: 250, finish: "shinyReflective", fam: "metal" },
 
+  // ---- ELITE: not a rank at all. Ruby is only sold to players sitting
+  // in the world top 50, and it's the only paint whose lock can close
+  // again — drop off the board and you keep what you bought, but the
+  // shop stops selling it. Its finish is the richest in the game.
+  ruby: {
+    name: "Ruby", hex: "#e0115f", tier: ELITE_TIER, cost: 500,
+    finish: "ruby", fam: "elite", elite: true,
+  },
+
   // ---- reserved: the Impossible bot's paint, not for sale ----
   black: { name: "Black", hex: "#20242e", tier: null, cost: 0, finish: "flat", fam: "reserved", reserved: true },
 };
@@ -87,9 +102,15 @@ export const PATTERNS = {
   solid: { name: "Solid", tier: null, cost: 0, colors: 1 },
   splotchy: { name: "Splotchy", tier: "Silver", cost: 40, colors: 2 },
   twoTone: { name: "Two Tone", tier: "Silver", cost: 40, colors: 2 },
+  stripes: { name: "Racing Stripes", tier: "Silver", cost: 45, colors: 2 },
   camo: { name: "Camo", tier: "Gold", cost: 60, colors: 2 },
+  hexScale: { name: "Hex Scale", tier: "Gold", cost: 65, colors: 2 },
+  flames: { name: "Flames", tier: "Gold", cost: 70, colors: 2 },
   modernCamo: { name: "Modern Camo", tier: "Platinum", cost: 80, colors: 2 },
+  circuit: { name: "Circuit", tier: "Platinum", cost: 85, colors: 2 },
+  tiger: { name: "Tiger", tier: "Platinum", cost: 90, colors: 2 },
   lightning: { name: "Lightning", tier: "Diamond", cost: 100, colors: 2 },
+  galaxy: { name: "Galaxy", tier: "Diamond", cost: 120, colors: 2 },
 };
 
 export const DEFAULT_PATTERN = "solid";
@@ -127,11 +148,19 @@ export function skinFinish(id) {
 }
 
 // Is `tier` reached by someone whose current rank is `rankName`?
+// NOTE: elite paint (Ruby) uses a tier that isn't in TIER_ORDER, so it
+// always fails here — that's deliberate. Use isEliteSkin() + the
+// caller's top-50 check to unlock it.
 export function tierUnlocked(tier, rankName) {
   if (!tier) return true; // the default
   const need = TIER_ORDER.indexOf(tier);
   const have = TIER_ORDER.indexOf(rankName);
   return need >= 0 && have >= need;
+}
+
+// Leaderboard-gated paint (currently just Ruby).
+export function isEliteSkin(id) {
+  return !!(SKINS[id] ?? {}).elite;
 }
 
 // A random primary colour that nobody at the table is wearing.

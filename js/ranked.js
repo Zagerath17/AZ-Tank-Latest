@@ -31,6 +31,7 @@ import { toast, onEnter, onLeave, tankSVG, paintVar } from "./main.js";
 import { ensureFirebase, createRankedLobby } from "./online.js";
 import { getAccount, getInvitableFriends, sendInvite } from "./social.js";
 import { isConfigured } from "./firebase-config.js";
+import { TOP50_CUTOFF } from "./skins.js";
 
 export const DEFAULT_ELO = 500;
 
@@ -536,6 +537,51 @@ async function matchmakerTick(f, acc, mode) {
 }
 
 /* ---------- leaderboards ---------- */
+
+// ---- elite (top-50) standing --------------------------------------
+// Ruby paint is sold only to players currently inside the world top 50.
+// We cache the last known position so the shop can render instantly,
+// and refresh it from the public mirror whenever the shop opens.
+// Cached (not authoritative): the real gate is re-checked at purchase.
+const LS_BOARD_POS = "tank.boardPos.v1";
+let boardPos = (() => {
+  try { return JSON.parse(localStorage.getItem(LS_BOARD_POS) || "null"); }
+  catch { return null; }
+})();
+
+// Best (lowest) position this account holds across BOTH ladders, or
+// null if unranked/unknown. Being top 50 in either mode qualifies.
+export function myBoardPosition() {
+  return boardPos && typeof boardPos.pos === "number" ? boardPos.pos : null;
+}
+
+export function isTop50() {
+  const p = myBoardPosition();
+  return p != null && p <= TOP50_CUTOFF;
+}
+
+// Recompute standing from the public leaderboard mirrors. Best effort:
+// on any failure we leave the cached value alone rather than wrongly
+// revoking someone's access mid-session.
+export async function refreshBoardPosition() {
+  const acc = getAccount();
+  if (!acc || !isConfigured) return myBoardPosition();
+  try {
+    const f = await ensureFirebase();
+    let best = null;
+    for (const key of Object.keys(MODES)) {
+      const M = MODES[key];
+      const rows = await loadBoardRows(f, M);
+      if (!rows.length) continue;
+      rows.sort((a, b) => b.elo - a.elo);
+      const idx = rows.findIndex((r) => r.key === acc.key);
+      if (idx >= 0 && (best == null || idx + 1 < best)) best = idx + 1;
+    }
+    boardPos = { pos: best, at: Date.now() };
+    try { localStorage.setItem(LS_BOARD_POS, JSON.stringify(boardPos)); } catch { /* ignore */ }
+  } catch { /* keep the cached standing */ }
+  return myBoardPosition();
+}
 
 // Collect {key,name,elo} rows for the active mode. Preferred source is
 // the public `/leaderboard/{mode}` mirror (world-readable, so it works

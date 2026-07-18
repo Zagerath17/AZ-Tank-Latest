@@ -744,6 +744,8 @@ function enterVersus(code, lobby) {
   const resolved = resolveColors(entries);
   const roster = entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
     id, name: p.name ?? null, color: resolved[id], ukey: p.ukey ?? null, bot: p.bot ?? null,
+    pattern: p.bot ? "solid" : (p.pattern ?? "solid"),
+    patColors: p.bot ? [] : (Array.isArray(p.patColors) ? p.patColors : []),
   }));
   showVersus(roster, me, lobby.rankedMode ?? "1v1",
     lobby.teams ?? null, current?.playersCache ?? [], !!lobby.ranked);
@@ -863,6 +865,8 @@ function beginOnlineGame(code, lobby) {
       const merged = placements.map((pl) => ({
         ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000, team: null }),
         color: (roster.find((r) => r.id === pl.id) ?? {}).color ?? DEFAULT_SKIN,
+        pattern: (roster.find((r) => r.id === pl.id) ?? {}).pattern ?? "solid",
+        patColors: (roster.find((r) => r.id === pl.id) ?? {}).patColors ?? [],
         score: pl.score,
       }));
       const savedCode = code;

@@ -9,7 +9,7 @@
 // Impossible bots are locked to black.
 // ================================================================
 
-import { onEnter, onLeave, COLORS, SLOT_NAMES, tankSVG, paintVar } from "./main.js";
+import { onEnter, onLeave, COLORS, tankSVG, paintVar } from "./main.js";
 import { freeBotSkin } from "./skins.js";
 import { getSkin, getPattern, getPatternColors } from "./social.js";
 import { startLocalGame, GEAR_CAP_LIMIT } from "./game.js";
@@ -205,7 +205,7 @@ function render() {
       <div class="slot ${isHuman ? "joined" : ""} ${bot ? "botted" : ""}" style="${paintVar(col)}"
            data-slot="${slot}">
         ${tankSVG(col)}
-        <span class="slot-name">${isHuman ? "You" : SLOT_NAMES[slot]}</span>
+        <span class="slot-name">${isHuman ? "You" : "Bot " + (BOT_SEATS.indexOf(slot) + 1)}</span>
         <span class="slot-status">${status}</span>
         <span class="slot-prompt">${prompt}</span>
         ${chip}
