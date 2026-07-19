@@ -1614,3 +1614,64 @@ body {
   letter-spacing: .04em;
   color: #8b93a3;
 }
+
+
+/* ---------- multi-kill banner ---------- */
+/* Sits across the top of the arena. Punches in, holds, fades out. The
+   tint climbs with the streak so a Penta reads hotter than a Double. */
+.multikill {
+  position: absolute;
+  top: clamp(8px, 3vh, 28px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  pointer-events: none;
+  font-family: "Black Ops One", system-ui;
+  font-size: clamp(1.4rem, 4.4vw, 2.9rem);
+  letter-spacing: .06em;
+  white-space: nowrap;
+  color: #fff;
+  padding: 6px 22px;
+  border-radius: 10px;
+  background: rgba(12, 14, 20, .55);
+  border: 2px solid currentColor;
+  text-shadow: 0 0 18px currentColor, 0 3px 0 rgba(0, 0, 0, .55);
+  animation: mk-pop .28s cubic-bezier(.2, 1.5, .4, 1);
+}
+/* Escalating colours, cool → hot. */
+.multikill.mk-2 { color: #7fb0ff; }
+.multikill.mk-3 { color: #4bd08a; }
+.multikill.mk-4 { color: #ffe11f; }
+.multikill.mk-5 { color: #ffa033; }
+.multikill.mk-6 { color: #ff6a4d; }
+.multikill.mk-7 { color: #ff3bd0; }
+.multikill.is-out { opacity: 0; transition: opacity .35s ease; }
+@keyframes mk-pop {
+  0%   { transform: translateX(-50%) scale(.6); opacity: 0; }
+  60%  { transform: translateX(-50%) scale(1.12); opacity: 1; }
+  100% { transform: translateX(-50%) scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .multikill { animation: none; }
+}
+
+
+/* ---------- local seat colour picker ---------- */
+.seat-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
+.seat-colour {
+  width: 34px; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0;
+  border-radius: 9px;
+  background: rgba(20, 24, 32, .6);
+  border: 1px solid var(--rivet);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.seat-colour:hover { border-color: rgba(255, 255, 255, .4); }
+.seat-colour.is-locked { opacity: .5; cursor: not-allowed; }
+.seat-chip {
+  width: 20px; height: 20px;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25), 0 1px 2px rgba(0, 0, 0, .5);
+}
