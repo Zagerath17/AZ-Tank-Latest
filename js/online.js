@@ -20,7 +20,7 @@
 // Authority model: each client simulates its own tank and reports
 // its own shots/death. The "controller" (host, or the first human
 // if the host left) also simulates the bots and pushes new rounds.
-// Colors come from join order. Max 4 players (bots count).
+// Colors come from join order. Max MAX_PLAYERS tanks (bots count).
 // ================================================================
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG, paintVar } from "./main.js";
@@ -36,7 +36,9 @@ import { startChat, stopChat, updateChatColors } from "./chat.js";
 import { AI_LEVELS } from "./ai.js";
 
 const FB_VERSION = "10.12.2";
-const MAX_PLAYERS = 4;
+// Custom lobbies hold up to eight tanks. (Ranked still matchmakes to
+// 2 or 4 — this is just the ceiling.)
+const MAX_PLAYERS = 8;
 const SHOT_TTL = 7000; // ms before a shot record is cleaned up
 
 let fb = null;      // firebase handle bundle
@@ -313,7 +315,7 @@ export async function joinLobby(code) {
 
   if (!ids.includes(myId())) {
     if (lobby.state !== "waiting") throw new Error("That match has already started.");
-    if (ids.length >= MAX_PLAYERS) throw new Error("Lobby is full — 4 tanks max.");
+    if (ids.length >= MAX_PLAYERS) throw new Error(`Lobby is full — ${MAX_PLAYERS} tanks max.`);
     await f.set(f.ref(f.db, `lobbies/${code}/players/${myId()}`), {
       joinedAt: f.serverTimestamp(),
       name: social.getAccount()?.name ?? null,
@@ -913,7 +915,28 @@ function beginOnlineGame(code, lobby) {
         }
       }, SHOT_TTL);
     },
-    sendDead: (id) => write(`players/${id}/dead`, true),
+    // Shooter-authoritative hits: the SHOOTER decides a hit landed and
+    // posts it to the VICTIM's inbox. The victim stays the authority on
+    // its own health, so hp can't diverge — but what the shooter saw is
+    // what actually counts, which is the fix for "I hit them and
+    // nothing happened".
+    sendHit: (victimId, key, hit) => {
+      write(`players/${victimId}/hits/${key}`, hit);
+      setTimeout(() => {
+        if (current && fb) {
+          try {
+            fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${victimId}/hits/${key}`)).catch(() => {});
+          } catch (e) { /* invalid key — nothing to clean */ }
+        }
+      }, SHOT_TTL);
+    },
+    // The victim names its killer so the KILLER's client can score the
+    // streak — damage resolves on the victim's machine, so this is the
+    // only way they'd ever learn about their own multi-kill.
+    sendDead: (id, byId) => {
+      write(`players/${id}/dead`, true);
+      if (byId) write(`players/${id}/deadBy`, byId);
+    },
     sendGear: (key, gear) => write(`gear/${key}`, gear),
     sendGearRemove: (key) => write(`gear/${key}`, null),
     sendPickup: (gearKey, pid, type) => {
@@ -985,7 +1008,7 @@ function renderLobby(code, lobby) {
 
   const myIndex = entries.findIndex(([id]) => id === me);
   if (myIndex === -1) { toast("You were removed from the lobby."); exitToOnline(); return; }
-  if (myIndex >= MAX_PLAYERS) { toast("Lobby is full — 4 tanks max."); leaveLobby(); return; }
+  if (myIndex >= MAX_PLAYERS) { toast(`Lobby is full — ${MAX_PLAYERS} tanks max.`); leaveLobby(); return; }
 
   // Host migration: if the host vanished, the oldest HUMAN claims it.
   const hostP = lobby.players?.[lobby.hostId];

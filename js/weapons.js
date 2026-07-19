@@ -63,8 +63,9 @@ export const SNIPER = {
   shots: 2,          // two rounds total
   rangeCells: 5,     // the bullet dies after this many cells
   previewCells: 3,   // aim preview reaches this far (no bounce)
-  speed: 4.2,        // × normal bullet — a fast round
+  speed: 2.1,        // × normal bullet — halved, so it's readable in flight
   r: 0.75,           // between a basic ball (1.0) and an MG ball (0.5)
+  shotGapMs: 1000,   // forced one-second beat between the two rounds
 };
 
 export const BOOST = {
@@ -80,7 +81,7 @@ export const PHASE = {
 // Armour: a 4-point shield that soaks damage before your health, for
 // 20 s. Shows as a blue glow around the tank.
 export const ARMOUR = {
-  hp: 4,
+  hp: 6,
   durationMs: 20000,
 };
 
@@ -100,7 +101,7 @@ export const HEAL = {
 export const MUD = {
   radiusCells: 0.55,
   slow: 0.3,          // 70% slow-down
-  lifeMs: 15000,
+  lifeMs: 30000,
 };
 
 // Mortar: indirect fire. The shot is aimed at the mouse, snapped to
@@ -111,10 +112,19 @@ export const MUD = {
 // (no stepwise jumps). A pulsing red marker warns the landing cell;
 // impact throws a dark smoke cloud over it.
 export const MORTAR = {
-  rangeCells: 5,
-  baseCellsPerSec: 2,   // launch speed
+  // The target is a grid INTERSECTION — the point where four cells meet
+  // — and the blast covers all four of them (a 2x2 footprint).
+  // Reach is measured in HALF-cells: you can drop it between 2 and 5
+  // half-cells out, steered with your movement controls while the tank
+  // is planted.
+  minHalfCells: 2,
+  maxHalfCells: 5,
+  blastCells: 1.0,      // blast RADIUS in cells → 2-cell span → 2x2 cells
+  baseCellsPerSec: 1.5, // launch speed (25% slower than before)
   accelPerCell: 0.4,    // +40% of base per cell traveled (linear ramp)
   cloudMs: 1100,        // the dark cloud lingers this long
+  // Kept for the AI's range checks: the furthest it can ever land.
+  rangeCells: 2.5,
 };
 
 // Total flight time (ms) to cover `distCells`:
@@ -141,14 +151,15 @@ export function mortarDistAt(elapsedMs, distCells) {
 // eats projectiles (they don't bounce off it — they're consumed). It
 // takes different hit-values per weapon, and expires after 10 s.
 export const WALL = {
-  lifeMs: 10000,
+  lifeMs: 20000,
   lengthCells: 0.5,  // half a cell long
   thickCells: 0.1067, // slab thickness (2/3 of the original 0.16)
   // The wall absorbs 6 points of damage — the same pool as a tank —
   // and takes the SAME per-weapon damage values as a tank does. So a
-  // laser (8) or big cannon ball (6) shatters it in one hit, three
-  // basic shots (2 each) chip it down, six MG rounds do it, etc.
-  hp: 6,
+  // Tough cover: six basic shots (2 each) chip it down, two laser
+  // hits (7) break it, a big cannon ball (5) plus a follow-up, or a
+  // dozen MG rounds.
+  hp: 12,
 };
 
 export const MG = {
@@ -175,7 +186,7 @@ export const ROCKET = {
 export const CANNON = {
   speed: 0.55,       // one slow-ish projectile
   r: 1.62,           // big ball, 8% bigger than before
-  lifeMs: 3500,
+  lifeMs: 7000,     // twice as long adrift before it self-detonates
   shrapN: 36,        // irregular shrapnel burst on expiry / tank hit
   shrapSpeed: 1.1,
   shrapR: 0.6,

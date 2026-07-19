@@ -310,8 +310,12 @@ export function botActions(t, world, dt, now) {
 
     // Lob when the target is within reach, after a per-tier reload
     // cadence and a probability gate.
-    const inReach = dist <= (MORTAR.rangeCells - 0.25) * cell;
-    if (inReach && now >= (ai.mortarAt ?? 0) && Math.random() < (P.fireProb ?? 0.9)) {
+    const inReach = dist <= MORTAR.rangeCells * cell
+      && dist >= (MORTAR.minHalfCells / 2) * cell;
+    // The mortar shares the SAME reaction gate as every other weapon —
+    // it can't be lobbed the instant the launcher is picked up either.
+    if (inReach && now >= (ai.mortarAt ?? 0) && now >= (ai.fireAt ?? 0)
+        && Math.random() < (P.fireProb ?? 0.9)) {
       ai.mortarAt = now + (P.cooldown ?? 1.2) * 1000 + 500;
       acts.shoot = true;
     }
@@ -339,6 +343,27 @@ export function botActions(t, world, dt, now) {
   if (los && !ai.prevLos) ai.fireAt = Math.max(ai.fireAt, now + P.react * 1000);
   if (!los) { ai.burstLeft = 0; ai.pushUntil = 0; } // the look is gone
   ai.prevLos = los;
+
+  // Reaction delay on ACQUIRING AN ABILITY. Picking something up is a
+  // stimulus like any other, and it needs the SAME think-time as
+  // noticing a target or spotting an incoming shell. Without this, a
+  // bot that walks over a laser while already looking down a corridor
+  // at you fires the instant the crate lands — no human could. This
+  // applies to every slot, so nothing (laser, sniper, mortar, wall,
+  // boost…) is usable the millisecond it's grabbed.
+  const reactMs = (P.react ?? 0.3) * 1000;
+  if (t.weapon !== ai.lastWeapon) {
+    ai.lastWeapon = t.weapon;
+    if (t.weapon) ai.fireAt = Math.max(ai.fireAt ?? 0, now + reactMs);
+  }
+  if (t.defense !== ai.lastDefense) {
+    ai.lastDefense = t.defense;
+    ai.defReadyAt = t.defense ? now + reactMs : 0;
+  }
+  if (t.agility !== ai.lastAgility) {
+    ai.lastAgility = t.agility;
+    ai.agiReadyAt = t.agility ? now + reactMs : 0;
+  }
 
   /* ---- 3b. tactical abilities: used with PURPOSE, never on grab ---- */
   // Agility (boost/phase) and defense (wall) live in their own loadout
@@ -372,7 +397,7 @@ export function botActions(t, world, dt, now) {
         ai.agiAt = now + 250 + Math.random() * 350;
       }
       if (!want) ai.agiWant = false; // situation passed — reset
-      if (ai.agiWant && now >= ai.agiAt) {
+      if (ai.agiWant && now >= ai.agiAt && now >= (ai.agiReadyAt ?? 0)) {
         ai.agiWant = false;
         if (t.agility === "phase") {
           ai.phaseGoal = { x: target.x, y: target.y };
@@ -426,7 +451,7 @@ export function botActions(t, world, dt, now) {
           : now + 250 + Math.random() * 350;
       }
       if (!want) ai.defWant = false;
-      if (ai.defWant && now >= ai.defAt) {
+      if (ai.defWant && now >= ai.defAt && now >= (ai.defReadyAt ?? 0)) {
         ai.defWant = false;
         acts.def = true;
       }
@@ -479,11 +504,10 @@ export function botActions(t, world, dt, now) {
     const wantW = laserAim != null
       ? laserAim // aim straight down the (possibly reflected) beam
       : Math.atan2(aimY - t.y, aimX - t.x) + ai.wobble;
-    // Remember where the AI wants to point so the RENDERER can aim the
-    // turret there independently of the hull — bots track the target
-    // with the barrel, not just by turning the whole body.
+    // The barrel is welded to the hull for everyone now, so there is
+    // no separate turret to steer — the AI simply turns its body to
+    // point wantW, exactly like a player has to.
     ai.aimW = wantW;
-    t.aiAim = wantW;
 
     // Combat movement (when not busy dodging): hold the standoff
     // band — advance when far, KITE backward when the enemy pushes
@@ -576,10 +600,9 @@ export function botActions(t, world, dt, now) {
     // Fire when aligned and in effective range — but VERIFY the
     // ricochet path first, and respect the ammo count: never
     // dry-fire; on reserve rounds, only shots verified to land.
-    // Alignment is checked on the TURRET (where the barrel actually
-    // points) since bots now aim the turret independently of the hull.
-    const aimNow = t.turret ?? t.a;
-    const aligned = Math.abs(angleDiff(aimNow, wantW)) < P.aimTol;
+    // The barrel points where the hull points, so alignment is simply
+    // the hull's heading error against the desired bearing.
+    const aligned = Math.abs(angleDiff(t.a, wantW)) < P.aimTol;
     // The sniper's own range caps where its round actually reaches;
     // otherwise use the tier's effective fire range.
     const fireRangeCells = t.weapon === "sniper" ? SNIPER.rangeCells

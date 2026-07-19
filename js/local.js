@@ -10,8 +10,8 @@
 // ================================================================
 
 import { onEnter, onLeave, COLORS, tankSVG, paintVar } from "./main.js";
-import { freeBotSkin } from "./skins.js";
-import { getSkin, getPattern, getPatternColors } from "./social.js";
+import { PALETTE } from "./palette.js";
+import { freeBotSkin, BOT_SKINS } from "./skins.js";
 import { startLocalGame, GEAR_CAP_LIMIT } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
@@ -139,87 +139,144 @@ function renderLocalSettings() {
   if (note) note.textContent = on ? "" : "No abilities selected — this match spawns no pickups.";
 }
 
-const HUMAN = COLORS[0];           // seat 1 is always the human ("You")
-const BOT_SEATS = COLORS.slice(1); // the rest can hold bots
-const bots = { green: null, blue: null, yellow: null };
+// ---- seats -------------------------------------------------------
+// Local play is couch multiplayer: up to FOUR people on one keyboard,
+// plus bots in any spare seat. Every seat is one of:
+//   "off"  — empty
+//   "human"— a local player (uses that seat's keybinds)
+//   <tier> — a bot at that difficulty
+// Seat 1 starts as a human so the screen is never empty.
+const SEATS = COLORS;                    // red, green, blue, yellow
+const seat = { red: "human", green: "off", blue: "off", yellow: "off" };
+
+// Shop paint and patterns do NOT carry into local play — everyone picks
+// a primary colour here, and no two tanks at the table may share one.
+const PICKABLE = BOT_SKINS.slice();      // the seven primaries
 const paint = { red: "red", green: "green", blue: "blue", yellow: "yellow" };
 
-const BOT_CYCLE = [null, ...AI_LEVELS];
+// Cycle: off → each bot tier → human → off …
+const SEAT_CYCLE = ["off", ...AI_LEVELS, "human"];
 
-function active(slot) {
-  return slot === HUMAN || !!bots[slot];
-}
+function isActive(slot) { return seat[slot] !== "off"; }
+function isHumanSeat(slot) { return seat[slot] === "human"; }
+function isBotSeat(slot) { return isActive(slot) && !isHumanSeat(slot); }
+function humanCount() { return SEATS.filter(isHumanSeat).length; }
 
 function takenColors(except) {
   const s = new Set();
-  for (const slot of COLORS) {
-    if (slot !== except && active(slot)) s.add(paint[slot]);
+  for (const slot of SEATS) {
+    if (slot !== except && isActive(slot)) s.add(paint[slot]);
   }
   return s;
 }
 
-// The human always wears their equipped shop paint. Bots take a
-// random primary that nobody at the table is wearing — re-rolled only
-// when their current one would clash. Impossible is locked to black.
+// Every active seat must hold a colour nobody else is using.
+// Impossible bots are locked to black (their signature).
 function ensurePaint(slot) {
-  if (slot === HUMAN) { paint[slot] = getSkin(); return; }
-  if (bots[slot] === "impossible") { paint[slot] = "black"; return; }
-  if (!bots[slot]) { paint[slot] = null; return; }
+  if (!isActive(slot)) return;
+  if (seat[slot] === "impossible") { paint[slot] = "black"; return; }
   const taken = takenColors(slot);
   if (!paint[slot] || paint[slot] === "black" || taken.has(paint[slot])) {
-    paint[slot] = freeBotSkin(taken);
+    paint[slot] = PICKABLE.find((c) => !taken.has(c)) ?? freeBotSkin(taken);
   }
 }
 
-// Repaint every seat, human first so the bots dodge the player.
 function ensureAllPaint() {
-  ensurePaint(HUMAN);
-  for (const slot of BOT_SEATS) ensurePaint(slot);
+  // Humans first so they keep their pick and bots move aside.
+  for (const slot of SEATS) if (isHumanSeat(slot)) ensurePaint(slot);
+  for (const slot of SEATS) if (isBotSeat(slot)) ensurePaint(slot);
+}
+
+// Advance a seat's colour to the next free primary (wrapping).
+function cyclePaint(slot) {
+  if (!isActive(slot) || seat[slot] === "impossible") return;
+  const taken = takenColors(slot);
+  const from = PICKABLE.indexOf(paint[slot]);
+  for (let i = 1; i <= PICKABLE.length; i++) {
+    const c = PICKABLE[(from + i + PICKABLE.length) % PICKABLE.length];
+    if (!taken.has(c)) { paint[slot] = c; return; }
+  }
 }
 
 /* ---------- render ---------- */
 
+const KEY_HINT = {
+  red: "WASD · Space/E/Shift",
+  green: "Arrows · / · . · ,",
+  blue: "IJKL · U/O/P",
+  yellow: "Numpad 8456 · 0/7/9",
+};
+
+function seatLabel(slot) {
+  if (isHumanSeat(slot)) return `Player ${SEATS.indexOf(slot) + 1}`;
+  if (isBotSeat(slot)) {
+    const n = SEATS.filter(isBotSeat).indexOf(slot) + 1;
+    return `Bot ${n}`;
+  }
+  return `Seat ${SEATS.indexOf(slot) + 1}`;
+}
+
 function render() {
   const host = document.getElementById("local-slots");
 
-  host.innerHTML = COLORS.map((slot) => {
-    const isHuman = slot === HUMAN;
-    const bot = bots[slot];
+  host.innerHTML = SEATS.map((slot) => {
+    const mode = seat[slot];
     const col = paint[slot];
+    const human = isHumanSeat(slot);
+    const bot = isBotSeat(slot);
 
-    const status = isHuman ? "YOU" : bot ? "BOT" : "OPEN";
-    const prompt = isHuman
-      ? "WASD · mouse · LMB/RMB/Shift"
+    const status = human ? "PLAYER" : bot ? "BOT" : "OPEN";
+    const prompt = human
+      ? KEY_HINT[slot]
       : bot
         ? "A bot drives this tank"
-        : "Add a bot to fill this seat";
+        : "Tap to seat a player or bot";
 
-    // The human seat has no bot chip; bot seats cycle difficulty.
-    const chip = isHuman
-      ? ""
-      : `<button class="bot-chip" data-bot="${slot}">
-          ${bot ? "BOT · " + bot.toUpperCase() : "+ ADD BOT"}
-        </button>`;
+    const chipText = mode === "off"
+      ? "+ ADD"
+      : human ? "PLAYER" : "BOT · " + mode.toUpperCase();
+
+    // Colour swatch doubles as the picker (locked for Impossible).
+    const locked = mode === "impossible";
+    const swatch = isActive(slot)
+      ? `<button class="seat-colour ${locked ? "is-locked" : ""}"
+                 data-colour="${slot}" ${locked ? "disabled" : ""}
+                 title="${locked ? "Impossible bots are always black" : "Change colour"}">
+           <span class="seat-chip" style="background:${PALETTE[col] ?? "#888"}"></span>
+         </button>`
+      : "";
 
     return `
-      <div class="slot ${isHuman ? "joined" : ""} ${bot ? "botted" : ""}" style="${paintVar(col)}"
-           data-slot="${slot}">
-        ${tankSVG(col)}
-        <span class="slot-name">${isHuman ? "You" : "Bot " + (BOT_SEATS.indexOf(slot) + 1)}</span>
+      <div class="slot ${human ? "joined" : ""} ${bot ? "botted" : ""}"
+           style="${paintVar(col ?? "red")}" data-slot="${slot}">
+        ${tankSVG(col ?? "red")}
+        <span class="slot-name">${seatLabel(slot)}</span>
         <span class="slot-status">${status}</span>
         <span class="slot-prompt">${prompt}</span>
-        ${chip}
+        <div class="seat-row">
+          <button class="bot-chip" data-seat="${slot}">${chipText}</button>
+          ${swatch}
+        </div>
       </div>`;
   }).join("");
 
-  // Bot chip cycles difficulty (only on the three bot seats).
-  host.querySelectorAll(".bot-chip").forEach((btn) => {
+  // The chip cycles the seat: off → bot tiers → player → off.
+  host.querySelectorAll("[data-seat]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const slot = btn.dataset.bot;
-      bots[slot] = BOT_CYCLE[(BOT_CYCLE.indexOf(bots[slot]) + 1) % BOT_CYCLE.length];
-      paint[slot] = null;  // fresh coat for the new occupant
+      const slot = btn.dataset.seat;
+      seat[slot] = SEAT_CYCLE[(SEAT_CYCLE.indexOf(seat[slot]) + 1) % SEAT_CYCLE.length];
+      paint[slot] = null;      // fresh coat for the new occupant
       ensureAllPaint();
+      render();
+    });
+  });
+
+  // The swatch cycles this seat's colour through the free primaries.
+  host.querySelectorAll("[data-colour]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cyclePaint(btn.dataset.colour);
       render();
     });
   });
@@ -228,19 +285,25 @@ function render() {
 }
 
 function updateStart() {
-  const botCount = BOT_SEATS.filter((c) => bots[c]).length;
-  document.getElementById("local-start").disabled = botCount < 1;
+  const humans = humanCount();
+  const bots = SEATS.filter(isBotSeat).length;
+  const total = humans + bots;
+  const ok = humans >= 1 && total >= 2;
+  document.getElementById("local-start").disabled = !ok;
   document.getElementById("local-hint").textContent =
-    botCount < 1
-      ? "Add at least 1 bot to battle against."
-      : `You vs ${botCount} bot${botCount > 1 ? "s" : ""}.`;
+    humans < 1
+      ? "Seat at least one player."
+      : total < 2
+        ? "Add another player or a bot to battle."
+        : `${humans} player${humans > 1 ? "s" : ""}` +
+          (bots ? ` vs ${bots} bot${bots > 1 ? "s" : ""}.` : " — free-for-all.");
 }
 
 /* ---------- init ---------- */
 
 export function initLocal() {
   onEnter("screen-local", () => {
-    ensureAllPaint(); // picks up any paint swapped in the shop since
+    ensureAllPaint(); // keep every seat on a free primary
     render();
     renderLocalSettings();
   });
@@ -266,15 +329,17 @@ export function initLocal() {
   });
 
   document.getElementById("local-start").addEventListener("click", () => {
-    const specs = COLORS
-      .filter((c) => active(c))
+    // Local play uses the primaries picked here — shop paint and
+    // patterns are an online/profile thing and don't carry over, so
+    // everyone at the table reads clearly and nobody clashes.
+    const specs = SEATS
+      .filter(isActive)
       .map((c) => ({
         slot: c,
         color: paint[c],
-        bot: c === HUMAN ? null : bots[c],
-        // Only the human carries a bought pattern; bots run solid.
-        pattern: c === HUMAN ? getPattern() : "solid",
-        patColors: c === HUMAN ? getPatternColors() : [],
+        bot: isHumanSeat(c) ? null : seat[c],
+        pattern: "solid",
+        patColors: [],
       }));
     sessionStorage.setItem("tank.localPlayers", JSON.stringify(specs));
     startLocalGame(specs, localSettingsToOpts());

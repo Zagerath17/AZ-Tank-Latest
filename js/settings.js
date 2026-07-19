@@ -15,18 +15,39 @@ const ACTIONS = [
   ["down", "Reverse"],
   ["left", "Turn left"],
   ["right", "Turn right"],
-  ["shoot", "Shoot"],
+  ["shoot", "Offense"],
+  ["def", "Defense"],
+  ["agi", "Agility"],
 ];
 
-// Offline is a single player (WASD + mouse), so there is exactly one
-// editable control set.
-const BIND_SLOTS = ["red"];
+// Local play seats up to four players on one keyboard, so there are
+// four editable control sets.
+const BIND_SLOTS = ["red", "green", "blue", "yellow"];
 
-// ONE control set. (Older builds stored binds for four local players;
-// those legacy slots are ignored on load and dropped on the next save,
-// so stale defaults like yellow's KeyY-to-shoot can't ghost-fire.)
+// FOUR control sets — one per local seat. Couch play is back now that
+// the mouse is gone: every action is a key, so four people can share a
+// keyboard.
 const DEFAULTS = {
-  red: { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", shoot: "Space" },
+  // P1 — left hand: WASD cluster.
+  red: {
+    up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD",
+    shoot: "Space", def: "KeyE", agi: "ShiftLeft",
+  },
+  // P2 — right hand: arrow cluster.
+  green: {
+    up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight",
+    shoot: "Slash", def: "Period", agi: "Comma",
+  },
+  // P3 — number-pad-ish island on the right of the board.
+  blue: {
+    up: "KeyI", down: "KeyK", left: "KeyJ", right: "KeyL",
+    shoot: "KeyU", def: "KeyO", agi: "KeyP",
+  },
+  // P4 — numpad proper.
+  yellow: {
+    up: "Numpad8", down: "Numpad5", left: "Numpad4", right: "Numpad6",
+    shoot: "Numpad0", def: "Numpad7", agi: "Numpad9",
+  },
 };
 
 let binds = load();
@@ -87,7 +108,7 @@ function render() {
     <section class="panel bind-panel" style="${paintVar(color)}">
       <header class="bind-head">
         ${tankSVG(color)}
-        <h3>Keyboard controls</h3>
+        <h3>Player ${BIND_SLOTS.indexOf(color) + 1}</h3>
       </header>
       <div class="bind-rows">
         ${ACTIONS.map(([action, label]) => `

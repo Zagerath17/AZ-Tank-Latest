@@ -68,15 +68,15 @@ const BULLET_LIFE = 6000;   // ms a bullet keeps bouncing
 // Every tank starts with 6 HP. Weapons chip it down; at 0 the tank is
 // destroyed. (Environmental deaths — the ring, the collapse — always
 // kill outright regardless of HP.)
-const TANK_HP = 6;
+const TANK_HP = 10;
 const DMG = {
   basic: 2,       // basic cannon ball
   mg: 1,          // machine-gun ball
-  cannonBall: 6,  // the big cannon's direct ball hit
+  cannonBall: 5,  // the big cannon's direct ball hit
   shrapnel: 2,    // each fractal from the cannon
-  rocket: 5,      // homing rocket
-  laserBase: 8,   // laser at zero bounces; −1 per bounce, min 1
-  sniper: 4,      // sniper slug
+  rocket: 7,      // homing rocket
+  laserBase: 7,   // laser at zero bounces; −1 per bounce, min 1
+  sniper: 7,      // sniper slug
 };
 
 // The basic gun is a 3-round magazine: consecutive shots come 0.5 s
@@ -111,9 +111,14 @@ const NET_SEND_MS = 75;        // base cadence while moving
 const NET_SEND_MIN_MS = 40;    // floor for urgent (sharp-turn) sends
 const NET_IDLE_MS = 450;       // heartbeat while parked
 const NET_INTERP_MS = 130;     // remotes render this far in the past
-const NET_EXTRAP_MS = 250;     // max dead-reckoning past the buffer
+const NET_EXTRAP_MS = 160;     // max dead-reckoning past the buffer
 const NET_BUF_MAX = 24;        // ~1.8 s of history
-const NET_SNAP_DIST = CELL * 2.5;   // beyond this, a jump is deliberate
+const NET_SNAP_DIST = CELL * 2.5;   // beyond this, catch up aggressively
+const NET_TELEPORT_DIST = CELL * 6; // only THIS is a real discontinuity
+// Hard ceiling on tanks in one match. Custom lobbies fill up to this;
+// offline and ranked use fewer. Must match online.js's MAX_PLAYERS.
+export const MAX_TANKS = 8;
+const NET_CATCHUP_SPEED = 6;        // × MOVE_SPEED while closing a big gap
 const NET_CORRECT_SPEED = 2.2;      // × MOVE_SPEED correction cap
 // Arenas grouped by grid size. 1v1 (ranked) draws from small+medium,
 // 2v2 (ranked) from large+xl; casual/offline use the whole range.
@@ -137,19 +142,15 @@ const MAZE_SHAPES_NONRECT = MAZE_SHAPES.filter((s) => s !== "rect");
 /* ---------- module state ---------- */
 
 let S = null;
-let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, loadoutHudEl, healthHudEl, armourHudEl;
+let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, loadoutHudEl, healthHudEl, armourHudEl, multiKillEl;
 const held = new Set();
 // Turret aiming: the mouse position in WORLD coordinates, whether the
 // player has aimed at all yet (so we can fall back to hull-facing on
 // touch / before first move), and whether the fire button (LMB) is down.
-let mouseWorld = { x: 0, y: 0 };
-let hasMouseAim = false;
 // True on phones/tablets: mouse events here are SYNTHESISED from taps,
 // so we ignore them for aiming — the mobile turret stays locked forward.
 const IS_TOUCH_DEVICE = (typeof navigator !== "undefined" && navigator.maxTouchPoints > 0)
   || (typeof window !== "undefined" && "ontouchstart" in window);
-let mouseFire = false;  // LMB — offense (special gun, else basic shots)
-let mouseDef = false;   // RMB — defense (wall)
 // Mobile: left stick drives the hull directionally (moveVec, components
 // in [-1,1] — the hull turns to face the stick and drives that way),
 // right stick aims the turret (touchAim = world angle, held after
@@ -172,6 +173,7 @@ export function initGame() {
   loadoutHudEl = document.getElementById("loadout-hud");
   healthHudEl = document.getElementById("health-hud");
   armourHudEl = document.getElementById("armour-hud");
+  multiKillEl = document.getElementById("multikill");
   touchPad = document.getElementById("touch-pad");
   scoreEl = document.getElementById("game-score");
 
@@ -256,31 +258,11 @@ export function initGame() {
     slot.addEventListener("contextmenu", (e) => e.preventDefault());
   });
 
-  // Turret aim: track the mouse over the arena in WORLD space using the
-  // same view transform draw() lays down (stored on S.view each frame).
-  const toWorld = (e) => {
-    if (!S || !S.view) return;
-    if (IS_TOUCH_DEVICE) return; // taps on a phone must NOT aim the turret
-    const r = canvas.getBoundingClientRect();
-    const cx = e.clientX - r.left;
-    const cy = e.clientY - r.top;
-    mouseWorld.x = (cx - S.view.ox) / S.view.s;
-    mouseWorld.y = (cy - S.view.oy) / S.view.s;
-    hasMouseAim = true;
-  };
-  canvas.addEventListener("mousemove", toWorld);
-  // Left mouse button = FIRE (default). Right-click menu is suppressed
-  // over the arena so aiming near the edge never pops a context menu.
-  canvas.addEventListener("mousedown", (e) => {
-    if (IS_TOUCH_DEVICE) return; // touch fires via the loadout buttons
-    toWorld(e);
-    if (e.button === 0) { mouseFire = true; e.preventDefault(); }
-    if (e.button === 2) { mouseDef = true; e.preventDefault(); }
-  });
-  window.addEventListener("mouseup", (e) => {
-    if (e.button === 0) mouseFire = false;
-    if (e.button === 2) mouseDef = false;
-  });
+  // NO MOUSE INPUT. The turret is welded to the hull, so there is
+  // nothing to aim with a pointer — you turn the whole tank to aim.
+  // Firing is on the keyboard (offense/defense/agility binds) or, on
+  // touch, the three loadout buttons. We still swallow the arena's
+  // context menu so a stray right-click doesn't pop one mid-match.
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
@@ -357,6 +339,7 @@ export function stopGame() {
   touchPad.parentElement?.classList.remove("has-touch");
   if (scoreEl) scoreEl.innerHTML = "";
   if (loadoutHudEl) loadoutHudEl.hidden = true;
+  if (multiKillEl) { multiKillEl.hidden = true; multiKillEl._sig = undefined; }
   if (armourHudEl) armourHudEl.hidden = true;
   if (healthHudEl) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
   S = null;
@@ -425,7 +408,15 @@ export function onlineLobbyUpdate(lobby) {
     }
     t.gone = false;
 
-    if (p.dead && !t.dead) t.dead = true;
+    if (p.dead && !t.dead) {
+      t.dead = true;
+      // The victim names its killer. If that's me, this is my kill —
+      // the only way my client learns about it, since damage is
+      // resolved on the victim's machine.
+      if (p.deadBy && S.myId && p.deadBy === S.myId) {
+        registerKill(S.myId, performance.now());
+      }
+    }
 
     // Equipped weapon (drives the barrel sprite AND hitbox everywhere).
     const gun = p.gun ?? null;
@@ -468,6 +459,21 @@ export function onlineLobbyUpdate(lobby) {
           if (seen.has(key)) continue;
           seen.add(key);
           spawnShot(t.id, sh);
+        }
+      }
+      // Inbound authoritative hits, but only for MY tank — I'm the one
+      // who owns my health. Deduped by key so a re-delivered packet
+      // can't double-count.
+      if (p.hits && t.local) {
+        const seenH = (S.seenHits ??= {});
+        const mine = (seenH[t.id] ??= new Set());
+        for (const [key, h] of Object.entries(p.hits)) {
+          if (mine.has(key)) continue;
+          mine.add(key);
+          if (!t.dead && !t.gone) {
+            t.lastHitAt = performance.now();
+            damageTank(t, h.d ?? 1, h.by ?? null);
+          }
         }
       }
     }
@@ -514,13 +520,14 @@ function begin(opts) {
   S = {
     mode: opts.mode,
     myId: opts.myId ?? null,
-    roster: opts.roster.slice(0, 4),
+    roster: opts.roster.slice(0, MAX_TANKS),
     scores: Object.fromEntries(opts.roster.map((p) => [p.id, 0])),
     present: new Set(opts.roster.map((p) => p.id)),
     isController: opts.mode === "local",
     sendPos: opts.sendPos,
     sendShot: opts.sendShot,
     sendDead: opts.sendDead,
+    sendHit: opts.sendHit,
     sendNextRound: opts.sendNextRound,
     sendGear: opts.sendGear,
     sendGearRemove: opts.sendGearRemove,
@@ -576,9 +583,6 @@ function begin(opts) {
   startRound(opts.seed);
 
   held.clear();
-  mouseFire = false;
-  mouseDef = false;
-  hasMouseAim = false;
   moveVec.x = 0; moveVec.y = 0; moveVecActive = false;
   touchAim = 0; touchAimActive = false;
   touchFire = false; touchDef = false; touchAgi = false;
@@ -664,6 +668,10 @@ function startRound(seed) {
   // (clamped 10–60 s). The warning blink can't outrun the period, so a
   // fast 10 s zone still gets a sensible heads-up.
   const zoneOn = S.ranked || !!S.zoneOn;
+  // Remember the RESOLVED answer. The renderer used to re-derive this
+  // from S.ranked alone, which made the zone invisible (but still
+  // lethal) in custom lobbies and offline matches.
+  S.zoneActive = zoneOn;
   S.zonePeriod = S.ranked
     ? ZONE_PERIOD
     : Math.max(ZONE_MIN_PERIOD, Math.min(ZONE_MAX_PERIOD, (S.zoneSec ?? 30) * 1000));
@@ -685,7 +693,10 @@ function startRound(seed) {
   S.beams = [];
   S.booms = [];
   S.seenShots = {};
+  S.seenHits = {};
+  S.touchSeat = (S.roster.find((p) => !p.bot) ?? {}).id ?? null;
   S.banner = null;
+  resetMultiKill();
   S.personalMsg = null;
   S.roundOverAt = 0;
   S.sentNext = false;
@@ -697,6 +708,8 @@ function startRound(seed) {
   // same side facing the enemy duo. For a shaped maze a raw corner may
   // fall outside the silhouette, so snap each to the nearest playable
   // cell.
+  const midC = Math.floor((cols - 1) / 2);
+  const midR = Math.floor((rows - 1) / 2);
   const rawCorners = S.teams
     ? [
         [0, 0],               // team 0, first member
@@ -705,10 +718,17 @@ function startRound(seed) {
         [cols - 1, rows - 1], // team 1, second member
       ]
     : [
+        // Four corners first (best separation for small lobbies), then
+        // the four edge mid-points so an 8-tank lobby still starts
+        // spread evenly around the rim.
         [0, 0],
         [cols - 1, rows - 1],
         [cols - 1, 0],
         [0, rows - 1],
+        [midC, 0],
+        [midC, rows - 1],
+        [0, midR],
+        [cols - 1, midR],
       ];
   // snapSpawn is the maze generator's OWN rule (nearest playable cell
   // with room to move), so the tanks land exactly on the cells the
@@ -719,10 +739,12 @@ function startRound(seed) {
   // right pair) regardless of roster order.
   let seat0 = 0, seat1 = 0;
   const cornerFor = (spec, i) => {
-    if (!S.teams) return corners[i];
+    // Wrap rather than run off the end — a lobby can never out-number
+    // the spawn list now, but a stray index must not crash the match.
+    if (!S.teams) return corners[i % corners.length];
     const team = S.teams[spec.id] ?? 0;
     const idx = team === 0 ? seat0++ : 2 + seat1++;
-    return corners[Math.min(idx, 3)];
+    return corners[Math.min(idx, corners.length - 1)];
   };
 
   S.tanks = S.roster.map((spec, i) => {
@@ -799,8 +821,6 @@ function onKeyup(e) {
 
 function clearHeld() {
   held.clear();
-  mouseFire = false;
-  mouseDef = false;
   moveVec.x = 0; moveVec.y = 0; moveVecActive = false;
   touchAim = 0; touchAimActive = false;
   touchFire = false; touchDef = false; touchAgi = false;
@@ -819,17 +839,20 @@ function readActions(tank, binds) {
     shoot: false, def: false, agi: false,
   };
 
-  // ONE control set drives the human tank everywhere (the legacy
-  // multi-player slots are gone — no more ghost binds like the old
-  // yellow player's KeyY-to-shoot).
-  const set = binds.red ?? Object.values(binds)[0] ?? {};
-  for (const a of ["up", "down", "left", "right", "shoot"]) {
+  // Each seat has its OWN control set, so up to four people can share
+  // one keyboard in local play. Online there's a single local tank and
+  // it always sits in the first (red) seat's binds.
+  const seat = S.mode === "local" ? (tank.slot ?? tank.color) : "red";
+  const set = binds[seat] ?? binds.red ?? Object.values(binds)[0] ?? {};
+  for (const a of ["up", "down", "left", "right", "shoot", "def", "agi"]) {
     const code = set[a];
     if (code && held.has(code)) acts[a] = true;
   }
 
-  // Touch pad only ever drives the single local human tank.
-  if (!tank.bot) {
+  // Touch only ever drives ONE tank: there's a single pair of on-screen
+  // controls, so with several people sharing a keyboard it belongs to
+  // the first human seat and nobody else.
+  if (!tank.bot && tank.id === S.touchSeat) {
     // Left stick → DIRECTIONAL drive: the hull turns to face the stick
     // and moves that way (twin-stick style), rather than tank-style
     // turn/forward. We hand the movement code the stick's world angle
@@ -840,13 +863,11 @@ function readActions(tank, binds) {
       acts.moveAngle = Math.atan2(moveVec.y, moveVec.x);
       acts.moveMag = Math.min(1, (mag - DZ) / (1 - DZ)); // 0..1 past deadzone
     }
-    // Three activation controls, one per loadout category:
-    //   LMB / offense button  → offense (special gun, else basic shot)
-    //   RMB / defense button  → defense (wall)
-    //   LShift / agility button → agility (boost / phase)
-    if (mouseFire || touchFire) acts.shoot = true;
-    if (mouseDef || touchDef) acts.def = true;
-    if (held.has("ShiftLeft") || touchAgi) acts.agi = true;
+    // Three activation controls, one per loadout category. Keyboard
+    // binds are read above; the touch buttons OR in here.
+    if (touchFire) acts.shoot = true;
+    if (touchDef) acts.def = true;
+    if (touchAgi) acts.agi = true;
   }
   return acts;
 }
@@ -880,11 +901,11 @@ function frame(now) {
         x0: m.x, y0: m.y,
         x1: m.x + Math.cos(aim) * len, y1: m.y + Math.sin(aim) * len,
       });
-    } else if (t.weapon === "mortar" && !t.bot && t.local) {
-      // The shooter's own targeting reticle — where the shell will land
-      // if fired now. Only shown to the shooter (the in-flight red dot
-      // is what warns everyone else).
-      S.mortarAim = mortarTarget(t);
+    } else if (t.weapon === "mortar" && !t.bot && t.local && t.mortarAiming) {
+      // The shooter's own targeting reticle, shown only while the
+      // launcher is actually open (the tank is planted). The in-flight
+      // red dot is what warns everyone else.
+      S.mortarAim = t.mortarAim;
     }
   }
   // Bots treat every projectile as a bullet to dodge: minis, cannon
@@ -1059,6 +1080,22 @@ function stepTanks(now, dt) {
       // clip a wall, the turn is blocked until the tank backs off.
       const phasing = now < (t.phaseUntil ?? 0);
 
+      // MORTAR AIMING: the tank is planted while the reticle is open.
+      // Rather than skipping the rest of the tank's update (which would
+      // also skip zone damage, pickups and net sync), we steer the
+      // reticle with the movement inputs and then BLANK those inputs,
+      // so the drive/turn code below simply has nothing to act on.
+      if (t.mortarAiming) {
+        if (t.weapon !== "mortar" || t.dead || t.gone) {
+          cancelMortarAim(t); // lost the launcher — don't stay stuck
+        } else {
+          stepMortarAim(t, acts, dt);
+          acts.up = acts.down = acts.left = acts.right = false;
+          acts.moveAngle = null;
+          acts.moveMag = 0;
+        }
+      }
+
       // Directional (mobile stick) drive takes precedence: steer the
       // hull toward the stick's world angle by the shortest arc, capped
       // at the normal turn rate, and set forward throttle from how far
@@ -1163,32 +1200,13 @@ function stepTanks(now, dt) {
         if (clear) t.ejecting = false;
       }
 
-      // ---- Turret aim (barrel points independently of the hull) ----
-      // Human on desktop: slew the barrel toward the mouse, capped at
-      // 20% above the hull's turn speed. Human on TOUCH: there's no aim
-      // stick, so the turret is LOCKED facing forward (same heading as
-      // the hull) — you aim by pointing the whole tank. Bots aim with
-      // the hull (their AI turns the body onto the target).
-      if (t.bot) {
-        // Bots aim the barrel at their target INDEPENDENTLY of the hull
-        // (the AI stores its desired aim in t.aiAim). The turret slews
-        // at the capped turret speed, so it tracks smoothly rather than
-        // snapping — and can hold on a target while the body maneuvers.
-        const aimTarget = (t.aiAim != null) ? t.aiAim : t.a;
-        const cur = t.turret ?? t.a;
-        const step = TURRET_TURN_SPEED * dt;
-        const d = angleDiff(cur, aimTarget);
-        t.turret = cur + Math.max(-step, Math.min(step, d));
-      } else if (hasMouseAim) {
-        const aimTarget = Math.atan2(mouseWorld.y - t.y, mouseWorld.x - t.x);
-        const cur = t.turret ?? t.a;
-        const step = TURRET_TURN_SPEED * dt;
-        const d = angleDiff(cur, aimTarget);
-        t.turret = cur + Math.max(-step, Math.min(step, d));
-      } else {
-        // Touch (or before the first mouse move): turret faces forward.
-        t.turret = t.a;
-      }
+      // ---- Turret: WELDED TO THE HULL ----
+      // There is no independent turret control anywhere in the game any
+      // more — not for players (no mouse), not for bots. The barrel
+      // always points where the tank is facing, so aiming means turning
+      // the whole tank. Everything downstream still reads t.turret, so
+      // we just keep it pinned to the hull heading.
+      t.turret = t.a;
 
       // Three activation controls, edge-triggered (press, not hold):
       // LMB → offense / basic gun, RMB → defense, LShift → agility.
@@ -1253,16 +1271,21 @@ function stepTanks(now, dt) {
       if (st) {
         const dxs = st.x - t.x, dys = st.y - t.y;
         const err = Math.hypot(dxs, dys);
-        if (err > NET_SNAP_DIST) {
-          // A jump this size is by design (round spawn, removal glitch).
+        if (err > NET_TELEPORT_DIST) {
+          // Genuinely discontinuous (round spawn, respawn, rejoin).
+          // Nothing to smooth — just be where they are.
           t.x = st.x; t.y = st.y; t.a = st.a; t.turret = st.u;
         } else {
-          // Exponential pull with a hard speed ceiling: smooth for
-          // small errors, bounded (no warp) for big ones.
-          const k = 1 - Math.exp(-14 * dt);
+          // Everything else is CLOSED SMOOTHLY. A lag spike used to
+          // blow past the old 2.5-cell threshold and hard-snap, which
+          // is what read as a teleport. Now a big gap just means a
+          // higher speed ceiling: the tank sprints back onto its true
+          // position over a few frames instead of jumping there.
+          const k = 1 - Math.exp(-16 * dt);
           let mx = dxs * k, my = dys * k;
           const step = Math.hypot(mx, my);
-          const cap = MOVE_SPEED * NET_CORRECT_SPEED * dt;
+          const rate = err > NET_SNAP_DIST ? NET_CATCHUP_SPEED : NET_CORRECT_SPEED;
+          const cap = MOVE_SPEED * rate * dt;
           if (step > cap && step > 0) { mx *= cap / step; my *= cap / step; }
           t.x += mx;
           t.y += my;
@@ -1427,6 +1450,8 @@ function sendTypedShot(t, payload, now) {
 
 function clearWeapon(t, now) {
   t.weapon = null;
+  t.snNextAt = 0;
+  if (t.mortarAiming) cancelMortarAim(t);
   t.mgReadyAt = 0;
   t.mgIdleAt = 0;
   t.mgNext = 0;
@@ -1437,6 +1462,11 @@ function clearWeapon(t, now) {
 }
 
 function tryFire(t, now) { 
+  // Sniper: a forced beat between the two rounds, so it can't be
+  // double-tapped instantly. Blocks the second shot until the gap
+  // elapses (and blocks nothing else).
+  if (t.weapon === "sniper" && t.snNextAt && now < t.snNextAt) return;
+
   // A cannon ball you fired can be command-detonated: tap fire again
   // and it bursts wherever it is right now. (Give it a brief arming
   // window so the same press that launched it doesn't pop it.)
@@ -1476,6 +1506,14 @@ function fireOffense(t, now) {
   const w = t.weapon;
   const aim = t.turret ?? t.a;
 
+  // MORTAR is a two-press weapon. The first press plants the tank and
+  // opens the reticle; the second (handled below) actually fires. Bots
+  // skip straight through — mortarTarget() resolves their aim.
+  if (w === "mortar" && !t.bot && !t.mortarAiming) {
+    beginMortarAim(t);
+    return;
+  }
+
   if (w === "laser") {
     const m = muzzlePoint(t, 1);
     fireLaser(t.id, m.x, m.y, aim, now);
@@ -1494,14 +1532,19 @@ function fireOffense(t, now) {
     spawnSnipe(t.id, m.x, m.y, aim, now);
     sendTypedShot(t, { w: "snipe", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
     t.snAmmo = (t.snAmmo ?? SNIPER.shots) - 1;
-    if (t.snAmmo > 0) return; // keep the sniper until both rounds are gone
+    if (t.snAmmo > 0) {
+      // Hold the second round back for a full beat.
+      t.snNextAt = now + SNIPER.shotGapMs;
+      return; // keep the sniper until both rounds are gone
+    }
     t.snAmmo = null;
+    t.snNextAt = 0;
   } else if (w === "mortar") {
-    // Indirect fire: aim at the mouse (or, for bots, their target),
-    // snap to the CENTRE of that cell, and clamp the target to within
-    // MORTAR.rangeCells of the tank. The shell arcs up and comes down
-    // there, gaining +50% speed for every cell it travels.
+    // Second press: send it. The reticle is already snapped to a grid
+    // intersection within reach; the shell arcs over everything and
+    // lands there, and the tank is freed the moment it leaves.
     const tgt = mortarTarget(t);
+    cancelMortarAim(t);
     launchMortar(t.id, t.x, t.y, tgt.x, tgt.y, now);
     sendTypedShot(t, {
       w: "mortar",
@@ -1513,44 +1556,98 @@ function fireOffense(t, now) {
   clearWeapon(t, now);
 }
 
-// Where a tank's mortar would land: the mouse cell for the human, the
-// nearest enemy for a bot — snapped to that cell's centre and clamped
-// to within MORTAR.rangeCells of the tank.
-function mortarTarget(t) {
-  let ax, ay;
-  if (t.bot) {
-    // The AI supplies a predicted landing point (leads the target by
-    // the shell's travel time). Fall back to the nearest enemy's
-    // current position if it hasn't computed one.
-    if (t.mortarAim) {
-      ax = t.mortarAim.x; ay = t.mortarAim.y;
-    } else {
-      let best = Infinity, e = null;
-      for (const o of S.tanks) {
-        if (o === t || o.dead || o.gone) continue;
-        const d = (o.x - t.x) ** 2 + (o.y - t.y) ** 2;
-        if (d < best) { best = d; e = o; }
-      }
-      if (e) { ax = e.x; ay = e.y; }
-      else { ax = t.x + Math.cos(t.turret ?? t.a) * CELL * 3; ay = t.y + Math.sin(t.turret ?? t.a) * CELL * 3; }
-    }
-  } else if (hasMouseAim) {
-    ax = mouseWorld.x; ay = mouseWorld.y;
-  } else if (touchAimActive) {
-    ax = t.x + Math.cos(touchAim) * CELL * 3; ay = t.y + Math.sin(touchAim) * CELL * 3;
+// ---- Mortar aiming --------------------------------------------------
+// The mortar is a two-press weapon. The first press PLANTS the tank and
+// opens a reticle; you walk the reticle around with your normal
+// movement controls; the second press fires and frees the tank.
+//
+// The reticle always snaps to a grid INTERSECTION — the point where
+// four cells meet — because the blast covers all four of them. Reach is
+// measured in HALF-cells and clamped to [minHalfCells, maxHalfCells].
+
+// Snap a world point to the nearest grid intersection (4-cell corner).
+function snapToIntersection(x, y) {
+  return {
+    x: Math.round(x / CELL) * CELL,
+    y: Math.round(y / CELL) * CELL,
+  };
+}
+
+// Resolve a tank's polar aim (angle + half-cell distance) into a
+// clamped, snapped world point.
+function mortarPointFor(t) {
+  const half = CELL / 2;
+  const dist = Math.max(MORTAR.minHalfCells,
+    Math.min(MORTAR.maxHalfCells, t.mortarDist ?? 3)) * half;
+  const ang = t.mortarAngle ?? (t.turret ?? t.a);
+  const raw = { x: t.x + Math.cos(ang) * dist, y: t.y + Math.sin(ang) * dist };
+  const p = snapToIntersection(raw.x, raw.y);
+  // Keep it on the board (intersections run 0..cols/rows inclusive).
+  p.x = Math.max(CELL, Math.min(S.worldW - CELL, p.x));
+  p.y = Math.max(CELL, Math.min(S.worldH - CELL, p.y));
+  return p;
+}
+
+// Open the reticle: plant the tank and seed the aim in front of it.
+function beginMortarAim(t) {
+  t.mortarAiming = true;
+  t.mortarAngle = t.turret ?? t.a;
+  t.mortarDist = Math.round((MORTAR.minHalfCells + MORTAR.maxHalfCells) / 2);
+  t.mortarAim = mortarPointFor(t);
+}
+
+function cancelMortarAim(t) {
+  t.mortarAiming = false;
+  t.mortarAim = null;
+}
+
+// Walk the reticle with the movement controls while planted.
+// Keyboard: left/right swing the bearing, forward/back push the range
+// out and in. Touch: the stick's direction IS the bearing and how far
+// it's pushed sets the range — which reads naturally on a phone.
+const MORTAR_SWING = 2.2;   // radians/sec of bearing change
+const MORTAR_RANGE_RATE = 3; // half-cells/sec while held
+function stepMortarAim(t, acts, dt) {
+  if (acts.moveAngle != null) {
+    t.mortarAngle = acts.moveAngle;
+    const span = MORTAR.maxHalfCells - MORTAR.minHalfCells;
+    t.mortarDist = MORTAR.minHalfCells + span * (acts.moveMag ?? 1);
   } else {
-    ax = t.x + Math.cos(t.turret ?? t.a) * CELL * 3; ay = t.y + Math.sin(t.turret ?? t.a) * CELL * 3;
+    const turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
+    if (turn) t.mortarAngle = (t.mortarAngle ?? t.a) + turn * MORTAR_SWING * dt;
+    const push = (acts.up ? 1 : 0) - (acts.down ? 1 : 0);
+    if (push) {
+      t.mortarDist = Math.max(MORTAR.minHalfCells,
+        Math.min(MORTAR.maxHalfCells, (t.mortarDist ?? 3) + push * MORTAR_RANGE_RATE * dt));
+    }
   }
-  // Clamp to reach, then lock onto the cell centre.
-  const maxR = MORTAR.rangeCells * CELL;
-  let dx = ax - t.x, dy = ay - t.y;
-  const d = Math.hypot(dx, dy);
-  if (d > maxR) { dx *= maxR / d; dy *= maxR / d; ax = t.x + dx; ay = t.y + dy; }
-  ax = Math.max(0, Math.min(S.worldW - 1, ax));
-  ay = Math.max(0, Math.min(S.worldH - 1, ay));
-  const cx = (Math.floor(ax / CELL) + 0.5) * CELL;
-  const cy = (Math.floor(ay / CELL) + 0.5) * CELL;
-  return { x: cx, y: cy };
+  t.mortarAim = mortarPointFor(t);
+}
+
+// Where a bot's mortar lands. Bots skip the manual walk-around: the AI
+// hands us a predicted point, which we clamp and snap the same way so
+// their shells obey the identical rules.
+function mortarTarget(t) {
+  if (t.mortarAim && t.mortarAiming) return t.mortarAim;
+  let ax, ay;
+  if (t.mortarAim) { ax = t.mortarAim.x; ay = t.mortarAim.y; }
+  else {
+    let best = Infinity, e = null;
+    for (const o of S.tanks) {
+      if (o === t || o.dead || o.gone) continue;
+      const d = (o.x - t.x) ** 2 + (o.y - t.y) ** 2;
+      if (d < best) { best = d; e = o; }
+    }
+    if (e) { ax = e.x; ay = e.y; }
+    else { ax = t.x + Math.cos(t.a) * CELL * 2; ay = t.y + Math.sin(t.a) * CELL * 2; }
+  }
+  // Convert to polar, clamp the reach in half-cells, then snap.
+  const half = CELL / 2;
+  const dx = ax - t.x, dy = ay - t.y;
+  const d = Math.hypot(dx, dy) / half;
+  t.mortarAngle = Math.atan2(dy, dx);
+  t.mortarDist = Math.max(MORTAR.minHalfCells, Math.min(MORTAR.maxHalfCells, d));
+  return mortarPointFor(t);
 }
 
 // Launch an arcing shell from (x0,y0) toward the locked cell (tx,ty).
@@ -1567,19 +1664,21 @@ function launchMortar(byId, x0, y0, tx, ty, now) {
 }
 
 // Concentric damage rings, from the impact centre outward. Radii are
-// fractions of a cell; the whole blast is a 1-cell-diameter circle.
+// fractions of a cell. The blast is centred on a grid INTERSECTION and
+// reaches a full cell in every direction — a 2-cell span, i.e. the four
+// cells meeting at that corner.
 const MORTAR_RINGS = [
-  { r: 0.11, dmg: 8 }, // core (~half a tank across): full hit
-  { r: 0.24, dmg: 6 },
-  { r: 0.37, dmg: 3 },
-  { r: 0.50, dmg: 1 }, // outer edge of the 1-cell circle
+  { r: 0.22, dmg: 8 }, // core: full hit
+  { r: 0.48, dmg: 6 },
+  { r: 0.74, dmg: 4 },
+  { r: 1.00, dmg: 2 }, // outer edge — one whole cell out
 ];
 
 function detonateMortar(m, now) {
   sfx.boom?.();
   // The dark smoke cloud covering the cell.
   (S.mortarClouds ??= []).push({ x: m.x, y: m.y, born: now, seed: (Math.random() * 1e9) | 0 });
-  addFade(m.x, m.y, CELL * 0.4, now);
+  addFade(m.x, m.y, CELL * MORTAR.blastCells * 0.8, now);
   // Damage rings — the hit FX plays for every tank in the blast on
   // every client; applyHit applies damage only on the authority.
   for (const t of S.tanks) {
@@ -2319,7 +2418,7 @@ const WALL_DMG = {
   basic: DMG.basic,        // 2
   mg: DMG.mg,              // 1
   laser: DMG.laserBase,    // 8 → one hit
-  rocket: DMG.rocket,      // 5
+  rocket: DMG.rocket,      // 7
   cannon: DMG.cannonBall,  // 6 → one hit
   shrapnel: DMG.shrapnel,  // 2
   sniper: DMG.sniper,      // 4
@@ -2526,7 +2625,45 @@ function applyHit(t, amount, byId, now = performance.now(), kind = "bullet") {
   if (kind === "laser") sfx.hitLaser?.();
   else if (kind === "mortar") { /* the boom is the hit */ }
   else sfx.hitMetal?.();
-  if (S.mode === "local" || t.local) damageTank(t, amount, byId);
+
+  // ---- WHO DECIDES A HIT LANDED ----
+  // Offline, we just apply it. Online we use SHOOTER AUTHORITY: the
+  // client that fired the shot decides it connected, and tells the
+  // victim. Previously each client re-simulated every projectile
+  // against ITS OWN (interpolated, ~130 ms stale) copy of everyone
+  // else, so the shooter and the victim routinely disagreed — you'd
+  // watch a round hit someone who never took damage, because on their
+  // machine they'd already moved. Now what the shooter sees is what
+  // counts, while the victim stays authoritative over its own health
+  // so hp can never diverge.
+  if (S.mode === "local") { damageTank(t, amount, byId); return; }
+
+  const shooter = byId ? S.tanks.find((x) => x.id === byId) : null;
+  const mine = !!(shooter && shooter.local);
+
+  if (t.local) {
+    // I'm the victim. Apply immediately only when I'm also the shooter
+    // (self-inflicted ricochet) or the damage has no owner at all
+    // (environmental — the zone, an ownerless blast). Anything fired by
+    // a remote peer arrives over the hit channel instead.
+    if (mine || !shooter) damageTank(t, amount, byId);
+    return;
+  }
+
+  if (mine) {
+    // My shot, their tank: report it. They apply it.
+    sendHitTo(t, amount, byId, kind, now);
+  }
+  // Otherwise it's someone else's shot on someone else's tank — we just
+  // played the FX; their two clients settle the damage between them.
+}
+
+// Post an authoritative hit to a remote victim (deduped by key on the
+// receiving end, so a re-delivered packet can't double-damage).
+function sendHitTo(victim, amount, byId, kind, now) {
+  if (!S.sendHit) return;
+  const key = Math.floor(now).toString(36) + Math.random().toString(36).slice(2, 8);
+  S.sendHit(victim.id, key, { d: amount, k: kind, by: byId });
 }
 
 // Short-lived orange/white sparks thrown from a hit.
@@ -2564,7 +2701,13 @@ function damageTank(t, amount, byId = null) {
     const hpBefore = t.hp ?? TANK_HP;
     t.hp = hpBefore - dmg;
     dealt += Math.min(hpBefore, dmg); // don't credit overkill
-    if (t.hp <= 0) { killTank(t); killed = true; }
+    if (t.hp <= 0) {
+      // Remember the attacker BEFORE killTank runs — it's what the
+      // victim reports over the wire so the killer can score a streak.
+      t.lastKillerId = (byId && byId !== t.id) ? byId : null;
+      killTank(t);
+      killed = true;
+    }
   }
   // Match stats: credit the attacker for damage actually inflicted —
   // INCLUDING damage to yourself (a mortar on your own feet counts) —
@@ -2575,14 +2718,75 @@ function damageTank(t, amount, byId = null) {
     if (killed && byId !== t.id) {
       S.killsBy = S.killsBy ?? {};
       S.killsBy[byId] = (S.killsBy[byId] ?? 0) + 1;
+      // NOTE: no streak scoring here. Multi-kills are an ONLINE thing
+      // only (custom lobbies, plus the Double that 2v2 ranked allows) —
+      // offline is one player against bots, which doesn't get them.
+      // Online, the victim tells the killer over the dead channel.
     }
   }
   return killed;
 }
 
+/* ---------- multi-kills ---------- */
+
+// "Is this the tank I'm driving?" Streaks are online-only, where
+// exactly one tank is local, so this is simply that flag. (Offline,
+// every tank is local — which is part of why streaks don't apply.)
+function isMyTank(t) {
+  return !!(t && t.local);
+}
+
+// Kills landed inside this window of each other chain together. Wide
+// enough that a mortar catching two tanks or a laser punching through a
+// line both read as one burst, tight enough that unrelated kills a
+// fight apart don't.
+const MULTIKILL_WINDOW = 4500;
+const MULTIKILL_NAMES = {
+  2: "DOUBLE KILL",
+  3: "TRIPLE KILL",
+  4: "QUADRA KILL",
+  5: "PENTA KILL",
+  6: "HEXA KILL",
+  7: "SEPTA KILL",
+};
+const MULTIKILL_SHOW_MS = 2200;
+
+// Score a kill for `byId`. Only the killer sees their own banner, so we
+// bail early for anyone else's kills. Ranked 1v1 has a single opponent
+// and so can never chain; ranked 2v2 tops out at a Double, which falls
+// out naturally from how many enemies exist.
+function registerKill(byId, now) {
+  // Online only: custom lobbies get the full chain, and 2v2 ranked
+  // naturally tops out at a Double because there are only two enemies.
+  // Offline (one player vs bots) has no streaks at all.
+  if (!S || S.mode !== "online") return;
+  const killer = S.tanks.find((x) => x.id === byId);
+  if (!isMyTank(killer)) return;   // only ever show MY own streak
+
+  const chain = (now - (S.mkLastAt ?? -Infinity) <= MULTIKILL_WINDOW)
+    ? (S.mkChain ?? 0) + 1
+    : 1;
+  S.mkChain = chain;
+  S.mkLastAt = now;
+  if (chain < 2) return;                     // a lone kill isn't news
+
+  const n = Math.min(chain, 7);
+  S.multiKill = { text: MULTIKILL_NAMES[n] ?? MULTIKILL_NAMES[7], n, born: now };
+  sfx.multiKill?.(n);
+}
+
+// Chains don't survive a round boundary or your own death.
+function resetMultiKill() {
+  if (!S) return;
+  S.mkChain = 0;
+  S.mkLastAt = -Infinity;
+  S.multiKill = null;
+}
+
 function killTank(t) {
   if (t.dead) return;
   t.dead = true;
+  if (isMyTank(t)) resetMultiKill(); // dying ends your run
   const now = performance.now();
   // The full send-off: a dedicated explosion sound, a fireball flash,
   // a debris shower, and a lingering smoke pall over the wreck.
@@ -2592,7 +2796,7 @@ function killTank(t) {
   addHitSparks(t.x, t.y, now);
   addHitSparks(t.x, t.y, now); // double shower — it's an explosion
   (S.mortarClouds ??= []).push({ x: t.x, y: t.y, born: now, seed: (Math.random() * 1e9) | 0 });
-  if (S.mode === "online" && t.local) S.sendDead?.(t.id);
+  if (S.mode === "online" && t.local) S.sendDead?.(t.id, t.lastKillerId ?? null);
 
   // If the tank that just died is the local human's, show a black
   // "Destroyed" message. It clears after 2 s (so they can spectate)
@@ -3062,7 +3266,7 @@ function draw(now) {
   // so an outside cell can still hold a thin interior sliver — we paint
   // those bordering-outside cells too (the polygon clip trims the rest)
   // to avoid white gaps hugging the angled edge.
-  if (S.ranked && S.zoneDist) {
+  if (S.zoneActive && S.zoneDist) {
     const zl = S.zoneLevel ?? 0;
     const wl = S.zoneWarnLevel ?? -1;
     const blink = Math.sin(now / 130) * 0.5 + 0.5; // fast strobe
@@ -3426,6 +3630,29 @@ function draw(now) {
     }
   }
 
+  // Multi-kill banner across the top of the arena.
+  if (multiKillEl) {
+    const mk = S.multiKill;
+    const age = mk ? now - mk.born : Infinity;
+    if (mk && age < MULTIKILL_SHOW_MS) {
+      const sig = `${mk.text}:${mk.born}`;
+      if (multiKillEl._sig !== sig) {
+        multiKillEl._sig = sig;
+        multiKillEl.hidden = false;
+        multiKillEl.className = `multikill mk-${mk.n}`;
+        multiKillEl.textContent = mk.text;
+        // restart the pop animation
+        void multiKillEl.offsetWidth;
+      }
+      // Fade over the last third of its life.
+      multiKillEl.classList.toggle("is-out", age > MULTIKILL_SHOW_MS * 0.66);
+    } else if (!multiKillEl.hidden) {
+      multiKillEl.hidden = true;
+      multiKillEl._sig = undefined;
+      S.multiKill = null;
+    }
+  }
+
   // The ranked zone timer lives in the top bar. It counts down to the
   // next layer, flips to a red "CLOSING" flash while a layer blinks,
   // and disappears once the whole map is red.
@@ -3514,15 +3741,22 @@ function drawMortarReticle(a, now) {
   ctx.save();
   ctx.translate(a.x, a.y);
   ctx.strokeStyle = `rgba(232, 69, 46, ${0.55 + 0.35 * pulse})`;
-  ctx.lineWidth = 2;
-  const r = TANK_R * 1.1;
+  ctx.lineWidth = 2.5;
+  const r = MORTAR.blastCells * CELL;   // the real blast radius
+  // The 2x2 footprint it will flatten.
+  ctx.globalAlpha = 0.16 + 0.10 * pulse;
+  ctx.fillStyle = "#e8452e";
+  ctx.fillRect(-CELL, -CELL, CELL * 2, CELL * 2);
+  ctx.globalAlpha = 1;
+  ctx.strokeRect(-CELL, -CELL, CELL * 2, CELL * 2);
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.stroke();
+  // Cross-hairs through the intersection.
   ctx.beginPath();
   for (const [sx, sy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-    ctx.moveTo(sx * r * 0.55, sy * r * 0.55);
-    ctx.lineTo(sx * r * 1.35, sy * r * 1.35);
+    ctx.moveTo(sx * r * 0.25, sy * r * 0.25);
+    ctx.lineTo(sx * r * 0.85, sy * r * 0.85);
   }
   ctx.stroke();
   ctx.restore();
@@ -3537,12 +3771,12 @@ function drawMortarMarker(m, now) {
   ctx.globalAlpha = 0.3 + 0.25 * pulse;
   ctx.fillStyle = "#e8452e";
   ctx.beginPath();
-  ctx.arc(0, 0, TANK_R * (1.0 + 0.12 * pulse), 0, Math.PI * 2);
+  ctx.arc(0, 0, MORTAR.blastCells * CELL * (1.0 + 0.06 * pulse), 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 0.9;
   ctx.fillStyle = "#ff5a3c";
   ctx.beginPath();
-  ctx.arc(0, 0, TANK_R * 0.5, 0, Math.PI * 2);
+  ctx.arc(0, 0, TANK_R * 0.6, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -3559,7 +3793,7 @@ function drawMortarShell(m, now) {
   const gx = m.x0 + (m.x - m.x0) * p;   // ground position
   const gy = m.y0 + (m.y - m.y0) * p;
   const arc = Math.sin(Math.PI * p);    // 0→1→0
-  const lift = arc * CELL * 2.6;        // peak height ~2.6 cells
+  const lift = arc * CELL * 3.2;        // peak height ~3.2 cells
   // Shadow that tightens as the shell nears the ground.
   ctx.save();
   ctx.globalAlpha = 0.18 + 0.22 * (1 - arc);
@@ -3595,14 +3829,14 @@ function drawMortarCloud(c, now) {
   const p = age / MORTAR.cloudMs;
   const grow = 0.5 + 0.5 * Math.min(1, p * 3);
   const fade = Math.max(0, 1 - p);
-  const R = CELL * 0.5 * grow * (c.scale ?? 1);
+  const R = CELL * MORTAR.blastCells * grow * (c.scale ?? 1);
   const rng = mulberry32(c.seed >>> 0);
   ctx.save();
   ctx.translate(c.x, c.y);
   ctx.globalAlpha = 0.72 * fade;
   // A few overlapping dark puffs for a smoky, non-circular blob.
-  for (let i = 0; i < 7; i++) {
-    const ang = (i / 7) * Math.PI * 2 + rng() * 0.6;
+  for (let i = 0; i < 11; i++) {
+    const ang = (i / 11) * Math.PI * 2 + rng() * 0.6;
     const rr = R * (0.35 + rng() * 0.5);
     const px = Math.cos(ang) * R * 0.4;
     const py = Math.sin(ang) * R * 0.4;
@@ -3904,6 +4138,30 @@ function drawTank(t, now) {
     rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
     ctx.clip();
     drawPattern(pat, pc[1], R, now, t.id);
+    ctx.restore();
+  }
+
+  // PHASE GLINT: while phasing, a violet sheen slides across the hull.
+  // Driven by a SINE (never a wrapping sawtooth) so the sweep eases in
+  // and out and reverses smoothly — no snap when it reaches the end.
+  // A second, slower sine breathes the intensity so it shimmers rather
+  // than strobing.
+  if (now < (t.phaseUntil ?? 0)) {
+    ctx.save();
+    ctx.beginPath();
+    rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+    ctx.clip();
+    const sweep = Math.sin(now / 620);            // -1 → 1, smooth both ways
+    const breathe = 0.55 + 0.45 * Math.sin(now / 940);
+    const cx = sweep * R * 1.1;
+    const pg = ctx.createLinearGradient(cx - R * 0.9, -R, cx + R * 0.9, R);
+    pg.addColorStop(0.00, "rgba(150, 90, 255, 0)");
+    pg.addColorStop(0.38, `rgba(168, 112, 255, ${0.16 * breathe})`);
+    pg.addColorStop(0.50, `rgba(214, 176, 255, ${0.42 * breathe})`);
+    pg.addColorStop(0.62, `rgba(168, 112, 255, ${0.16 * breathe})`);
+    pg.addColorStop(1.00, "rgba(150, 90, 255, 0)");
+    ctx.fillStyle = pg;
+    ctx.fillRect(-R, -R, R * 2, R * 2);
     ctx.restore();
   }
 

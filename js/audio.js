@@ -258,6 +258,26 @@ export const sfx = {
     } catch (e) {}
   },
 
+  // Multi-kill fanfare. `n` is the streak length (2 = double kill),
+  // and the flourish escalates with it: the chord climbs a step per
+  // kill, gains an extra voice, and gets brighter — so a Septa Kill
+  // sounds unmistakably bigger than a Double.
+  multiKill(n = 2) {
+    if (!ready() || limited("multiKill", 140)) return;
+    try {
+      const step = Math.min(n, 7) - 2;              // 0..5
+      const root = 392 * Math.pow(2, step / 12);    // G4, up a semitone per tier
+      const vol = 0.085 + 0.012 * step;
+      // Rising triad, one note per 70 ms.
+      blip("triangle", root, root + 2, 0.13, vol, 0);
+      blip("triangle", root * 1.26, root * 1.26 + 2, 0.13, vol, 0.07);
+      blip("triangle", root * 1.5, root * 1.5 + 2, 0.18, vol, 0.14);
+      // Higher streaks add an octave sparkle on top.
+      if (n >= 4) blip("sine", root * 2, root * 2 + 2, 0.2, vol * 0.7, 0.2);
+      if (n >= 6) blip("sine", root * 3, root * 3 + 2, 0.22, vol * 0.6, 0.26);
+    } catch (e) {}
+  },
+
   // A weapon crate materializing: two ascending chimes.
   gearSpawn() {
     if (!ready() || limited("gearSpawn", 120)) return;
