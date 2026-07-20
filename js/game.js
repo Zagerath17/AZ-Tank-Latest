@@ -4321,12 +4321,32 @@ function drawTank(t, now) {
   ctx.save();
   ctx.rotate(turret - t.a);
 
+  const capR = R * 0.5;
+  const bL = bl.len * R, bW = bl.hw * R;
+
+  // ONE outline around the WHOLE turret silhouette (barrel + cap), not a
+  // ring on the cap. Drawn UNDER the paint as a thick dark stroke of the
+  // barrel rect + cap circle as a single path: the inner half is covered
+  // by the fills below, leaving a clean rim tracing only the outside
+  // edge of the whole assembly.
+  {
+    const outlineW = Math.max(1.5, R * 0.09);
+    ctx.strokeStyle = "rgba(16,20,28,0.9)";
+    ctx.lineWidth = outlineW * 2;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(0, -bW, bL, bW * 2, bW * 0.5);
+    else ctx.rect(0, -bW, bL, bW * 2);
+    ctx.moveTo(capR, 0);
+    ctx.arc(0, 0, capR, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   // Barrel: draw its base shape, then paint the skin/pattern over just
   // the barrel's footprint (clipped) so a metal barrel shines and a
   // pattern shows, matching the hull.
   drawBarrel(ctx, wtype, R, shade(bodyHex, 0.2), shade(bodyHex, 0.5));
   {
-    const bL = bl.len * R, bW = bl.hw * R;
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, -bW, bL, bW * 2);
@@ -4351,12 +4371,10 @@ function drawTank(t, now) {
     ctx.globalAlpha = 1;
   }
 
-  // Turret cap — same rotated frame, so its paint/pattern turns with
-  // the turret. It reads as a raised, machined hub: the skin paint,
-  // then a domed bevel (highlight top-left, shade bottom-right), then a
-  // crisp OUTLINE so it stands clear of the hull instead of blending
-  // into it.
-  const capR = R * 0.5;
+  // Turret cap — same rotated frame, so its paint/pattern turns with the
+  // turret. The skin paint, then a domed bevel (highlight top-left,
+  // shade bottom-right) for volume. Its outline is part of the single
+  // silhouette stroke above — no separate ring on the cap.
   ctx.beginPath();
   ctx.arc(0, 0, capR, 0, Math.PI * 2);
   ctx.save();
@@ -4364,8 +4382,6 @@ function drawTank(t, now) {
   ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
   ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
   if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
-  // Domed shading: a soft radial light from the upper-left and a shadow
-  // opposite give the cap volume so it doesn't look like a flat disc.
   const dome = ctx.createRadialGradient(-capR * 0.4, -capR * 0.4, capR * 0.1, 0, 0, capR);
   dome.addColorStop(0, "rgba(255,255,255,0.30)");
   dome.addColorStop(0.5, "rgba(255,255,255,0)");
@@ -4373,19 +4389,6 @@ function drawTank(t, now) {
   ctx.fillStyle = dome;
   ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
   ctx.restore();
-  // Crisp outline ring — a mid-dark edge (not derived from the hull
-  // colour) so every tank's turret separates from the body the same way.
-  ctx.strokeStyle = "rgba(18,22,30,0.75)";
-  ctx.lineWidth = Math.max(1.5, R * 0.07);
-  ctx.beginPath();
-  ctx.arc(0, 0, capR, 0, Math.PI * 2);
-  ctx.stroke();
-  // A thin machined highlight just inside the rim.
-  ctx.strokeStyle = "rgba(255,255,255,0.16)";
-  ctx.lineWidth = Math.max(1, R * 0.03);
-  ctx.beginPath();
-  ctx.arc(0, 0, capR * 0.8, 0, Math.PI * 2);
-  ctx.stroke();
 
   // Bots get a small "chip" dot so you can tell them apart.
   if (t.bot) {

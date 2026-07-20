@@ -369,6 +369,22 @@ function drawSpriteTank(ctx, look, R, now, seed) {
 
   // Turret assembly (barrel + cap) — carries the same paint/pattern.
   const barLen = R * 1.15, barHW = R * 0.16;
+  const capR = R * 0.5;
+  // ONE outline around the whole turret silhouette (barrel + cap),
+  // drawn underneath as a thick dark stroke; the fills cover the inner
+  // half, leaving a rim on the outside edge only.
+  {
+    const ow = Math.max(1.5, R * 0.09);
+    ctx.strokeStyle = "rgba(16,20,28,0.9)";
+    ctx.lineWidth = ow * 2;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(0, -barHW, barLen, barHW * 2, barHW * 0.6);
+    else ctx.rect(0, -barHW, barLen, barHW * 2);
+    ctx.moveTo(capR, 0);
+    ctx.arc(0, 0, capR, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.fillStyle = shade(bodyHex, 0.2);
   rr(0, -barHW, barLen, barHW * 2, barHW * 0.6);
   {
@@ -381,7 +397,6 @@ function drawSpriteTank(ctx, look, R, now, seed) {
     ctx.globalAlpha = 1;
     ctx.restore();
   }
-  const capR = R * 0.5;
   ctx.beginPath(); ctx.arc(0, 0, capR, 0, Math.PI * 2);
   ctx.save(); ctx.clip();
   ctx.fillStyle = hullPaint(ctx, bodyColor, R, now);
@@ -395,13 +410,6 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   ctx.fillStyle = dome;
   ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
   ctx.restore();
-  // Crisp constant outline + inner highlight so the turret pops.
-  ctx.strokeStyle = "rgba(18,22,30,0.75)";
-  ctx.lineWidth = Math.max(1.5, R * 0.07);
-  ctx.beginPath(); ctx.arc(0, 0, capR, 0, Math.PI * 2); ctx.stroke();
-  ctx.strokeStyle = "rgba(255,255,255,0.16)";
-  ctx.lineWidth = Math.max(1, R * 0.03);
-  ctx.beginPath(); ctx.arc(0, 0, capR * 0.8, 0, Math.PI * 2); ctx.stroke();
 
   ctx.restore();
 }
