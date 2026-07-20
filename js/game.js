@@ -3708,63 +3708,45 @@ function draw(now) {
   const myTank = S.mode === "online"
     ? S.tanks.find((t) => t.id === S.myId)
     : S.tanks.find((t) => !t.bot);
-  if (loadoutHudEl) {
-    const alive = myTank && !myTank.dead && !myTank.gone;
-    if (!alive) {
-      loadoutHudEl.hidden = true;
-      loadoutHudEl._sig = undefined;
-    } else {
-      const items = {
-        offense: myTank.weapon ?? null,
-        defense: myTank.defense ?? null,
-        agility: myTank.agility ?? null,
-      };
-      const sig = `${items.offense}|${items.defense}|${items.agility}`;
-      loadoutHudEl.hidden = false;
-      if (loadoutHudEl._sig !== sig) {
-        loadoutHudEl._sig = sig;
-        for (const cv of loadoutHudEl.querySelectorAll(".loadout-icon")) {
-          drawLoadoutIcon(cv, items[cv.dataset.cat]);
-        }
-        // Caption each slot with the equipped ability's name in its own
-        // colour (blank when the slot is empty) — no more keybind text.
-        for (const lbl of loadoutHudEl.querySelectorAll(".loadout-key")) {
-          const type = items[lbl.dataset.cat];
-          lbl.textContent = type ? (WEAPON_LABEL[type] ?? type) : "";
-          lbl.style.color = type ? (GEAR_RIM[type] ?? "#e8eefc") : "";
-        }
-      }
-    }
-  }
+  // The bottom-right loadout panel is retired: P1 now uses the SAME
+  // compact stacked row as every other local player (see below).
+  if (loadoutHudEl && !loadoutHudEl.hidden) { loadoutHudEl.hidden = true; loadoutHudEl._sig = undefined; }
+  if (healthHudEl && !healthHudEl.hidden) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
+  if (armourHudEl && !armourHudEl.hidden) { armourHudEl.hidden = true; armourHudEl._ar = undefined; }
 
-  // ADDITIONAL LOCAL PLAYERS (couch co-op online, or 2–4 seats in a
-  // local match). Every local human other than the primary gets their
-  // own compact readout, and these STACK UPWARD above one another. Each
-  // shows armour + health (health tinted to that player's tank colour)
-  // and their three abilities on a 70%-opacity plate of the tank colour.
+  // ALL LOCAL PLAYERS share one compact readout, stacked UPWARD. P1 sits
+  // at the bottom (no "P1" tag); couch co-op / local seats 2–4 stack
+  // above. Each row: armour + health (health tinted to that player's
+  // tank colour) and the three equipped abilities shown as their ACTUAL
+  // pickup-crate icons on a 70%-opacity plate of the tank colour.
   if (p2HudEl) {
-    const others = S.tanks.filter((t) =>
-      t.local && !t.bot && t.id !== (myTank && myTank.id) && !t.dead && !t.gone);
-    if (!others.length) {
+    const locals = S.tanks.filter((t) => t.local && !t.bot && !t.dead && !t.gone);
+    // Primary first (bottom), then the rest in a stable order.
+    const primaryId = myTank && myTank.id;
+    locals.sort((a, b) => {
+      if (a.id === primaryId) return -1;
+      if (b.id === primaryId) return 1;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    if (!locals.length) {
       p2HudEl.hidden = true;
       p2HudEl._sig = undefined;
     } else {
-      // Stable order so rows don't jump around as tanks come and go.
-      others.sort((a, b) => String(a.id).localeCompare(String(b.id)));
-      const sig = others.map((t) => {
+      const label = { red: "", green: "P2", blue: "P3", yellow: "P4" };
+      const sig = locals.map((t) => {
         const hp = Math.max(0, Math.ceil(t.hp ?? TANK_HP));
         const ar = now < (t.armourUntil ?? 0) ? Math.max(0, Math.ceil(t.armour ?? 0)) : 0;
-        return `${t.id}:${hp}:${ar}:${t.weapon}:${t.defense}:${t.agility}:${t.color}`;
+        return `${t.id}:${hp}:${ar}:${t.weapon}:${t.defense}:${t.agility}:${effBaseHex(t)}`;
       }).join("|");
       p2HudEl.hidden = false;
       if (p2HudEl._sig !== sig) {
         p2HudEl._sig = sig;
-        const label = { red: "P1", green: "P2", blue: "P3", yellow: "P4" };
-        p2HudEl.innerHTML = others.map((t, idx) => {
+        p2HudEl.innerHTML = locals.map((t, idx) => {
           const hex = effBaseHex(t);
           const hp = Math.max(0, Math.ceil(t.hp ?? TANK_HP));
           const ar = now < (t.armourUntil ?? 0) ? Math.max(0, Math.ceil(t.armour ?? 0)) : 0;
-          const name = label[t.slot ?? t.color] ?? `P${idx + 2}`;
+          const isPrimary = t.id === primaryId;
+          const name = isPrimary ? "" : (label[t.slot ?? t.color] ?? `P${idx + 1}`);
           let hpips = "";
           for (let i = 0; i < TANK_HP; i++) {
             hpips += `<span class="lp-pip${i < hp ? "" : " spent"}"${i < hp ? ` style="background:${hex};border-color:${hex}"` : ""}></span>`;
@@ -3772,14 +3754,13 @@ function draw(now) {
           let apips = "";
           for (let i = 0; i < ar; i++) apips += `<span class="lp-ar"></span>`;
           const items = [t.weapon ?? null, t.defense ?? null, t.agility ?? null];
-          const load = items.map((it) => {
-            const c = it ? (GEAR_RIM[it] ?? "#e8eefc") : null;
-            return `<span class="lp-item" style="${c ? `background:${c};border-color:${c}` : ""}" title="${it ? (WEAPON_LABEL[it] ?? it) : "empty"}"></span>`;
-          }).join("");
-          // rgba plate at 70% of the tank colour behind the abilities.
+          // Real ability image per slot: a canvas we paint via drawGear.
+          const load = items.map((it, k) =>
+            `<canvas class="lp-icon" width="44" height="44" data-tank="${t.id}" data-slot="${k}" data-type="${it ?? ""}"></canvas>`
+          ).join("");
           const plate = hexToRgba(hex, 0.7);
           return `<div class="lp-row">
-              <span class="lp-tag" style="color:${hex}">${name}</span>
+              ${name ? `<span class="lp-tag" style="color:${hex}">${name}</span>` : ""}
               <span class="lp-bars">
                 ${ar ? `<span class="lp-ars">${apips}</span>` : ""}
                 <span class="lp-hps">${hpips}</span>
@@ -3787,6 +3768,10 @@ function draw(now) {
               <span class="lp-load" style="background:${plate}">${load}</span>
             </div>`;
         }).join("");
+        // Paint each ability canvas with the true pickup crate image.
+        for (const cv of p2HudEl.querySelectorAll(".lp-icon")) {
+          drawLoadoutIcon(cv, cv.dataset.type || null);
+        }
       }
     }
   }
@@ -4449,13 +4434,14 @@ function drawTank(t, now) {
     ctx.restore();
   }
 
-  // ---- One-piece turret ----
-  // A SINGLE capsule (breech + barrel in one shape) that turns with the
-  // turret — no separate cap, so nothing overlaps or clips. Sized to the
-  // weapon's bullet (BARRELS[w]), so its silhouette matches the barrel
-  // HITBOX and shots that strike the visible barrel actually connect. It
-  // carries the tank's paint, pattern, phase transparency and hit-flash,
-  // exactly like the hull.
+  // ---- One-piece tank turret ----
+  // A real turret silhouette, traced as ONE closed path so nothing
+  // overlaps: a turret HOUSING near the centre (its shape distinct per
+  // weapon) with a BARREL extending forward. The barrel width equals the
+  // weapon's bullet size and the barrel hitbox (BARRELS[w]); the housing
+  // sits within the hull footprint (already a hitbox), so shots line up.
+  // Carries the tank's paint, pattern, phase (transparency + violet
+  // glint) and hit-flash, exactly like the hull.
   const wtype = t.weapon ?? "normal";
   const turret = t.turret ?? t.a;
   const bl = BARRELS[wtype] ?? BARRELS.normal;
@@ -4464,46 +4450,67 @@ function drawTank(t, now) {
   ctx.rotate(turret - t.a);
   if (phasing) ctx.globalAlpha = PHASE.opacity;
 
-  const bL = bl.len * R;   // muzzle distance (== hitbox length)
+  const bL = bl.len * R;   // muzzle distance (== barrel hitbox length)
   const bW = bl.hw * R;    // barrel half-width (== hitbox width, bullet-sized)
-  const back = R * 0.34;   // breech reaches this far behind centre
-  const capLen = bL + back;
-  const capsule = (x0, x1, hw) => {
-    const r2 = Math.min(hw, (x1 - x0) * 0.5);
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(x0, -hw, x1 - x0, hw * 2, r2);
-    else ctx.rect(x0, -hw, x1 - x0, hw * 2);
-  };
+  // Trace this weapon's turret outline into the current path. The
+  // housing shape differs per family so the guns read apart at a glance.
+  const turretPath = (grow) => turretOutline(wtype, bL, bW, R, grow);
 
-  // 1) Outline — a dark capsule slightly larger, underneath; the paint
-  //    on top leaves a clean uniform rim. One shape, no seams, no cap.
-  const o = Math.max(1.5, R * 0.09);
+  // 1) Dark outline underneath: the same silhouette grown slightly, so
+  //    the paint on top leaves a clean uniform rim. One path, no seams.
   ctx.fillStyle = "rgba(16,20,28,0.92)";
-  capsule(-back - o, bL + o, bW + o);
+  turretPath(Math.max(1.5, R * 0.085));
   ctx.fill();
 
-  // 2) Paint: skin finish + pattern, clipped to the capsule, so a gold
-  //    tank has a gold barrel and a camo tank's barrel is camo.
+  // 2) Paint: skin finish + pattern, clipped to the turret silhouette.
   ctx.save();
-  capsule(-back, bL, bW);
+  turretPath(0);
   ctx.clip();
   ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
-  ctx.fillRect(-back - 1, -bW - 1, capLen + 2, bW * 2 + 2);
+  ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
   if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
-  // Rounded-tube bevel: light along the top edge, shadow along the
-  // bottom, so the barrel reads as a cylinder, not a flat strip.
-  const bev = ctx.createLinearGradient(0, -bW, 0, bW);
-  bev.addColorStop(0, "rgba(255,255,255,0.28)");
+  // Cross-tube bevel: light along the top, shadow along the bottom, so
+  // the whole turret reads as raised metal.
+  const bev = ctx.createLinearGradient(0, -R * 0.55, 0, R * 0.55);
+  bev.addColorStop(0, "rgba(255,255,255,0.26)");
   bev.addColorStop(0.5, "rgba(255,255,255,0)");
-  bev.addColorStop(1, "rgba(0,0,0,0.30)");
+  bev.addColorStop(1, "rgba(0,0,0,0.28)");
   ctx.fillStyle = bev;
-  ctx.fillRect(-back - 1, -bW - 1, capLen + 2, bW * 2 + 2);
-  // Muzzle bore: a small dark oval at the very tip.
-  ctx.fillStyle = "rgba(0,0,0,0.40)";
+  ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
+  // Muzzle bore at the very tip.
+  ctx.fillStyle = "rgba(0,0,0,0.42)";
   ctx.beginPath();
-  ctx.ellipse(bL - bW * 0.34, 0, bW * 0.30, bW * 0.62, 0, 0, Math.PI * 2);
+  ctx.ellipse(bL - bW * 0.30, 0, bW * 0.30, bW * 0.6, 0, 0, Math.PI * 2);
   ctx.fill();
+  // Phase glint over the turret, clipped to its silhouette, matching the
+  // hull's violet sheen so the WHOLE tank phases together.
+  if (phasing) {
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "lighter";
+    const breathe = 0.72 + 0.28 * Math.sin(now / 165);
+    const sweep = Math.sin(now / 300);
+    const cx = sweep * R * 1.05;
+    const pg = ctx.createLinearGradient(cx - R * 1.1, -R, cx + R * 1.1, R);
+    pg.addColorStop(0.0, "rgba(90,20,190,0)");
+    pg.addColorStop(0.5, `rgba(206,150,255,${0.92 * breathe})`);
+    pg.addColorStop(1.0, "rgba(90,20,190,0)");
+    ctx.fillStyle = pg;
+    ctx.fillRect(-R * 1.2, -R, R * 2.4, R * 2);
+    ctx.fillStyle = `rgba(150,88,255,${0.22 * breathe})`;
+    ctx.fillRect(-R * 1.2, -R, R * 2.4, R * 2);
+  }
   ctx.restore();
+
+  // Violet rim on the turret while phasing, so its outline pops too.
+  if (phasing) {
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = `rgba(196,140,255,${0.55 + 0.35 * Math.sin(now / 165)})`;
+    ctx.lineWidth = Math.max(1.5, R * 0.08);
+    turretPath(0);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   // 3) MG spin-up glow at the muzzle.
   if (t.weapon === "mg" && t.mgReadyAt && now < t.mgReadyAt) {
@@ -4511,16 +4518,16 @@ function drawTank(t, now) {
     ctx.fillStyle = "#e8452e";
     ctx.globalAlpha = (phasing ? PHASE.opacity : 1) * (0.35 + 0.6 * Math.abs(Math.sin(f * 14)));
     ctx.beginPath();
-    ctx.arc(bL, 0, bW * 0.75, 0, Math.PI * 2);
+    ctx.arc(bL, 0, bW * 0.8, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = phasing ? PHASE.opacity : 1;
   }
 
-  // 4) Bots keep a small chip near the breech so you can tell them apart.
+  // 4) Bots keep a small chip on the housing so you can tell them apart.
   if (t.bot) {
     ctx.fillStyle = "#eef1f6";
     ctx.beginPath();
-    ctx.arc(0, 0, R * 0.13, 0, Math.PI * 2);
+    ctx.arc(0, 0, R * 0.12, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -4528,12 +4535,93 @@ function drawTank(t, now) {
   if (sinceHit < 170) {
     ctx.globalAlpha = 0.62 * (1 - sinceHit / 170);
     ctx.fillStyle = "#ff2d28";
-    capsule(-back, bL, bW);
+    turretPath(0);
     ctx.fill();
   }
 
   ctx.restore(); // turret rotation frame
   ctx.restore(); // tank translate/rotate frame
+}
+
+// Trace a weapon's turret silhouette (housing + barrel) into ctx's path
+// as ONE closed shape, in the turret frame (+x forward). `grow` expands
+// it uniformly (for the dark outline underneath). Each weapon family has
+// a distinct housing so the guns are recognisable at a glance.
+function turretOutline(wtype, bL, bW, R, grow = 0) {
+  const g = grow;
+  // Housing footprint (kept inside the hull so it doesn't break the
+  // hitbox): half-width HW, from xBack behind centre to xFront ahead.
+  let HW = R * 0.46, xBack = -R * 0.42, xFront = R * 0.36, round = R * 0.16;
+  let shape = "round"; // round | hex | box | slope
+  switch (wtype) {
+    case "cannon": HW = R * 0.56; xBack = -R * 0.5; xFront = R * 0.30; shape = "hex"; round = R * 0.1; break;
+    case "mortar": HW = R * 0.58; xBack = -R * 0.46; xFront = R * 0.22; shape = "round"; round = R * 0.34; break;
+    case "sniper": HW = R * 0.40; xBack = -R * 0.5; xFront = R * 0.42; shape = "slope"; round = R * 0.1; break;
+    case "laser":  HW = R * 0.42; xBack = -R * 0.4; xFront = R * 0.40; shape = "box"; round = R * 0.06; break;
+    case "mg":     HW = R * 0.50; xBack = -R * 0.4; xFront = R * 0.30; shape = "box"; round = R * 0.12; break;
+    case "rocket": HW = R * 0.54; xBack = -R * 0.38; xFront = R * 0.26; shape = "box"; round = R * 0.14; break;
+    default: break; // normal + utility: rounded housing
+  }
+  HW += g; const bw = bW + g; const bl2 = bL + g;
+  const xb = xBack - g, xf = xFront;
+  ctx.beginPath();
+  // Barrel top edge out to the muzzle and back (shared by all shapes).
+  // Start at housing front-top, go forward along the barrel, around the
+  // muzzle, back, then trace the housing rear per its shape.
+  if (shape === "hex") {
+    // Faceted (angular) housing — heavy weapons.
+    ctx.moveTo(xf, -HW);
+    ctx.lineTo(xf, -bw);
+    ctx.lineTo(bl2, -bw);
+    ctx.lineTo(bl2, bw);
+    ctx.lineTo(xf, bw);
+    ctx.lineTo(xf, HW);
+    ctx.lineTo(xb + R * 0.14, HW);
+    ctx.lineTo(xb, HW * 0.5);
+    ctx.lineTo(xb, -HW * 0.5);
+    ctx.lineTo(xb + R * 0.14, -HW);
+    ctx.closePath();
+  } else if (shape === "slope") {
+    // Long, tapered housing — sniper.
+    ctx.moveTo(xf, -HW);
+    ctx.lineTo(xf, -bw);
+    ctx.lineTo(bl2, -bw);
+    ctx.lineTo(bl2, bw);
+    ctx.lineTo(xf, bw);
+    ctx.lineTo(xf, HW);
+    ctx.lineTo(xb + R * 0.2, HW * 0.8);
+    ctx.lineTo(xb, 0);
+    ctx.lineTo(xb + R * 0.2, -HW * 0.8);
+    ctx.closePath();
+  } else if (shape === "box") {
+    // Boxy housing with lightly rounded rear corners.
+    const r = round;
+    ctx.moveTo(xf, -HW);
+    ctx.lineTo(xf, -bw);
+    ctx.lineTo(bl2, -bw);
+    ctx.lineTo(bl2, bw);
+    ctx.lineTo(xf, bw);
+    ctx.lineTo(xf, HW);
+    ctx.lineTo(xb + r, HW);
+    ctx.quadraticCurveTo(xb, HW, xb, HW - r);
+    ctx.lineTo(xb, -HW + r);
+    ctx.quadraticCurveTo(xb, -HW, xb + r, -HW);
+    ctx.closePath();
+  } else {
+    // Rounded (cast) housing — default/normal, mortar.
+    const r = round;
+    ctx.moveTo(xf, -HW);
+    ctx.lineTo(xf, -bw);
+    ctx.lineTo(bl2, -bw);
+    ctx.lineTo(bl2, bw);
+    ctx.lineTo(xf, bw);
+    ctx.lineTo(xf, HW);
+    ctx.lineTo(xb + r, HW);
+    ctx.quadraticCurveTo(xb - r * 0.2, HW - r * 0.2, xb - r * 0.2, HW - r);
+    ctx.lineTo(xb - r * 0.2, -HW + r);
+    ctx.quadraticCurveTo(xb - r * 0.2, -HW + r * 0.2, xb + r, -HW);
+    ctx.closePath();
+  }
 }
 
 function drawWreck(t) {

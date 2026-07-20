@@ -374,35 +374,43 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   rr(-R * 1.0, -R * 0.36, R * 0.14, R * 0.16, R * 0.05);
   rr(-R * 1.0, R * 0.2, R * 0.14, R * 0.16, R * 0.05);
 
-  // ---- One-piece turret (matches the arena) ----
-  // A single capsule, no separate cap, carrying the paint/pattern.
-  const barLen = R * 1.15, barHW = R * 0.30, back = R * 0.34;
-  const capLen = barLen + back;
-  const capsule = (x0, x1, hw) => {
-    const r2 = Math.min(hw, (x1 - x0) * 0.5);
+  // ---- One-piece tank turret (matches the arena) ----
+  // A rounded cast housing with a barrel, traced as one closed path.
+  const bL = R * 1.15, bW = R * 0.30;
+  const HW = R * 0.46, xBack = -R * 0.42, xFront = R * 0.36, rc = R * 0.16;
+  const outline = (g) => {
+    const hw = HW + g, bw = bW + g, bl2 = bL + g, xf = xFront, xb = xBack - g, r = rc;
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(x0, -hw, x1 - x0, hw * 2, r2);
-    else ctx.rect(x0, -hw, x1 - x0, hw * 2);
+    ctx.moveTo(xf, -hw);
+    ctx.lineTo(xf, -bw);
+    ctx.lineTo(bl2, -bw);
+    ctx.lineTo(bl2, bw);
+    ctx.lineTo(xf, bw);
+    ctx.lineTo(xf, hw);
+    ctx.lineTo(xb + r, hw);
+    ctx.quadraticCurveTo(xb - r * 0.2, hw - r * 0.2, xb - r * 0.2, hw - r);
+    ctx.lineTo(xb - r * 0.2, -hw + r);
+    ctx.quadraticCurveTo(xb - r * 0.2, -hw + r * 0.2, xb + r, -hw);
+    ctx.closePath();
   };
-  const o = Math.max(1.5, R * 0.09);
   ctx.fillStyle = "rgba(16,20,28,0.92)";
-  capsule(-back - o, barLen + o, barHW + o);
+  outline(Math.max(1.5, R * 0.085));
   ctx.fill();
   ctx.save();
-  capsule(-back, barLen, barHW);
+  outline(0);
   ctx.clip();
   ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
-  ctx.fillRect(-back - 1, -barHW - 1, capLen + 2, barHW * 2 + 2);
+  ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
   if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
-  const bev = ctx.createLinearGradient(0, -barHW, 0, barHW);
-  bev.addColorStop(0, "rgba(255,255,255,0.28)");
+  const bev = ctx.createLinearGradient(0, -R * 0.55, 0, R * 0.55);
+  bev.addColorStop(0, "rgba(255,255,255,0.26)");
   bev.addColorStop(0.5, "rgba(255,255,255,0)");
-  bev.addColorStop(1, "rgba(0,0,0,0.30)");
+  bev.addColorStop(1, "rgba(0,0,0,0.28)");
   ctx.fillStyle = bev;
-  ctx.fillRect(-back - 1, -barHW - 1, capLen + 2, barHW * 2 + 2);
-  ctx.fillStyle = "rgba(0,0,0,0.40)";
+  ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
+  ctx.fillStyle = "rgba(0,0,0,0.42)";
   ctx.beginPath();
-  ctx.ellipse(barLen - barHW * 0.34, 0, barHW * 0.30, barHW * 0.62, 0, 0, Math.PI * 2);
+  ctx.ellipse(bL - bW * 0.30, 0, bW * 0.30, bW * 0.6, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 
