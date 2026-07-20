@@ -1684,11 +1684,21 @@ body {
 /* ---------- second local player HUD (ranked 2v2 couch co-op) -------- */
 /* Sits just above Player 1's readout in the bottom-left, deliberately
    smaller so it never competes with your own health. */
+/* Additional local players stack UPWARD from just above the P1 health
+   readout. The container grows upward (column-reverse) so each new
+   player sits above the previous one. */
 .p2-hud {
   position: absolute;
   left: 10px;
   bottom: 64px;
   z-index: 5;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-start;
+  gap: 5px;
+  pointer-events: none;
+}
+.lp-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1696,24 +1706,34 @@ body {
   border-radius: 9px;
   background: rgba(12, 15, 21, .55);
   border: 1px solid var(--rivet);
-  pointer-events: none;
 }
-.p2-tag {
+.lp-tag {
   font-family: "Black Ops One", system-ui;
   font-size: .72rem;
   letter-spacing: .06em;
-  color: #9fb6dd;
 }
-.p2-health { display: flex; gap: 2px; }
-.p2-health .p2-pip {
+.lp-bars { display: flex; flex-direction: column; gap: 3px; }
+.lp-ars, .lp-hps { display: flex; gap: 2px; }
+.lp-pip {
   width: 6px; height: 12px;
   border-radius: 2px;
-  background: #4bd08a;
+  background: #4bd08a; /* overridden inline to the tank colour */
   box-shadow: inset 0 1px 0 rgba(255,255,255,.3);
 }
-.p2-health .p2-pip.spent { background: rgba(255,255,255,.16); box-shadow: none; }
-.p2-load { display: flex; gap: 4px; }
-.p2-load .p2-item {
+.lp-pip.spent { background: rgba(255,255,255,.16) !important; border-color: transparent !important; box-shadow: none; }
+.lp-ar {
+  width: 6px; height: 7px;
+  border-radius: 2px;
+  background: #59b0ff; /* armour stays blue */
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35);
+}
+.lp-load {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 6px; /* 70%-opacity tank-colour plate set inline */
+}
+.lp-item {
   width: 20px; height: 20px;
   border-radius: 5px;
   border: 1px solid var(--rivet);
