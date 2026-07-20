@@ -1679,3 +1679,44 @@ body {
 /* Couch co-op: the two ways to fill the empty duo seat sit stacked. */
 .duo-empty-seat { display: flex; flex-direction: column; gap: 6px; }
 .duo-couch-btn { border-style: dashed; opacity: .85; }
+
+
+/* ---------- second local player HUD (ranked 2v2 couch co-op) -------- */
+/* Sits just above Player 1's readout in the bottom-left, deliberately
+   smaller so it never competes with your own health. */
+.p2-hud {
+  position: absolute;
+  left: 10px;
+  bottom: 64px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 9px;
+  background: rgba(12, 15, 21, .55);
+  border: 1px solid var(--rivet);
+  pointer-events: none;
+}
+.p2-tag {
+  font-family: "Black Ops One", system-ui;
+  font-size: .72rem;
+  letter-spacing: .06em;
+  color: #9fb6dd;
+}
+.p2-health { display: flex; gap: 2px; }
+.p2-health .p2-pip {
+  width: 6px; height: 12px;
+  border-radius: 2px;
+  background: #4bd08a;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.3);
+}
+.p2-health .p2-pip.spent { background: rgba(255,255,255,.16); box-shadow: none; }
+.p2-load { display: flex; gap: 4px; }
+.p2-load .p2-item {
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--rivet);
+  background: rgba(30, 35, 46, .8);
+}
+.arena-wrap.has-touch .p2-hud { bottom: calc(var(--tp-size) + 44px); }
