@@ -28,20 +28,20 @@
       <nav class="menu-grid">
         <button class="btn btn-big" data-go="screen-ranked">Ranked</button>
         <button class="btn btn-big" data-go="screen-online">Custom</button>
-        <button class="btn btn-big" data-go="screen-local">Local</button>
+        <button class="btn btn-big" data-go="screen-local">Offline</button>
         <button class="btn btn-big" data-go="screen-shop">Shop</button>
         <button class="btn btn-big" data-go="screen-social">Social</button>
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v0.9.3</p>
+      <p class="foot">v0.3 · combat build</p>
     </section>
 
-    <!-- ============ LOCAL ============ -->
+    <!-- ============ OFFLINE ============ -->
     <section class="screen" id="screen-local" aria-label="Offline battle setup">
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
-        <h2>Local</h2>
+        <h2>Offline</h2>
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
       </header>
       <div class="slots" id="local-slots"></div>
@@ -354,11 +354,9 @@
         <span class="health-hud" id="health-hud" hidden></span>
         <!-- Second local player (ranked 2v2 couch co-op): their own
              health and ability readout, so they aren't flying blind. -->
-        <div class="p2-hud" id="p2-hud" hidden>
-          <span class="p2-tag">P2</span>
-          <span class="p2-health" id="p2-health"></span>
-          <span class="p2-load" id="p2-load"></span>
-        </div>
+        <!-- Additional local players (couch co-op / local seats): one
+             stacked readout each, built in game.js. -->
+        <div class="p2-hud" id="p2-hud" hidden></div>
         <div class="loadout-hud" id="loadout-hud" hidden>
           <div class="loadout-slot" data-fire="off" data-cat="offense">
             <canvas class="loadout-icon" data-cat="offense" width="112" height="112"></canvas>
