@@ -1704,7 +1704,7 @@ body {
   gap: 8px;
   padding: 4px 8px;
   border-radius: 9px;
-  background: rgba(12, 15, 21, .55);
+  background: rgba(12, 15, 21, .77);
   border: 1px solid var(--rivet);
 }
 .lp-tag {
@@ -1733,10 +1733,8 @@ body {
   padding: 3px;
   border-radius: 6px; /* 70%-opacity tank-colour plate set inline */
 }
-.lp-item {
-  width: 20px; height: 20px;
-  border-radius: 5px;
-  border: 1px solid var(--rivet);
-  background: rgba(30, 35, 46, .8);
+.lp-icon {
+  width: 22px; height: 22px;
+  display: block;
 }
 .arena-wrap.has-touch .p2-hud { bottom: calc(var(--tp-size) + 44px); }
