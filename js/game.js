@@ -1173,7 +1173,7 @@ function stepTanks(now, dt) {
         if (t.weapon !== "mortar" || t.dead || t.gone) {
           cancelMortarAim(t); // lost the launcher — don't stay stuck
         } else {
-          stepMortarAim(t, acts, dt);
+          stepMortarAim(t, acts, dt, now);
           acts.up = acts.down = acts.left = acts.right = false;
           acts.moveAngle = null;
           acts.moveMag = 0;
@@ -1657,62 +1657,101 @@ function snapToIntersection(x, y) {
   };
 }
 
-// Resolve a tank's polar aim (angle + half-cell distance) into a
-// clamped, snapped world point.
-function mortarPointFor(t) {
+// Is intersection (c,r) a legal drop for this tank? It must sit on the
+// board and inside the launcher's reach ring.
+function mortarCellOK(t, c, r) {
+  const cols = Math.round(S.worldW / CELL), rows = Math.round(S.worldH / CELL);
+  if (c < 1 || r < 1 || c > cols - 1 || r > rows - 1) return false;
   const half = CELL / 2;
-  const dist = Math.max(MORTAR.minHalfCells,
-    Math.min(MORTAR.maxHalfCells, t.mortarDist ?? 3)) * half;
-  const ang = t.mortarAngle ?? (t.turret ?? t.a);
-  const raw = { x: t.x + Math.cos(ang) * dist, y: t.y + Math.sin(ang) * dist };
-  const p = snapToIntersection(raw.x, raw.y);
-  // Keep it on the board (intersections run 0..cols/rows inclusive).
-  p.x = Math.max(CELL, Math.min(S.worldW - CELL, p.x));
-  p.y = Math.max(CELL, Math.min(S.worldH - CELL, p.y));
-  return p;
+  const d = Math.hypot(c * CELL - t.x, r * CELL - t.y);
+  return d >= MORTAR.minHalfCells * half - 0.01
+      && d <= MORTAR.maxHalfCells * half + 0.01;
 }
 
-// Open the reticle: plant the tank and seed the aim in front of it.
+// The nearest legal intersection to a world point — used to seed the
+// reticle and to place bot shots.
+function nearestMortarCell(t, x, y) {
+  const base = snapToIntersection(x, y);
+  let best = null, bestD = Infinity;
+  const c0 = Math.round(base.x / CELL), r0 = Math.round(base.y / CELL);
+  for (let dc = -4; dc <= 4; dc++) {
+    for (let dr = -4; dr <= 4; dr++) {
+      const c = c0 + dc, r = r0 + dr;
+      if (!mortarCellOK(t, c, r)) continue;
+      const d = Math.hypot(c * CELL - x, r * CELL - y);
+      if (d < bestD) { bestD = d; best = { c, r }; }
+    }
+  }
+  return best;
+}
+
+function mortarCellPoint(cell) {
+  return { x: cell.c * CELL, y: cell.r * CELL };
+}
+
+// Open the reticle: plant the tank and seed the aim one step ahead.
 function beginMortarAim(t) {
+  const ahead = nearestMortarCell(t,
+    t.x + Math.cos(t.a) * CELL * 1.5, t.y + Math.sin(t.a) * CELL * 1.5);
+  const cell = ahead ?? nearestMortarCell(t, t.x, t.y);
+  if (!cell) return;            // nowhere legal to aim — don't plant
   t.mortarAiming = true;
-  t.mortarAngle = t.turret ?? t.a;
-  t.mortarDist = Math.round((MORTAR.minHalfCells + MORTAR.maxHalfCells) / 2);
-  t.mortarAim = mortarPointFor(t);
+  t.mortarCell = cell;
+  t.mortarStepAt = 0;
+  t.mortarAim = mortarCellPoint(cell);
 }
 
 function cancelMortarAim(t) {
   t.mortarAiming = false;
   t.mortarAim = null;
+  t.mortarCell = null;
 }
 
-// Walk the reticle with the movement controls while planted.
-// Keyboard: left/right swing the bearing, forward/back push the range
-// out and in. Touch: the stick's direction IS the bearing and how far
-// it's pushed sets the range — which reads naturally on a phone.
-const MORTAR_SWING = 2.2;   // radians/sec of bearing change
-const MORTAR_RANGE_RATE = 3; // half-cells/sec while held
-function stepMortarAim(t, acts, dt) {
-  if (acts.moveAngle != null) {
-    t.mortarAngle = acts.moveAngle;
-    const span = MORTAR.maxHalfCells - MORTAR.minHalfCells;
-    t.mortarDist = MORTAR.minHalfCells + span * (acts.moveMag ?? 1);
+// Walk the reticle with your OWN movement controls, one grid
+// intersection per press: up moves it up, left moves it left, and so on.
+//
+// The old scheme was polar — left/right swung a bearing and up/down
+// changed the radius — and because the result then snapped to the
+// nearest intersection, every press made the marker hop unpredictably
+// between a handful of points. That's the "it just cycles" behaviour.
+// Direct grid stepping is what the controls imply, so that's what it
+// does now. Holding a direction repeats at a steady cadence; releasing
+// re-arms an instant next step, so taps are exactly one square.
+const MORTAR_STEP_MS = 150;
+
+function stepMortarAim(t, acts, dt, now) {
+  if (!t.mortarCell) { cancelMortarAim(t); return; }
+  let sx = 0, sy = 0;
+  if (acts.moveAngle != null && (acts.moveMag ?? 0) > 0.35) {
+    // Touch stick: take whichever cardinal it leans toward most.
+    const ca = Math.cos(acts.moveAngle), sa = Math.sin(acts.moveAngle);
+    if (Math.abs(ca) > Math.abs(sa)) sx = ca > 0 ? 1 : -1;
+    else sy = sa > 0 ? 1 : -1;
   } else {
-    const turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
-    if (turn) t.mortarAngle = (t.mortarAngle ?? t.a) + turn * MORTAR_SWING * dt;
-    const push = (acts.up ? 1 : 0) - (acts.down ? 1 : 0);
-    if (push) {
-      t.mortarDist = Math.max(MORTAR.minHalfCells,
-        Math.min(MORTAR.maxHalfCells, (t.mortarDist ?? 3) + push * MORTAR_RANGE_RATE * dt));
-    }
+    if (acts.right) sx = 1; else if (acts.left) sx = -1;
+    if (acts.down) sy = 1; else if (acts.up) sy = -1;   // screen up = -y
   }
-  t.mortarAim = mortarPointFor(t);
+  if (!sx && !sy) { t.mortarStepAt = 0; return; }  // released: next tap is instant
+  if (now < (t.mortarStepAt ?? 0)) return;          // hold-to-repeat throttle
+  t.mortarStepAt = now + MORTAR_STEP_MS;
+
+  // Try the full diagonal, then each axis on its own, so sliding along
+  // the edge of the reach ring still works instead of jamming.
+  const tries = [[sx, sy], [sx, 0], [0, sy]];
+  for (const [dx, dy] of tries) {
+    if (!dx && !dy) continue;
+    const c = t.mortarCell.c + dx, r = t.mortarCell.r + dy;
+    if (mortarCellOK(t, c, r)) { t.mortarCell = { c, r }; break; }
+  }
+  t.mortarAim = mortarCellPoint(t.mortarCell);
 }
 
 // Where a bot's mortar lands. Bots skip the manual walk-around: the AI
-// hands us a predicted point, which we clamp and snap the same way so
-// their shells obey the identical rules.
+// hands us a predicted point and we drop it on the nearest LEGAL
+// intersection, so their shells obey exactly the same reach ring and
+// 4-cell footprint rules the player's do.
 function mortarTarget(t) {
-  if (t.mortarAim && t.mortarAiming) return t.mortarAim;
+  if (t.mortarAiming && t.mortarAim) return t.mortarAim;
   let ax, ay;
   if (t.mortarAim) { ax = t.mortarAim.x; ay = t.mortarAim.y; }
   else {
@@ -1725,13 +1764,12 @@ function mortarTarget(t) {
     if (e) { ax = e.x; ay = e.y; }
     else { ax = t.x + Math.cos(t.a) * CELL * 2; ay = t.y + Math.sin(t.a) * CELL * 2; }
   }
-  // Convert to polar, clamp the reach in half-cells, then snap.
+  const cell = nearestMortarCell(t, ax, ay);
+  if (cell) return mortarCellPoint(cell);
+  // Nothing legal in reach — drop it at the minimum range straight ahead.
   const half = CELL / 2;
-  const dx = ax - t.x, dy = ay - t.y;
-  const d = Math.hypot(dx, dy) / half;
-  t.mortarAngle = Math.atan2(dy, dx);
-  t.mortarDist = Math.max(MORTAR.minHalfCells, Math.min(MORTAR.maxHalfCells, d));
-  return mortarPointFor(t);
+  const d = MORTAR.minHalfCells * half;
+  return snapToIntersection(t.x + Math.cos(t.a) * d, t.y + Math.sin(t.a) * d);
 }
 
 // Launch an arcing shell from (x0,y0) toward the locked cell (tx,ty).
@@ -4374,14 +4412,17 @@ function drawTank(t, now) {
   ctx.save();
   ctx.rotate(turret - t.a);
 
-  const capR = R * 0.5;
+  // Turret cap: noticeably smaller than the old R*0.5 dome.
+  const capR = R * 0.40;
   const bL = bl.len * R, bW = bl.hw * R;
+  // Several barrel sprites overhang their nominal box (the rocket's
+  // nose cone reaches L + R*0.14, the cannon/mortar have flared
+  // collars). Both the outline and the paint clip below use this padded
+  // extent, otherwise the overhang renders as a bare, un-outlined spike
+  // poking out of the muzzle.
+  const bLo = bL + R * 0.2, bWo = bW * 1.06;
 
-  // ONE outline around the WHOLE turret silhouette (barrel + cap), not a
-  // ring on the cap. Drawn UNDER the paint as a thick dark stroke of the
-  // barrel rect + cap circle as a single path: the inner half is covered
-  // by the fills below, leaving a clean rim tracing only the outside
-  // edge of the whole assembly.
+  // ONE outline around the WHOLE turret silhouette (barrel + cap).
   // NOTE: this must be FILLED, not stroked. Stroking a path containing
   // two OVERLAPPING subpaths traces each subpath's own edge — including
   // the barrel's rear end where it sits inside the cap, and the cap's
@@ -4391,13 +4432,13 @@ function drawTank(t, now) {
   // interior seams); we fill a slightly enlarged copy underneath so the
   // paint on top leaves just the expanded margin as a rim.
   {
-    const o = Math.max(1.5, R * 0.09);
+    const o = Math.max(1.5, R * 0.08);
     ctx.fillStyle = "rgba(16,20,28,0.9)";
     ctx.beginPath();
     if (ctx.roundRect) {
-      ctx.roundRect(-o, -(bW + o), bL + o * 2, (bW + o) * 2, (bW + o) * 0.5);
+      ctx.roundRect(-o, -(bWo + o), bLo + o * 2, (bWo + o) * 2, (bWo + o) * 0.5);
     } else {
-      ctx.rect(-o, -(bW + o), bL + o * 2, (bW + o) * 2);
+      ctx.rect(-o, -(bWo + o), bLo + o * 2, (bWo + o) * 2);
     }
     ctx.moveTo(capR + o, 0);
     ctx.arc(0, 0, capR + o, 0, Math.PI * 2);
@@ -4411,11 +4452,11 @@ function drawTank(t, now) {
   {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, -bW, bL, bW * 2);
+    ctx.rect(-1, -bWo, bLo + 1, bWo * 2);
     ctx.clip();
     ctx.globalAlpha = 0.9; // let a little of the barrel's shading show through
     ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
-    ctx.fillRect(0, -bW, bL, bW * 2);
+    ctx.fillRect(-1, -bWo, bLo + 1, bWo * 2);
     if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
     ctx.globalAlpha = 1;
     ctx.restore();

@@ -35,19 +35,19 @@ export const WEAPON_CATEGORY = {
 // rectangle from the hull center to len·R forward, hw·R half-wide —
 // exactly what's drawn.
 export const BARRELS = {
-  normal: { len: 1.5,  hw: 0.31 },
-  laser:  { len: 1.85, hw: 0.15 },
-  sniper: { len: 2.05, hw: 0.19 },
-  mg:     { len: 1.45, hw: 0.36 },
-  rocket: { len: 1.3,  hw: 0.44 },
-  cannon: { len: 1.2,  hw: 0.52 },
-  mortar: { len: 0.95, hw: 0.46 },
-  boost:  { len: 1.5,  hw: 0.31 },
-  phase:  { len: 1.5,  hw: 0.31 },
-  wall:   { len: 1.5,  hw: 0.31 },
-  armour: { len: 1.5,  hw: 0.31 },
-  heal:   { len: 1.5,  hw: 0.31 },
-  mud:    { len: 1.5,  hw: 0.31 },
+  normal: { len: 1.2,  hw: 0.31 },
+  laser:  { len: 1.55, hw: 0.15 },
+  sniper: { len: 1.75, hw: 0.19 },
+  mg:     { len: 1.15, hw: 0.36 },
+  rocket: { len: 1.0,  hw: 0.44 },
+  cannon: { len: 0.9,  hw: 0.52 },
+  mortar: { len: 0.65, hw: 0.46 },
+  boost:  { len: 1.2,  hw: 0.31 },
+  phase:  { len: 1.2,  hw: 0.31 },
+  wall:   { len: 1.2,  hw: 0.31 },
+  armour: { len: 1.2,  hw: 0.31 },
+  heal:   { len: 1.2,  hw: 0.31 },
+  mud:    { len: 1.2,  hw: 0.31 },
 };
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
@@ -187,7 +187,11 @@ export const ROCKET = {
 };
 
 export const CANNON = {
-  speed: 0.594,      // one slow-ish projectile (8% quicker)
+  // Expressed against the same scale the tank uses: MOVE_SPEED is U*2.1
+  // and BULLET_SPEED is U*3.2, so 2.25/3.2 makes the shell travel
+  // U*2.25 — always a touch FASTER than a tank drives forward, however
+  // the scale is retuned. (Was 0.594 = U*1.9, i.e. slower than you.)
+  speed: 2.25 / 3.2,
   r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 7000,     // twice as long adrift before it self-detonates
   shrapN: 36,        // irregular shrapnel burst on expiry / tank hit

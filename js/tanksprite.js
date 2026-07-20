@@ -375,8 +375,9 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   rr(-R * 1.0, R * 0.2, R * 0.14, R * 0.16, R * 0.05);
 
   // Turret assembly (barrel + cap) — carries the same paint/pattern.
-  const barLen = R * 1.15, barHW = R * 0.16;
-  const capR = R * 0.5;
+  // Match the arena: shorter barrel, smaller cap.
+  const barLen = R * 0.9, barHW = R * 0.16;
+  const capR = R * 0.40;
   // ONE outline around the whole turret silhouette (barrel + cap),
   // drawn underneath as a thick dark stroke; the fills cover the inner
   // half, leaving a rim on the outside edge only.

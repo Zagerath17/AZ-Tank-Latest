@@ -25,7 +25,9 @@ import { SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors, isEliteS
 // Season reset marker. Any account whose stored wipeVersion is lower
 // gets its ratings, currency and purchases cleared exactly once on its
 // next sign-in. Raise this number to run a fresh wipe in future.
-const WIPE_VERSION = 1;
+const WIPE_VERSION = 2;
+// Everyone restarts the ladder from here.
+const WIPE_ELO = 500;
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
 
@@ -38,14 +40,12 @@ const LS_NOREQ = "tank.noreq.v1";
 // device — so no other account can inherit these powers by editing a
 // profile. Everyone not on this list is completely unaffected: every
 // dev branch below is behind isDev(), which is false for them.
-const DEV_EMAILS = new Set([
-  "samuelbarnhart17@gmail.com",
-  "rainphyer17@gmail.com",
-  "barnhartisaac@gmail.com",
-]);
-
-function isDevEmail(email) {
-  return DEV_EMAILS.has(String(email ?? "").trim().toLowerCase());
+// DEV ACCESS REMOVED. There is no dev roster any more and no account
+// can hold dev powers — the tools panel and the free Elo/tag adjusters
+// are unreachable. Kept as a stub returning false so every caller keeps
+// working and nothing can quietly re-enable it.
+function isDevEmail() {
+  return false;
 }
 
 const LS_BLOCKS = "tank.blocks.v1";
@@ -349,21 +349,23 @@ async function adoptProfile(uid, wantName = null, email = null) {
   if ((prof.wipeVersion ?? 0) < WIPE_VERSION) {
     try {
       await f.update(f.ref(f.db, `users/${key}`), {
-        elo1: null,
-        elo2v2: null,
+        elo1: WIPE_ELO,
+        elo2v2: WIPE_ELO,
         tags: 0,
         owned: null,
         ownedPatterns: null,
         color: DEFAULT_SKIN,
         pattern: DEFAULT_PATTERN,
         patColors: null,
+        dev: null,            // strip any stored dev marker too
         wipeVersion: WIPE_VERSION,
       });
       prof = {
         ...prof,
-        elo1: null, elo2v2: null, tags: 0,
+        elo1: WIPE_ELO, elo2v2: WIPE_ELO, tags: 0,
         owned: null, ownedPatterns: null,
         color: DEFAULT_SKIN, pattern: DEFAULT_PATTERN, patColors: null,
+        dev: null,
         wipeVersion: WIPE_VERSION,
       };
       // Also clear the locally cached leaderboard standing so Ruby's

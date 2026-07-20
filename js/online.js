@@ -222,7 +222,7 @@ export async function createRankedLobby(mode, expect, teams = null, teamLeaders 
         e2: await myEloOrNull(f, "elo2v2"),
       } },
     });
-    await enterLobby(code);
+    await enterLobby(code, { ranked: true });
     return code;
   }
   throw new Error("Couldn't find a free lobby code.");
@@ -329,7 +329,7 @@ export async function joinLobby(code) {
       e2: await myEloOrNull(f, "elo2v2"),
     });
   }
-  await enterLobby(code);
+  await enterLobby(code, { ranked: !!lobby.ranked });
 }
 
 // The player id this client uses for its couch Player 2. Distinct from
@@ -379,7 +379,9 @@ export async function joinLobbyAsLocalDuo(code, guestUkey, acc) {
     e2,
   };
   await f.update(f.ref(f.db), updates);
-  await enterLobby(code);
+  // Couch co-op only ever happens in ranked 2v2, so this is a ranked
+  // entry — never show the custom lobby screen here either.
+  await enterLobby(code, { ranked: true });
   // Clean the GUEST entry up too if this tab dies (enterLobby already
   // set that up for the account's own node).
   try {
@@ -391,7 +393,14 @@ export async function joinLobbyAsLocalDuo(code, guestUkey, acc) {
 
 /* ---------- lobby lifecycle ---------- */
 
-async function enterLobby(code) {
+// `opts.ranked` — a matchmade lobby must NOT drop you on the custom
+// lobby screen. That's the bug where queuing for 2v2 dumped you into
+// what looked like a custom lobby sitting with the enemy team: this is
+// the same plumbing both flows share, and it always showed the lobby
+// UI. Ranked instead stays put (the ranked screen already reads
+// "match found") until the snapshot handler moves everyone to the
+// versus card and then into the match.
+async function enterLobby(code, opts = {}) {
   const f = await ensureFirebase();
 
   const lobbyRef = f.ref(f.db, `lobbies/${code}`);
@@ -407,8 +416,11 @@ async function enterLobby(code) {
     () => { stopGame(); toast("Lost connection to the lobby."); exitToOnline(); },
   );
 
-  current = { code, lobbyRef, playerRef, disc, unsub, inGame: false, playersCache: {} };
-  showScreen("screen-lobby");
+  current = {
+    code, lobbyRef, playerRef, disc, unsub,
+    inGame: false, playersCache: {}, ranked: !!opts.ranked,
+  };
+  if (!opts.ranked) showScreen("screen-lobby");
 }
 
 function exitToOnline() {
