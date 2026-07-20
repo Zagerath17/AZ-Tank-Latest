@@ -143,6 +143,7 @@ const MAZE_SHAPES_NONRECT = MAZE_SHAPES.filter((s) => s !== "rect");
 
 let S = null;
 let canvas, ctx, exitBtn, touchPad, scoreEl, shrinkEl, loadoutHudEl, healthHudEl, armourHudEl, multiKillEl;
+let p2HudEl, p2HealthEl, p2LoadEl;
 const held = new Set();
 // Turret aiming: the mouse position in WORLD coordinates, whether the
 // player has aimed at all yet (so we can fall back to hull-facing on
@@ -172,6 +173,9 @@ export function initGame() {
   shrinkEl = document.getElementById("game-shrink");
   loadoutHudEl = document.getElementById("loadout-hud");
   healthHudEl = document.getElementById("health-hud");
+  p2HudEl = document.getElementById("p2-hud");
+  p2HealthEl = document.getElementById("p2-health");
+  p2LoadEl = document.getElementById("p2-load");
   armourHudEl = document.getElementById("armour-hud");
   multiKillEl = document.getElementById("multikill");
   touchPad = document.getElementById("touch-pad");
@@ -343,6 +347,7 @@ export function stopGame() {
   if (multiKillEl) { multiKillEl.hidden = true; multiKillEl._sig = undefined; }
   if (armourHudEl) armourHudEl.hidden = true;
   if (healthHudEl) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
+  if (p2HudEl) { p2HudEl.hidden = true; p2HudEl._sig = undefined; }
   S = null;
 }
 
@@ -704,7 +709,7 @@ function startRound(seed) {
   S.mortars = [];
   S.mortarClouds = [];
   S.sparks = [];
-  S.mortarAim = null;
+  S.mortarAims = [];
   S.beams = [];
   S.booms = [];
   S.seenShots = {};
@@ -957,7 +962,7 @@ function frame(now) {
   // dodged by bots) and the hazard list bots treat as bullets.
   S.laserPaths = [];
   S.sniperAims = [];
-  S.mortarAim = null;
+  S.mortarAims = [];
   for (const t of S.tanks) {
     if (t.dead || t.gone) continue;
     if (t.weapon === "laser") {
@@ -974,10 +979,15 @@ function frame(now) {
         x1: m.x + Math.cos(aim) * len, y1: m.y + Math.sin(aim) * len,
       });
     } else if (t.weapon === "mortar" && !t.bot && t.local && t.mortarAiming) {
-      // The shooter's own targeting reticle, shown only while the
-      // launcher is actually open (the tank is planted). The in-flight
-      // red dot is what warns everyone else.
-      S.mortarAim = t.mortarAim;
+      // A targeting reticle for EACH locally-driven tank that has its
+      // launcher open. This is a list, not a single slot: with two
+      // people on one machine (local play, or ranked 2v2 couch co-op)
+      // both can be aiming at once, and a shared slot meant only the
+      // last one written ever drew. Tinted per tank so each player can
+      // pick out their own. The in-flight red dot still warns everyone.
+      if (t.mortarAim) {
+        S.mortarAims.push({ x: t.mortarAim.x, y: t.mortarAim.y, color: effBaseHex(t) });
+      }
     }
   }
   // Bots treat every projectile as a bullet to dodge: minis, cannon
@@ -2608,10 +2618,11 @@ function stepCannons(now, dt) {
 
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
-      // Brief grace so the shell doesn't clip its own barrel leaving —
-      // after that your own round is live against you, which is the
-      // risk that makes point-blank shots and ricochets bite.
-      if (t.id === c.by && now - c.born < 100) continue;
+      // Half a second before your own shell can register on you. Long
+      // enough that firing and driving is never self-inflicted; after
+      // that it's live against you, so point-blank shots and ricochets
+      // still bite.
+      if (t.id === c.by && now - c.born < 500) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
         applyHit(t, DMG.cannonBall, c.by, now, "bullet");
         explodeCannon(c, now);
@@ -2983,7 +2994,8 @@ function updateScoreHUD() {
   // every score change would trash the animated sprite canvases, so we
   // only lay them out when the roster/labels change and otherwise just
   // poke the score numbers.
-  const sig = order.map((p) => `${p.id}:${p.color}:${p.pattern ?? "solid"}:${(p.patColors ?? []).join("-")}`).join("|");
+  const sig = order.map((p) => `${p.id}:${p.color}:${p.pattern ?? "solid"}:${(p.patColors ?? []).join("-")}` +
+    `:${p.colorHex ?? ""}:${(p.patHex ?? []).join("-")}`).join("|");
   if (scoreEl._sig !== sig) {
     scoreEl._sig = sig;
     scoreEl.innerHTML = "";
@@ -2995,8 +3007,12 @@ function updateScoreHUD() {
       const name = document.createElement("span");
       name.className = "sc-name";
       name.textContent = rosterLabel(p, order);
-      const sprite = tankSpriteCanvas(
-        { color: p.color, pattern: p.pattern, patColors: p.patColors }, 34, p.id);
+      // Carry the 2v2 team-paint overrides through, so a recoloured
+      // enemy team looks the same on the scoreboard as in the arena.
+      const sprite = tankSpriteCanvas({
+        color: p.color, pattern: p.pattern, patColors: p.patColors,
+        colorHex: p.colorHex ?? null, patHex: p.patHex ?? null,
+      }, 34, p.id);
       const sc = document.createElement("span");
       sc.className = "sc";
       sc.textContent = S.scores[p.id] ?? 0;
@@ -3434,7 +3450,7 @@ function draw(now) {
   // shooter's own aiming reticle — all on the ground, under the tanks.
   if (S.mortarClouds) for (const c of S.mortarClouds) drawMortarCloud(c, now);
   for (const m of S.mortars) drawMortarMarker(m, now);
-  if (S.mortarAim) drawMortarReticle(S.mortarAim, now);
+  if (S.mortarAims) for (const a of S.mortarAims) drawMortarReticle(a, now);
   // Rising "+HP" pops when a heal tick lands.
   if (S.healPops) {
     S.healPops = S.healPops.filter((p) => now - p.born < 700);
@@ -3662,6 +3678,37 @@ function draw(now) {
     }
   }
 
+  // SECOND LOCAL PLAYER (ranked 2v2 couch co-op). When this machine is
+  // driving two tanks, the partner gets their own compact health +
+  // ability readout — otherwise they'd have no idea what they're
+  // holding or how close they are to dying.
+  if (p2HudEl) {
+    const mate = S.localGuest ? S.tanks.find((t) => t.id === S.localGuest) : null;
+    const mateAlive = mate && !mate.dead && !mate.gone;
+    if (!mateAlive) {
+      p2HudEl.hidden = true;
+      p2HudEl._sig = undefined;
+    } else {
+      const hp = Math.max(0, Math.ceil(mate.hp ?? TANK_HP));
+      const items = [mate.weapon ?? null, mate.defense ?? null, mate.agility ?? null];
+      const sig = `${hp}|${items.join("|")}`;
+      p2HudEl.hidden = false;
+      if (p2HudEl._sig !== sig) {
+        p2HudEl._sig = sig;
+        let pips = "";
+        for (let i = 0; i < TANK_HP; i++) {
+          pips += `<span class="p2-pip${i < hp ? "" : " spent"}"></span>`;
+        }
+        p2HealthEl.innerHTML = pips;
+        p2LoadEl.innerHTML = items.map((it) => {
+          const c = it ? (GEAR_RIM[it] ?? "#e8eefc") : null;
+          return `<span class="p2-item" style="${c ? `background:${c};border-color:${c}` : ""}"
+                        title="${it ? (WEAPON_LABEL[it] ?? it) : "empty"}"></span>`;
+        }).join("");
+      }
+    }
+  }
+
   // Armour readout: blue pips above health, shown only while the shield
   // is up. Rebuilt only when the count changes.
   if (armourHudEl) {
@@ -3810,12 +3857,15 @@ function drawMortarReticle(a, now) {
   const pulse = 0.5 + 0.5 * Math.sin(now / 160);
   ctx.save();
   ctx.translate(a.x, a.y);
-  ctx.strokeStyle = `rgba(232, 69, 46, ${0.55 + 0.35 * pulse})`;
+  // Tinted with the owning tank's paint so two local players aiming at
+  // once can tell their reticles apart (falls back to the old red).
+  const tint = a.color ?? "#e8452e";
+  ctx.strokeStyle = paintHexToRGBA(tint, 0.55 + 0.35 * pulse);
   ctx.lineWidth = 2.5;
   const r = MORTAR.blastCells * CELL;   // the real blast radius
   // The 2x2 footprint it will flatten.
   ctx.globalAlpha = 0.16 + 0.10 * pulse;
-  ctx.fillStyle = "#e8452e";
+  ctx.fillStyle = tint;
   ctx.fillRect(-CELL, -CELL, CELL * 2, CELL * 2);
   ctx.globalAlpha = 1;
   ctx.strokeRect(-CELL, -CELL, CELL * 2, CELL * 2);
@@ -4332,17 +4382,26 @@ function drawTank(t, now) {
   // barrel rect + cap circle as a single path: the inner half is covered
   // by the fills below, leaving a clean rim tracing only the outside
   // edge of the whole assembly.
+  // NOTE: this must be FILLED, not stroked. Stroking a path containing
+  // two OVERLAPPING subpaths traces each subpath's own edge — including
+  // the barrel's rear end where it sits inside the cap, and the cap's
+  // arc where it crosses the barrel. Those interior lines were the
+  // overlapping/glitchy double-outline. Filling both subpaths in ONE
+  // path gives their clean union (nonzero winding, uniform alpha, no
+  // interior seams); we fill a slightly enlarged copy underneath so the
+  // paint on top leaves just the expanded margin as a rim.
   {
-    const outlineW = Math.max(1.5, R * 0.09);
-    ctx.strokeStyle = "rgba(16,20,28,0.9)";
-    ctx.lineWidth = outlineW * 2;
-    ctx.lineJoin = "round";
+    const o = Math.max(1.5, R * 0.09);
+    ctx.fillStyle = "rgba(16,20,28,0.9)";
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(0, -bW, bL, bW * 2, bW * 0.5);
-    else ctx.rect(0, -bW, bL, bW * 2);
-    ctx.moveTo(capR, 0);
-    ctx.arc(0, 0, capR, 0, Math.PI * 2);
-    ctx.stroke();
+    if (ctx.roundRect) {
+      ctx.roundRect(-o, -(bW + o), bL + o * 2, (bW + o) * 2, (bW + o) * 0.5);
+    } else {
+      ctx.rect(-o, -(bW + o), bL + o * 2, (bW + o) * 2);
+    }
+    ctx.moveTo(capR + o, 0);
+    ctx.arc(0, 0, capR + o, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   // Barrel: draw its base shape, then paint the skin/pattern over just

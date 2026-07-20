@@ -40,8 +40,8 @@ function paintHexToRGBA(hex, alpha) {
 
 /* ---------- animated paint finish (mirrors game.js hullPaint) ---------- */
 
-function hullPaint(ctx, color, R, now) {
-  const hex = HULL[color] ?? HULL.red;
+function hullPaint(ctx, color, R, now, hexOv) {
+  const hex = hexOv ?? HULL[color] ?? HULL.red;
   const finish = skinFinish(color);
   if (finish === "flat") return hex;
 
@@ -111,9 +111,9 @@ function patRng(seed) {
   };
 }
 
-function drawPattern(ctx, id, col, R, now, seedId) {
-  const paint = hullPaint(ctx, col, R, now);
-  const colHex = HULL[col] ?? HULL.red;
+function drawPattern(ctx, id, col, R, now, seedId, hexOv) {
+  const paint = hullPaint(ctx, col, R, now, hexOv);
+  const colHex = hexOv ?? HULL[col] ?? HULL.red;
   ctx.fillStyle = paint;
   ctx.strokeStyle = paint;
   const W = R * 1.8, H = R * 1.16;
@@ -314,8 +314,15 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   const pat = look?.pattern && look.pattern !== "solid" ? look.pattern : null;
   const pc = Array.isArray(look?.patColors) ? look.patColors : [];
   const bodyColor = pat && pc[0] ? pc[0] : color;
-  const bodyHex = HULL[bodyColor] ?? HULL.red;
-  const hull = HULL[color] ?? HULL.red;
+  // 2v2 team paint: the lobby may hand us explicit HEXES that override
+  // the skin's own colours (so a clashing enemy team is recoloured on
+  // our screen). Same contract as the arena renderer: colorHex is the
+  // solid/base override, patHex = [base, overlay] for a pattern.
+  const patOv = Array.isArray(look?.patHex) ? look.patHex : null;
+  const baseHexOv = pat ? (patOv ? patOv[0] : undefined) : (look?.colorHex || undefined);
+  const overlayHexOv = pat && patOv ? patOv[1] : undefined;
+  const bodyHex = baseHexOv ?? HULL[bodyColor] ?? HULL.red;
+  const hull = look?.colorHex ?? HULL[color] ?? HULL.red;
 
   ctx.save();
   // The game draws with the barrel along +x; a preview reads best with
@@ -337,12 +344,12 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   ctx.stroke();
 
   // Hull base + pattern overlay.
-  ctx.fillStyle = hullPaint(ctx, bodyColor, R, now);
+  ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
   if (pat && pc[0] && pc[1]) {
     ctx.save();
     ctx.beginPath(); rrPath(ctx, -R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24); ctx.clip();
-    drawPattern(ctx, pat, pc[1], R, now, seed);
+    drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
     ctx.restore();
   }
 
@@ -391,17 +398,17 @@ function drawSpriteTank(ctx, look, R, now, seed) {
     ctx.save();
     ctx.beginPath(); ctx.rect(0, -barHW, barLen, barHW * 2); ctx.clip();
     ctx.globalAlpha = 0.9;
-    ctx.fillStyle = hullPaint(ctx, bodyColor, R, now);
+    ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
     ctx.fillRect(0, -barHW, barLen, barHW * 2);
-    if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed);
+    if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
     ctx.globalAlpha = 1;
     ctx.restore();
   }
   ctx.beginPath(); ctx.arc(0, 0, capR, 0, Math.PI * 2);
   ctx.save(); ctx.clip();
-  ctx.fillStyle = hullPaint(ctx, bodyColor, R, now);
+  ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
   ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
-  if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed);
+  if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
   // Domed bevel so the cap has volume.
   const dome = ctx.createRadialGradient(-capR * 0.4, -capR * 0.4, capR * 0.1, 0, 0, capR);
   dome.addColorStop(0, "rgba(255,255,255,0.30)");

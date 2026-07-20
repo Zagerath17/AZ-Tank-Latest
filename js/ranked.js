@@ -278,6 +278,9 @@ function watchDuo(code) {
       };
       renderDuoPanel();
       // Matchmade! Everyone in the duo joins the same lobby.
+      // Flag it first so navigating into the match doesn't dissolve the
+      // team on the way out (onLeave only tears down an IDLE team).
+      if (v.match) duo.matched = true;
       if (v.match && !duoJoining) {
         duoJoining = true;
         if (queued) await stopQueueing("2v2", isDuoLeader());
@@ -782,6 +785,12 @@ export function initRanked() {
   onLeave("screen-ranked", () => {
     clearInterval(boardTimer);
     if (queued) leaveQueue();
+    // Backing out of ranked DISSOLVES an idle team. Keeping it alive
+    // meant returning to the screen showed your old partner still
+    // seated with no way to clear the slot; now you always come back to
+    // an empty seat. A MATCHED team is left alone so being pulled into
+    // the lobby doesn't tear it down under us.
+    if (duo && !duo.matched) leaveDuo();
     // Leaving the screen keeps the duo alive — you can come back to it.
   });
 }

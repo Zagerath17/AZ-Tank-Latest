@@ -978,6 +978,10 @@ function beginOnlineGame(code, lobby) {
         color: (roster.find((r) => r.id === pl.id) ?? {}).color ?? DEFAULT_SKIN,
         pattern: (roster.find((r) => r.id === pl.id) ?? {}).pattern ?? "solid",
         patColors: (roster.find((r) => r.id === pl.id) ?? {}).patColors ?? [],
+        // Team-paint overrides, so a recoloured enemy team shows the
+        // same colours on the results screen as it did in the match.
+        colorHex: (roster.find((r) => r.id === pl.id) ?? {}).colorHex ?? null,
+        patHex: (roster.find((r) => r.id === pl.id) ?? {}).patHex ?? null,
         score: pl.score,
       }));
       const savedCode = code;
