@@ -24,7 +24,8 @@
 // ================================================================
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG, paintVar } from "./main.js";
-import { SKINS, BOT_SKINS, DEFAULT_SKIN } from "./skins.js";
+import { SKINS, BOT_SKINS, DEFAULT_SKIN, skinHex } from "./skins.js";
+import { resolveTeamPaint } from "./teamcolor.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats, GEAR_CAP_LIMIT } from "./game.js";
@@ -194,7 +195,7 @@ async function myEloOrNull(f, field) {
 
 // Ranked lobbies are made by the matchmaker, never by hand: the
 // maker becomes host, everyone auto-starts once assembled.
-export async function createRankedLobby(mode, expect, teams = null) {
+export async function createRankedLobby(mode, expect, teams = null, teamLeaders = null) {
   const f = await ensureFirebase();
   for (let attempt = 0; attempt < 25; attempt++) {
     const code = String(Math.floor(1000 + Math.random() * 9000));
@@ -209,6 +210,7 @@ export async function createRankedLobby(mode, expect, teams = null) {
       rankedMode: mode, // "1v1" | "2v2"
       expect,
       teams: teams ?? null, // 2v2: { [ukey]: 0|1 }
+      teamLeaders: teamLeaders ?? null, // 2v2: { 0: ukey, 1: ukey }
       players: { [myId()]: {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
@@ -328,6 +330,63 @@ export async function joinLobby(code) {
     });
   }
   await enterLobby(code);
+}
+
+// The player id this client uses for its couch Player 2. Distinct from
+// myId() so both tanks get their own lobby node + position stream.
+export function localGuestId() {
+  return `${myId()}~g`;
+}
+
+// COUCH CO-OP join: seat BOTH players from this machine. Register the
+// account normally, then add a second player entry for the guest with
+// the synthetic guest ukey (so the teams map places it on our team and
+// it never resolves to a real account for Elo). Both entries stream
+// their own position from this one client.
+export async function joinLobbyAsLocalDuo(code, guestUkey, acc) {
+  const f = await ensureFirebase();
+  const snap = await f.get(f.ref(f.db, `lobbies/${code}`));
+  if (!snap.exists()) throw new Error("No lobby with that code.");
+  const lobby = snap.val();
+  if (lobby.state !== "waiting") throw new Error("That match has already started.");
+
+  const gid = localGuestId();
+  const e2 = await myEloOrNull(f, "elo2v2");
+  const updates = {};
+  if (!(lobby.players ?? {})[myId()]) {
+    updates[`lobbies/${code}/players/${myId()}`] = {
+      joinedAt: f.serverTimestamp(),
+      name: social.getAccount()?.name ?? null,
+      ukey: social.getAccount()?.key ?? null,
+      color: social.getSkin(),
+      pattern: social.getPattern(),
+      patColors: social.getPatternColors(),
+      e1: await myEloOrNull(f, "elo1"),
+      e2,
+    };
+  }
+  updates[`lobbies/${code}/players/${gid}`] = {
+    joinedAt: f.serverTimestamp(),
+    name: "Player 2",
+    ukey: guestUkey,          // synthetic — never a real account
+    guest: true,
+    // Colour/pattern are resolved by team paint anyway (guest = host
+    // 20% darker); store the host's so any raw reader shows the team.
+    color: social.getSkin(),
+    pattern: social.getPattern(),
+    patColors: social.getPatternColors(),
+    e1: null,
+    e2,
+  };
+  await f.update(f.ref(f.db), updates);
+  await enterLobby(code);
+  // Clean the GUEST entry up too if this tab dies (enterLobby already
+  // set that up for the account's own node).
+  try {
+    const gDisc = f.onDisconnect(f.ref(f.db, `lobbies/${code}/players/${gid}`));
+    await gDisc.remove();
+    if (current) current.guestDisc = gDisc;
+  } catch (e) { /* best-effort */ }
 }
 
 /* ---------- lobby lifecycle ---------- */
@@ -825,6 +884,56 @@ function beginOnlineGame(code, lobby) {
         .filter(([, p]) => p.ukey != null && lobby.teams[p.ukey] != null)
         .map(([id, p]) => [id, lobby.teams[p.ukey]]))
     : null;
+
+  // 2v2 TEAM PAINT. The host (team leader) chooses the colour + pattern
+  // for the whole team; the second seat wears it 20% darker. And if the
+  // enemy team's paint would clash with ours, we recolour THEM on our
+  // own screen (they do the same to us), so the two sides never look
+  // alike. Everything below is client-relative, anchored on MY team.
+  if (teamsById && lobby.teamLeaders) {
+    const leaders = lobby.teamLeaders; // { 0: ukey, 1: ukey }
+    // Map a team → its leader's lobby-entry.
+    const leaderEntryFor = (team) =>
+      entries.find(([, q]) => q.ukey === leaders[team]) ?? null;
+    // Build the resolver input (one row per player), using each team's
+    // LEADER paint (teammates inherit it).
+    const paintEntries = entries.map(([id, p]) => {
+      const team = teamsById[id] ?? 0;
+      const lead = leaderEntryFor(team);
+      const lp = lead ? lead[1] : p;
+      const leaderPatColors = Array.isArray(lp.patColors) ? lp.patColors : [];
+      const patId = lp.pattern && lp.pattern !== "solid" ? lp.pattern : null;
+      return {
+        id, team,
+        leader: p.ukey != null && leaders[team] === p.ukey,
+        baseHex: skinHex(lp.color ?? DEFAULT_SKIN),
+        patId,
+        patHexes: patId ? leaderPatColors.map((c) => skinHex(c)) : null,
+      };
+    });
+    const myTeam = teamsById[me] ?? 0;
+    const paint = resolveTeamPaint(paintEntries, myTeam);
+    // Fold the result back into the roster: each member shows the
+    // LEADER's colour + pattern IDs (finish + shape) with the resolved
+    // HEXES (darkened / shifted) overlaid.
+    for (const r of roster) {
+      const team = teamsById[r.id];
+      if (team == null) continue;
+      const lead = leaderEntryFor(team);
+      const lp = lead ? lead[1] : null;
+      if (lp) {
+        r.color = lp.color ?? r.color;              // finish
+        r.pattern = lp.pattern ?? "solid";          // shape
+        r.patColors = Array.isArray(lp.patColors) ? lp.patColors : [];
+      }
+      const paints = paint[r.id];
+      if (paints) {
+        r.colorHex = paints.baseHex;
+        r.patHex = paints.patHexes ?? null;
+      }
+    }
+  }
+
   const rankedInfo = lobby.ranked
     ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
         id,
@@ -902,6 +1011,10 @@ function beginOnlineGame(code, lobby) {
     roundN: lobby.round.n,
     seed: lobby.round.seed,
     myId: me,
+    // Couch co-op: the second local tank this client also drives (its
+    // player id is me+"~g"), or null. Marks that tank local so Player
+    // 2's input moves it and its position streams from here.
+    localGuest: (lobby.players ?? {})[`${me}~g`] ? `${me}~g` : null,
     roster,
     sendPos: (id, pos) => write(`players/${id}/pos`, pos),
     sendShot: (id, key, shot) => {

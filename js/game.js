@@ -70,7 +70,7 @@ const BULLET_LIFE = 6000;   // ms a bullet keeps bouncing
 // kill outright regardless of HP.)
 const TANK_HP = 10;
 const DMG = {
-  basic: 2,       // basic cannon ball
+  basic: 3,       // basic cannon ball
   mg: 1,          // machine-gun ball
   cannonBall: 5,  // the big cannon's direct ball hit
   shrapnel: 2,    // each fractal from the cannon
@@ -303,6 +303,7 @@ function opts_toState(o) {
     seed: o.seed,
     roundN: o.roundN ?? 1,
     myId: o.myId,
+    localGuest: o.localGuest ?? null,
     roster: o.roster,
     sendPos: o.sendPos,
     sendShot: o.sendShot,
@@ -348,6 +349,19 @@ export function stopGame() {
 export function isGameActive() {
   return !!S;
 }
+
+// Test-only introspection: a lightweight snapshot of tank id/team/flags.
+// Never used by the app itself — lets the headless harness verify the
+// local-duo wiring (both my tanks local, enemies remote, override hex).
+export function __tanksForTest() {
+  return S ? S.tanks.map((t) => ({
+    id: t.id, team: S.teams ? (S.teams[t.id] ?? null) : null,
+    local: !!t.local, bot: t.bot ?? null,
+    colorHex: t.colorHex ?? null, patHex: t.patHex ?? null,
+    coopSeat: S.coopBinds?.[t.id] ?? null,
+  })) : null;
+}
+export function __frameForTest(now) { if (S) frame(now); }
 
 // My tanks' received-damage ledger (attacker → total), for reporting.
 export function getMatchStats() {
@@ -520,6 +534,7 @@ function begin(opts) {
   S = {
     mode: opts.mode,
     myId: opts.myId ?? null,
+    localGuest: opts.localGuest ?? null,
     roster: opts.roster.slice(0, MAX_TANKS),
     scores: Object.fromEntries(opts.roster.map((p) => [p.id, 0])),
     present: new Set(opts.roster.map((p) => p.id)),
@@ -695,6 +710,12 @@ function startRound(seed) {
   S.seenShots = {};
   S.seenHits = {};
   S.touchSeat = (S.roster.find((p) => !p.bot) ?? {}).id ?? null;
+  // Couch co-op that was set up in the lobby (ranked 2v2 local duo)
+  // starts already paired: the guest tank answers to Player 2 (green)
+  // binds immediately, no fire-key opt-in needed. Online couch play
+  // only ever has this one pre-seated guest.
+  S.coopBinds = S.localGuest ? { [S.localGuest]: "green" } : {};
+  S.coopJoined = !!S.localGuest;
   S.banner = null;
   resetMultiKill();
   S.personalMsg = null;
@@ -754,7 +775,7 @@ function startRound(seed) {
     const a = Math.atan2(S.worldH / 2 - y, S.worldW / 2 - x);
     return {
       ...spec,
-      local: S.mode === "local" ? true : spec.id === S.myId,
+      local: S.mode === "local" ? true : (spec.id === S.myId || spec.id === S.localGuest),
       x, y, a, tx: x, ty: y, ta: a,
       turret: a, tu: a, // barrel aim (world angle) + remote target
       dead: false,
@@ -833,16 +854,67 @@ function isBoundCode(code) {
   );
 }
 
+// RANKED 2v2 COUCH CO-OP.
+// A second player sitting at the same keyboard joins by tapping their
+// own (Player 2) fire key. From then on the teammate tank answers to
+// Player 2's binds instead of being driven remotely. Outside ranked
+// 2v2 — custom lobbies, ranked 1v1 — this never arms, so only Player
+// 1's controls are ever live there.
+// LOCAL DROP-IN. In an offline match, a bot seat can be taken over at
+// any time by a person pressing THAT seat's fire key (red/green/blue/
+// yellow). The bot hands the tank over and it answers to that seat's
+// binds from then on. Lets friends jump in mid-game without returning
+// to the setup screen.
+function pollLocalJoins(binds) {
+  if (!S || S.mode !== "local") return;
+  for (const slot of ["red", "green", "blue", "yellow"]) {
+    const key = binds?.[slot]?.shoot;
+    if (!key || !held.has(key)) continue;
+    const seat = S.tanks.find((t) => (t.slot ?? t.color) === slot && t.bot && !t.dead && !t.gone);
+    if (seat) {
+      seat.bot = null;
+      seat.joinedLive = true;
+      toast(`${SLOT_LABEL[slot] ?? "A player"} joined!`);
+    }
+  }
+}
+
+const SLOT_LABEL = { red: "Player 1", green: "Player 2", blue: "Player 3", yellow: "Player 4" };
+
+function pollCoopJoin(binds) {
+  if (!S || S.mode !== "online" || !S.ranked || !S.teams) return;
+  if (S.coopJoined) return;
+  const key = binds?.green?.shoot;
+  if (!key || !held.has(key)) return;
+
+  const me = S.tanks.find((t) => t.local);
+  if (!me) return;
+  const myTeam = S.teams[me.id] ?? 0;
+  // The teammate seat: same team, not me, and not already someone
+  // else's live tank.
+  const mate = S.tanks.find((t) =>
+    t !== me && !t.bot && (S.teams[t.id] ?? 0) === myTeam);
+  if (!mate) return;
+
+  S.coopBinds = { ...(S.coopBinds ?? {}), [mate.id]: "green" };
+  S.coopJoined = true;
+  toast("Player 2 joined — you're driving as a pair.");
+}
+
 function readActions(tank, binds) {
   const acts = {
     up: false, down: false, left: false, right: false,
     shoot: false, def: false, agi: false,
   };
 
-  // Each seat has its OWN control set, so up to four people can share
-  // one keyboard in local play. Online there's a single local tank and
-  // it always sits in the first (red) seat's binds.
-  const seat = S.mode === "local" ? (tank.slot ?? tank.color) : "red";
+  // Which control set drives this tank?
+  //  • Local play  → the tank's own seat (four people, one keyboard).
+  //  • Online      → Player 1's binds only…
+  //  • …EXCEPT ranked 2v2, where a second person on the same keyboard
+  //    can take the teammate tank; that one answers to Player 2.
+  const seat = S.mode === "local"
+    ? (tank.slot ?? tank.color)
+    : (S.coopBinds?.[tank.id] ?? "red");
   const set = binds[seat] ?? binds.red ?? Object.values(binds)[0] ?? {};
   for (const a of ["up", "down", "left", "right", "shoot", "def", "agi"]) {
     const code = set[a];
@@ -890,14 +962,14 @@ function frame(now) {
     if (t.dead || t.gone) continue;
     if (t.weapon === "laser") {
       const m = muzzlePoint(t, 1);
-      S.laserPaths.push({ by: t.id, color: HULL[t.color], pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects, LASER.previewBounces, S.diag) });
+      S.laserPaths.push({ by: t.id, color: effBaseHex(t), pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects, LASER.previewBounces, S.diag) });
     } else if (t.weapon === "sniper") {
       // Straight line, no bounce, through walls, 3 cells long.
       const m = muzzlePoint(t, 1);
       const len = SNIPER.previewCells * CELL;
       const aim = t.turret ?? t.a;
       S.sniperAims.push({
-        by: t.id, color: HULL[t.color],
+        by: t.id, color: effBaseHex(t),
         x0: m.x, y0: m.y,
         x1: m.x + Math.cos(aim) * len, y1: m.y + Math.sin(aim) * len,
       });
@@ -1043,6 +1115,8 @@ function sampleNetState(t) {
 }
 
 function stepTanks(now, dt) {
+  pollCoopJoin(getBinds());
+  pollLocalJoins(getBinds());
   const binds = getBinds();
 
   for (const t of S.tanks) {
@@ -3519,13 +3593,6 @@ function draw(now) {
       }
     }
     ctx.stroke();
-    if (!bm.doneAt) {
-      const tip = beamPointAt(bm, bm.head);
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(tip.x, tip.y, LASER.width * BULLET_R * 1.6, 0, Math.PI * 2);
-      ctx.fill();
-    }
     ctx.globalAlpha = 1;
   }
 
@@ -3966,8 +4033,19 @@ function drawWall(w, now) {
 // edges — a gentle ramp on a ~50px hull just looks like uneven paint.
 // The sweep drifts with time so the surface catches the light as the
 // tank moves and turns.
-function hullPaint(color, R, now) {
-  const hex = HULL[color] ?? HULL.red;
+// The effective BASE hex a tank is wearing right now, honouring any 2v2
+// team-paint override so beams/effects match the hull the player sees.
+function effBaseHex(t) {
+  if (!t) return HULL.red;
+  const pat = t.pattern && t.pattern !== "solid" ? t.pattern : null;
+  if (pat && Array.isArray(t.patHex) && t.patHex[0]) return t.patHex[0];
+  if (!pat && t.colorHex) return t.colorHex;
+  const pc = Array.isArray(t.patColors) ? t.patColors : [];
+  return HULL[pat && pc[0] ? pc[0] : t.color] ?? HULL.red;
+}
+
+function hullPaint(color, R, now, hexOverride) {
+  const hex = hexOverride ?? HULL[color] ?? HULL.red;
   const finish = skinFinish(color);
   if (finish === "flat") return hex;
 
@@ -4127,9 +4205,16 @@ function drawTank(t, now) {
   // show through on the nose and tail.
   const pat = t.pattern && t.pattern !== "solid" ? t.pattern : null;
   const pc = Array.isArray(t.patColors) ? t.patColors : [];
-  const bodyColor = pat && pc[0] ? pc[0] : t.color;   // colour id
-  const bodyHex = HULL[bodyColor] ?? hull;            // its hex, for shade()
-  ctx.fillStyle = hullPaint(bodyColor, R, now);
+  const bodyColor = pat && pc[0] ? pc[0] : t.color;   // colour id (for finish)
+  // Team paint (2v2) can override the actual HEXES a tank wears while
+  // keeping its skin/pattern IDs for finish + shape. t.colorHex is the
+  // solid/base override; t.patHex = [h0, h1] overrides the pattern's
+  // two colours. Undefined → fall back to the id's own hex.
+  const patOv = Array.isArray(t.patHex) ? t.patHex : null;
+  const baseHexOv = pat ? (patOv ? patOv[0] : undefined) : (t.colorHex || undefined);
+  const overlayHexOv = pat && patOv ? patOv[1] : undefined;
+  const bodyHex = baseHexOv ?? (HULL[bodyColor] ?? hull); // effective base hex, for shade()
+  ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
   if (pat && pc[0] && pc[1]) {
     ctx.save();
@@ -4137,31 +4222,50 @@ function drawTank(t, now) {
     ctx.beginPath();
     rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
     ctx.clip();
-    drawPattern(pat, pc[1], R, now, t.id);
+    drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
     ctx.restore();
   }
 
-  // PHASE GLINT: while phasing, a violet sheen slides across the hull.
-  // Driven by a SINE (never a wrapping sawtooth) so the sweep eases in
-  // and out and reverses smoothly — no snap when it reaches the end.
-  // A second, slower sine breathes the intensity so it shimmers rather
-  // than strobing.
+  // PHASE GLINT: while phasing, a violet sheen sweeps across the hull.
+  // Phase only lasts a second and the tank is already at half opacity,
+  // so this is drawn ADDITIVELY and boldly — a subtle tint simply
+  // vanished behind the transparency. One sweep completes inside the
+  // phase window, and the motion is sine-driven (never a wrapping
+  // sawtooth) so it eases in and back out instead of snapping.
   if (now < (t.phaseUntil ?? 0)) {
     ctx.save();
     ctx.beginPath();
     rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
     ctx.clip();
-    const sweep = Math.sin(now / 620);            // -1 → 1, smooth both ways
-    const breathe = 0.55 + 0.45 * Math.sin(now / 940);
-    const cx = sweep * R * 1.1;
-    const pg = ctx.createLinearGradient(cx - R * 0.9, -R, cx + R * 0.9, R);
-    pg.addColorStop(0.00, "rgba(150, 90, 255, 0)");
-    pg.addColorStop(0.38, `rgba(168, 112, 255, ${0.16 * breathe})`);
-    pg.addColorStop(0.50, `rgba(214, 176, 255, ${0.42 * breathe})`);
-    pg.addColorStop(0.62, `rgba(168, 112, 255, ${0.16 * breathe})`);
-    pg.addColorStop(1.00, "rgba(150, 90, 255, 0)");
+    // Undo the tank's phase transparency for the glint itself, so the
+    // sheen reads at full strength on top of the see-through hull.
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "lighter";
+    const sweep = Math.sin(now / 300);                 // ~1.9 s round trip
+    const breathe = 0.72 + 0.28 * Math.sin(now / 165);
+    const cx = sweep * R * 1.05;
+    const pg = ctx.createLinearGradient(cx - R * 1.1, -R, cx + R * 1.1, R);
+    pg.addColorStop(0.00, "rgba(90, 20, 190, 0)");
+    pg.addColorStop(0.30, `rgba(138, 66, 240, ${0.34 * breathe})`);
+    pg.addColorStop(0.50, `rgba(206, 150, 255, ${0.92 * breathe})`);
+    pg.addColorStop(0.70, `rgba(138, 66, 240, ${0.34 * breathe})`);
+    pg.addColorStop(1.00, "rgba(90, 20, 190, 0)");
     ctx.fillStyle = pg;
-    ctx.fillRect(-R, -R, R * 2, R * 2);
+    ctx.fillRect(-R * 1.2, -R, R * 2.4, R * 2);
+    // A steady violet wash underneath keeps it reading as "phased" even
+    // at the moment the sweep is off the edge of the hull.
+    ctx.fillStyle = `rgba(150, 88, 255, ${0.22 * breathe})`;
+    ctx.fillRect(-R * 1.2, -R, R * 2.4, R * 2);
+    ctx.restore();
+
+    // Violet rim so the silhouette pops against the floor.
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = `rgba(196, 140, 255, ${0.55 + 0.35 * Math.sin(now / 165)})`;
+    ctx.lineWidth = Math.max(1.5, R * 0.09);
+    ctx.beginPath();
+    rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -4228,9 +4332,9 @@ function drawTank(t, now) {
     ctx.rect(0, -bW, bL, bW * 2);
     ctx.clip();
     ctx.globalAlpha = 0.9; // let a little of the barrel's shading show through
-    ctx.fillStyle = hullPaint(bodyColor, R, now);
+    ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
     ctx.fillRect(0, -bW, bL, bW * 2);
-    if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id);
+    if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -4248,28 +4352,46 @@ function drawTank(t, now) {
   }
 
   // Turret cap — same rotated frame, so its paint/pattern turns with
-  // the turret. Base painted with the skin (finish and all), then the
-  // pattern's second colour clipped to the cap circle.
+  // the turret. It reads as a raised, machined hub: the skin paint,
+  // then a domed bevel (highlight top-left, shade bottom-right), then a
+  // crisp OUTLINE so it stands clear of the hull instead of blending
+  // into it.
   const capR = R * 0.5;
   ctx.beginPath();
   ctx.arc(0, 0, capR, 0, Math.PI * 2);
   ctx.save();
   ctx.clip();
-  ctx.fillStyle = hullPaint(bodyColor, R, now);
+  ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
   ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
-  if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id);
+  if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
+  // Domed shading: a soft radial light from the upper-left and a shadow
+  // opposite give the cap volume so it doesn't look like a flat disc.
+  const dome = ctx.createRadialGradient(-capR * 0.4, -capR * 0.4, capR * 0.1, 0, 0, capR);
+  dome.addColorStop(0, "rgba(255,255,255,0.30)");
+  dome.addColorStop(0.5, "rgba(255,255,255,0)");
+  dome.addColorStop(1, "rgba(0,0,0,0.30)");
+  ctx.fillStyle = dome;
+  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
   ctx.restore();
-  // A thin rim so the turret still reads as a distinct part sitting on
-  // the hull.
-  ctx.strokeStyle = shade(bodyHex, 0.5);
-  ctx.lineWidth = Math.max(1, R * 0.04);
+  // Crisp outline ring — a mid-dark edge (not derived from the hull
+  // colour) so every tank's turret separates from the body the same way.
+  ctx.strokeStyle = "rgba(18,22,30,0.75)";
+  ctx.lineWidth = Math.max(1.5, R * 0.07);
+  ctx.beginPath();
+  ctx.arc(0, 0, capR, 0, Math.PI * 2);
+  ctx.stroke();
+  // A thin machined highlight just inside the rim.
+  ctx.strokeStyle = "rgba(255,255,255,0.16)";
+  ctx.lineWidth = Math.max(1, R * 0.03);
+  ctx.beginPath();
+  ctx.arc(0, 0, capR * 0.8, 0, Math.PI * 2);
   ctx.stroke();
 
   // Bots get a small "chip" dot so you can tell them apart.
   if (t.bot) {
     ctx.fillStyle = "#eef1f6";
     ctx.beginPath();
-    ctx.arc(0, 0, R * 0.16, 0, Math.PI * 2);
+    ctx.arc(0, 0, R * 0.14, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore(); // turret rotation frame
@@ -4419,9 +4541,9 @@ function patRng(seed) {
 // caller has clipped to the hull, so these can draw freely. `col` is
 // the second colour id (rendered with its finish, so a metal second
 // colour still shines). `now` lets the lightning flicker.
-function drawPattern(id, col, R, now, seedId) {
-  const paint = hullPaint(col, R, now);
-  const colHex = HULL[col] ?? HULL.red; // the 2nd colour as a hex, for shade/mix
+function drawPattern(id, col, R, now, seedId, hexOverride) {
+  const paint = hullPaint(col, R, now, hexOverride);
+  const colHex = hexOverride ?? HULL[col] ?? HULL.red; // the 2nd colour as a hex, for shade/mix
   ctx.fillStyle = paint;
   ctx.strokeStyle = paint;
   const W = R * 1.8, H = R * 1.16;

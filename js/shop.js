@@ -343,9 +343,11 @@ export function initShop() {
     pickTab(tab);
     // Elite paint depends on live leaderboard standing, so re-check it
     // on open and repaint if it changed the answer.
-    const was = isTop50();
+    // Always repaint once standing resolves — not just when the answer
+    // flipped. The first open has no cached position at all, so a
+    // conditional repaint could leave Ruby showing as locked.
     refreshBoardPosition().then(() => {
-      if (isTop50() !== was && tab === "colours") renderColours();
+      if (tab === "colours") renderColours();
     }).catch(() => {});
   });
 

@@ -91,8 +91,11 @@ export const ARMOUR = {
 export const HEAL = {
   radiusCells: 0.5,   // ~1 cell diameter
   durationMs: 6000,
-  tickMs: 2000,       // 2 s inside per HP (3 ticks over the pad's life)
-  tickGraceMs: 60,    // absorbs the one-frame boundary so 9 s → the full 3 HP
+  // Seven ticks across the pad's 6 s life — 1 HP each, so a tank that
+  // parks on it for the full duration banks 7 HP. (Was 3 HP over the
+  // same window; the pad ticks faster now rather than lasting longer.)
+  tickMs: 6000 / 7,
+  tickGraceMs: 60,    // absorbs the one-frame boundary so the last tick lands
   healPerHp: 1,
 };
 
@@ -118,13 +121,13 @@ export const MORTAR = {
   // half-cells out, steered with your movement controls while the tank
   // is planted.
   minHalfCells: 2,
-  maxHalfCells: 5,
+  maxHalfCells: 7,   // one cell further than before
   blastCells: 1.0,      // blast RADIUS in cells → 2-cell span → 2x2 cells
   baseCellsPerSec: 1.5, // launch speed (25% slower than before)
   accelPerCell: 0.4,    // +40% of base per cell traveled (linear ramp)
   cloudMs: 1100,        // the dark cloud lingers this long
   // Kept for the AI's range checks: the furthest it can ever land.
-  rangeCells: 2.5,
+  rangeCells: 3.5,
 };
 
 // Total flight time (ms) to cover `distCells`:
@@ -184,7 +187,7 @@ export const ROCKET = {
 };
 
 export const CANNON = {
-  speed: 0.55,       // one slow-ish projectile
+  speed: 0.594,      // one slow-ish projectile (8% quicker)
   r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 7000,     // twice as long adrift before it self-detonates
   shrapN: 36,        // irregular shrapnel burst on expiry / tank hit

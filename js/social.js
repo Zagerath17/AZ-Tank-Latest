@@ -21,6 +21,11 @@
 
 import { toast, tankSVG, showScreen, onEnter, onLeave, paintVar } from "./main.js";
 import { SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors, isEliteSkin } from "./skins.js";
+
+// Season reset marker. Any account whose stored wipeVersion is lower
+// gets its ratings, currency and purchases cleared exactly once on its
+// next sign-in. Raise this number to run a fresh wipe in future.
+const WIPE_VERSION = 1;
 import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
 import { sfx } from "./audio.js";
 
@@ -334,7 +339,39 @@ async function adoptProfile(uid, wantName = null, email = null) {
     f.set(f.ref(f.db, `users/${key}/email`), String(email).toLowerCase()).catch(() => {});
   }
 
-  const prof = (await f.get(f.ref(f.db, `users/${key}`))).val() ?? {};
+  let prof = (await f.get(f.ref(f.db, `users/${key}`))).val() ?? {};
+
+  // ---- ONE-TIME WIPE ----------------------------------------------
+  // A single clean slate: every rating cleared, every tag spent, every
+  // bought paint and pattern removed. Each account applies this once,
+  // the first time it signs in after the update, and is stamped so it
+  // never happens again. Bump WIPE_VERSION to run another one later.
+  if ((prof.wipeVersion ?? 0) < WIPE_VERSION) {
+    try {
+      await f.update(f.ref(f.db, `users/${key}`), {
+        elo1: null,
+        elo2v2: null,
+        tags: 0,
+        owned: null,
+        ownedPatterns: null,
+        color: DEFAULT_SKIN,
+        pattern: DEFAULT_PATTERN,
+        patColors: null,
+        wipeVersion: WIPE_VERSION,
+      });
+      prof = {
+        ...prof,
+        elo1: null, elo2v2: null, tags: 0,
+        owned: null, ownedPatterns: null,
+        color: DEFAULT_SKIN, pattern: DEFAULT_PATTERN, patColors: null,
+        wipeVersion: WIPE_VERSION,
+      };
+      // Also clear the locally cached leaderboard standing so Ruby's
+      // gate re-evaluates against the fresh ladder.
+      try { localStorage.removeItem("tank.boardPos.v1"); } catch { /* ignore */ }
+    } catch { /* rules blocked it — try again next sign-in */ }
+  }
+
   account = {
     key, name: prof.name ?? key, uid,
     // Set from the auth email only; never read back from the profile.

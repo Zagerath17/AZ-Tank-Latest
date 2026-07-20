@@ -198,6 +198,37 @@ async function createDuo() {
   toast("Couldn't find a free team code.");
 }
 
+// The synthetic account key for a couch Player 2. It never owns a real
+// account (so it never gains/loses Elo), and it rides along on Player
+// 1's client as a second local tank.
+export function guestKeyFor(accKey) {
+  return `${accKey}~g`;
+}
+
+// COUCH CO-OP: seat a second player from THIS machine. Instead of
+// inviting a friend, Player 1 fills the empty duo seat with a local
+// guest. One client, two tanks — the lobby will carry two player
+// entries and both positions stream from here (see online.js).
+async function addLocalPlayer2() {
+  const acc = getAccount();
+  if (!acc) { toast("Log in to play ranked."); return; }
+  const f = await ensureFirebase();
+  if (!duo) {
+    await createDuo();
+    for (let i = 0; i < 20 && !duo; i++) await new Promise((r) => setTimeout(r, 100));
+    if (!duo) { toast("Couldn't set the team up."); return; }
+  }
+  if (!isDuoLeader()) { toast("Only the team leader can add a couch player."); return; }
+  if (duo.members.length >= 2) { toast("The team is already full."); return; }
+  const gkey = guestKeyFor(acc.key);
+  const elo = duo.members[0]?.elo ?? DEFAULT_ELO;
+  await f.update(f.ref(f.db, `duos/${duo.code}`), {
+    local: true, // one client hosts both seats
+    [`members/${gkey}`]: { name: "Player 2", elo, at: f.serverTimestamp(), guest: true },
+  });
+  toast("Player 2 seated — you'll both drop in together.");
+}
+
 export async function joinDuo(code) {
   const acc = getAccount();
   if (!acc) { toast("Log in to join a team."); throw new Error("Not logged in."); }
@@ -240,8 +271,9 @@ function watchDuo(code) {
       duo = {
         code,
         leader: v.leader,
+        local: !!v.local,
         members: Object.entries(v.members).map(([key, m]) => ({
-          key, name: m.name ?? key, elo: m.elo ?? DEFAULT_ELO,
+          key, name: m.name ?? key, elo: m.elo ?? DEFAULT_ELO, guest: !!m.guest,
         })),
       };
       renderDuoPanel();
@@ -250,8 +282,15 @@ function watchDuo(code) {
         duoJoining = true;
         if (queued) await stopQueueing("2v2", isDuoLeader());
         try {
-          const { joinLobby } = await import("./online.js");
-          await joinLobby(String(v.match));
+          const online = await import("./online.js");
+          if (v.local && isDuoLeader()) {
+            // Couch co-op: ONE client seats both players. Join, then
+            // register the guest's own player entry so the lobby holds
+            // two tanks from this machine.
+            await online.joinLobbyAsLocalDuo(String(v.match), guestKeyFor(acc.key), acc);
+          } else {
+            await online.joinLobby(String(v.match));
+          }
           toast("Match found!");
         } catch (e) {
           toast(e?.message ?? "Match fell apart — try again.");
@@ -311,10 +350,16 @@ function renderDuoPanel() {
   members.innerHTML =
     seat(`${rankBadge(meElo ?? DEFAULT_ELO, 16)} ${acc.name}${duo && duo.leader === acc.key ? " ★" : ""}`) +
     (mate
-      ? seat(`${rankBadge(mate.elo, 16)} ${mate.name}${duo && duo.leader === mate.key ? " ★" : ""}`)
-      : `<button class="btn duo-invite-btn" id="duo-invite" type="button">+ INVITE FRIEND</button>`);
+      ? seat(`${rankBadge(mate.elo, 16)} ${mate.name}${mate.guest ? "" : (duo && duo.leader === mate.key ? " ★" : "")}`)
+      : `<span class="duo-empty-seat">
+           <button class="btn duo-invite-btn" id="duo-invite" type="button">+ INVITE FRIEND</button>
+           <button class="btn duo-couch-btn" id="duo-couch" type="button">+ PLAYER 2 (COUCH)</button>
+         </span>`);
 
   document.getElementById("duo-invite")?.addEventListener("click", toggleDuoInvites);
+  document.getElementById("duo-couch")?.addEventListener("click", () => {
+    addLocalPlayer2().catch((e) => toast(e?.message ?? "Couldn't add Player 2."));
+  });
   leaveBtn.hidden = !duo;
   setQueueUI(queued ? "queued" : "idle");
 }
@@ -507,14 +552,17 @@ async function matchmakerTick(f, acc, mode) {
   if (!party || !party.some(([k]) => k === acc.key)) return; // see 1v1 note
 
   if (M.team) {
-    // Two duos found. Build the team map (ukey → 0|1), create the
-    // 4-player lobby with it, then flag BOTH duo nodes so all four
-    // members join.
+    // Two duos found. Build the team map (ukey → 0|1) and the leader of
+    // each team (its duo's first member), create the 4-player lobby with
+    // both, then flag BOTH duo nodes so all members join.
     const teams = {};
+    const teamLeaders = {};
     party.forEach(([, v], ti) => {
       for (const m of v.members ?? []) teams[m.key] = ti;
+      // members[0] is the account that queued the duo = its leader.
+      if (v.members && v.members[0]) teamLeaders[ti] = v.members[0].key;
     });
-    const code = await createRankedLobby(mode, 4, teams);
+    const code = await createRankedLobby(mode, 4, teams, teamLeaders);
     const updates = {};
     for (const [, v] of party) {
       if (v.duo) updates[`duos/${v.duo}/match`] = code;
@@ -571,11 +619,25 @@ export async function refreshBoardPosition() {
     let best = null;
     for (const key of Object.keys(MODES)) {
       const M = MODES[key];
-      const rows = await loadBoardRows(f, M);
+      // Each ladder is read in ISOLATION. One unreadable mirror used to
+      // throw out of the whole loop and leave the standing unknown,
+      // which is what kept Ruby locked for players who were obviously
+      // inside the top 50.
+      let rows = [];
+      try { rows = await loadBoardRows(f, M); } catch { continue; }
       if (!rows.length) continue;
       rows.sort((a, b) => b.elo - a.elo);
       const idx = rows.findIndex((r) => r.key === acc.key);
-      if (idx >= 0 && (best == null || idx + 1 < best)) best = idx + 1;
+      if (idx >= 0) {
+        if (best == null || idx + 1 < best) best = idx + 1;
+      } else if (typeof acc[M.eloField] === "number" && rows.length < TOP50_CUTOFF) {
+        // We have a rating for this ladder but the public mirror hasn't
+        // caught up. The whole ranked population is smaller than the
+        // cutoff, so we'd land inside it no matter where we slot in —
+        // count us at the end rather than reporting "unranked".
+        const wouldBe = rows.length + 1;
+        if (best == null || wouldBe < best) best = wouldBe;
+      }
     }
     boardPos = { pos: best, at: Date.now() };
     try { localStorage.setItem(LS_BOARD_POS, JSON.stringify(boardPos)); } catch { /* ignore */ }

@@ -387,10 +387,21 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   ctx.fillStyle = hullPaint(ctx, bodyColor, R, now);
   ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
   if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed);
+  // Domed bevel so the cap has volume.
+  const dome = ctx.createRadialGradient(-capR * 0.4, -capR * 0.4, capR * 0.1, 0, 0, capR);
+  dome.addColorStop(0, "rgba(255,255,255,0.30)");
+  dome.addColorStop(0.5, "rgba(255,255,255,0)");
+  dome.addColorStop(1, "rgba(0,0,0,0.30)");
+  ctx.fillStyle = dome;
+  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
   ctx.restore();
-  ctx.strokeStyle = shade(bodyHex, 0.5);
-  ctx.lineWidth = Math.max(1, R * 0.04);
-  ctx.stroke();
+  // Crisp constant outline + inner highlight so the turret pops.
+  ctx.strokeStyle = "rgba(18,22,30,0.75)";
+  ctx.lineWidth = Math.max(1.5, R * 0.07);
+  ctx.beginPath(); ctx.arc(0, 0, capR, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,0.16)";
+  ctx.lineWidth = Math.max(1, R * 0.03);
+  ctx.beginPath(); ctx.arc(0, 0, capR * 0.8, 0, Math.PI * 2); ctx.stroke();
 
   ctx.restore();
 }
