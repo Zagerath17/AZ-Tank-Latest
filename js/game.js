@@ -2040,7 +2040,12 @@ function stepGear(now) {
   const pool = S.gearPool?.length ? S.gearPool : WEAPON_TYPES;
   const cap = S.gearMax ?? GEAR_MAX;
   if (S.isController && S.gear.length < cap && now >= S.gearNextAt) {
-    S.gearNextAt = now + GEAR_EVERY_MS + Math.random() * GEAR_EVERY_JITTER;
+    // Spawn cadence: 50% faster base, then +25% rate for every tank
+    // beyond the first two. As tanks die the count falls, so the rate
+    // eases back — reaching the base once only two tanks remain.
+    const aliveN = S.tanks.filter((t) => !t.dead && !t.gone).length;
+    const rateMul = 1.5 * Math.pow(1.25, Math.max(0, aliveN - 2));
+    S.gearNextAt = now + (GEAR_EVERY_MS + Math.random() * GEAR_EVERY_JITTER) / rateMul;
     const spot = pickGearSpot();
     if (spot) {
       // Round-robin the roster: always spawn one of the LEAST-common
@@ -3182,6 +3187,22 @@ function tankHitsAnyWall(t, x, y, a) {
     if (!nearRect(x, y, rc, reach)) continue;
     if (obbHitsRect(x, y, a, rc)) return true;
   }
+  // The turret barrel (it points along the hull) must not clip walls
+  // either. Walk its centreline and block if any point, inflated by the
+  // barrel's half-width, sits inside a wall.
+  const bl = BARRELS[t.weapon] ?? BARRELS.normal;
+  const bLen = bl.len * TANK_R, bHW = bl.hw * TANK_R;
+  const c = Math.cos(a), s = Math.sin(a);
+  for (let d = bHW; d <= bLen; d += bHW) {
+    const px = x + c * d, py = y + s * d;
+    for (const rc of S.rects) {
+      if (!nearRect(px, py, rc, bHW + 4)) continue;
+      const qx = clamp(px, rc.x, rc.x + rc.w);
+      const qy = clamp(py, rc.y, rc.y + rc.h);
+      const ox = px - qx, oy = py - qy;
+      if (ox * ox + oy * oy < bHW * bHW) return true;
+    }
+  }
   return false;
 }
 
@@ -3716,32 +3737,55 @@ function draw(now) {
     }
   }
 
-  // SECOND LOCAL PLAYER (ranked 2v2 couch co-op). When this machine is
-  // driving two tanks, the partner gets their own compact health +
-  // ability readout — otherwise they'd have no idea what they're
-  // holding or how close they are to dying.
+  // ADDITIONAL LOCAL PLAYERS (couch co-op online, or 2–4 seats in a
+  // local match). Every local human other than the primary gets their
+  // own compact readout, and these STACK UPWARD above one another. Each
+  // shows armour + health (health tinted to that player's tank colour)
+  // and their three abilities on a 70%-opacity plate of the tank colour.
   if (p2HudEl) {
-    const mate = S.localGuest ? S.tanks.find((t) => t.id === S.localGuest) : null;
-    const mateAlive = mate && !mate.dead && !mate.gone;
-    if (!mateAlive) {
+    const others = S.tanks.filter((t) =>
+      t.local && !t.bot && t.id !== (myTank && myTank.id) && !t.dead && !t.gone);
+    if (!others.length) {
       p2HudEl.hidden = true;
       p2HudEl._sig = undefined;
     } else {
-      const hp = Math.max(0, Math.ceil(mate.hp ?? TANK_HP));
-      const items = [mate.weapon ?? null, mate.defense ?? null, mate.agility ?? null];
-      const sig = `${hp}|${items.join("|")}`;
+      // Stable order so rows don't jump around as tanks come and go.
+      others.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      const sig = others.map((t) => {
+        const hp = Math.max(0, Math.ceil(t.hp ?? TANK_HP));
+        const ar = now < (t.armourUntil ?? 0) ? Math.max(0, Math.ceil(t.armour ?? 0)) : 0;
+        return `${t.id}:${hp}:${ar}:${t.weapon}:${t.defense}:${t.agility}:${t.color}`;
+      }).join("|");
       p2HudEl.hidden = false;
       if (p2HudEl._sig !== sig) {
         p2HudEl._sig = sig;
-        let pips = "";
-        for (let i = 0; i < TANK_HP; i++) {
-          pips += `<span class="p2-pip${i < hp ? "" : " spent"}"></span>`;
-        }
-        p2HealthEl.innerHTML = pips;
-        p2LoadEl.innerHTML = items.map((it) => {
-          const c = it ? (GEAR_RIM[it] ?? "#e8eefc") : null;
-          return `<span class="p2-item" style="${c ? `background:${c};border-color:${c}` : ""}"
-                        title="${it ? (WEAPON_LABEL[it] ?? it) : "empty"}"></span>`;
+        const label = { red: "P1", green: "P2", blue: "P3", yellow: "P4" };
+        p2HudEl.innerHTML = others.map((t, idx) => {
+          const hex = effBaseHex(t);
+          const hp = Math.max(0, Math.ceil(t.hp ?? TANK_HP));
+          const ar = now < (t.armourUntil ?? 0) ? Math.max(0, Math.ceil(t.armour ?? 0)) : 0;
+          const name = label[t.slot ?? t.color] ?? `P${idx + 2}`;
+          let hpips = "";
+          for (let i = 0; i < TANK_HP; i++) {
+            hpips += `<span class="lp-pip${i < hp ? "" : " spent"}"${i < hp ? ` style="background:${hex};border-color:${hex}"` : ""}></span>`;
+          }
+          let apips = "";
+          for (let i = 0; i < ar; i++) apips += `<span class="lp-ar"></span>`;
+          const items = [t.weapon ?? null, t.defense ?? null, t.agility ?? null];
+          const load = items.map((it) => {
+            const c = it ? (GEAR_RIM[it] ?? "#e8eefc") : null;
+            return `<span class="lp-item" style="${c ? `background:${c};border-color:${c}` : ""}" title="${it ? (WEAPON_LABEL[it] ?? it) : "empty"}"></span>`;
+          }).join("");
+          // rgba plate at 70% of the tank colour behind the abilities.
+          const plate = hexToRgba(hex, 0.7);
+          return `<div class="lp-row">
+              <span class="lp-tag" style="color:${hex}">${name}</span>
+              <span class="lp-bars">
+                ${ar ? `<span class="lp-ars">${apips}</span>` : ""}
+                <span class="lp-hps">${hpips}</span>
+              </span>
+              <span class="lp-load" style="background:${plate}">${load}</span>
+            </div>`;
         }).join("");
       }
     }
@@ -4126,6 +4170,11 @@ function drawWall(w, now) {
 // tank moves and turns.
 // The effective BASE hex a tank is wearing right now, honouring any 2v2
 // team-paint override so beams/effects match the hull the player sees.
+function hexToRgba(hex, a) {
+  const n = parseInt(String(hex).slice(1), 16) || 0;
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
 function effBaseHex(t) {
   if (!t) return HULL.red;
   const pat = t.pattern && t.pattern !== "solid" ? t.pattern : null;
@@ -4400,106 +4449,89 @@ function drawTank(t, now) {
     ctx.restore();
   }
 
-  // ---- The ENTIRE turret assembly (barrel + cap) ----
-  // Drawn inside ONE turret-rotation frame so the whole thing — cap and
-  // barrel — turns with the turret. Both carry the tank's paint: the
-  // skin's finish (metal shine and all) and, if worn, the two-tone
-  // pattern. So a gold tank has a gold barrel; a camo tank's barrel and
-  // cap are camo too, and they rotate together.
+  // ---- One-piece turret ----
+  // A SINGLE capsule (breech + barrel in one shape) that turns with the
+  // turret — no separate cap, so nothing overlaps or clips. Sized to the
+  // weapon's bullet (BARRELS[w]), so its silhouette matches the barrel
+  // HITBOX and shots that strike the visible barrel actually connect. It
+  // carries the tank's paint, pattern, phase transparency and hit-flash,
+  // exactly like the hull.
   const wtype = t.weapon ?? "normal";
   const turret = t.turret ?? t.a;
   const bl = BARRELS[wtype] ?? BARRELS.normal;
+  const phasing = now < (t.phaseUntil ?? 0);
   ctx.save();
   ctx.rotate(turret - t.a);
+  if (phasing) ctx.globalAlpha = PHASE.opacity;
 
-  // Turret cap: noticeably smaller than the old R*0.5 dome.
-  const capR = R * 0.40;
-  const bL = bl.len * R, bW = bl.hw * R;
-  // Several barrel sprites overhang their nominal box (the rocket's
-  // nose cone reaches L + R*0.14, the cannon/mortar have flared
-  // collars). Both the outline and the paint clip below use this padded
-  // extent, otherwise the overhang renders as a bare, un-outlined spike
-  // poking out of the muzzle.
-  const bLo = bL + R * 0.2, bWo = bW * 1.06;
-
-  // ONE outline around the WHOLE turret silhouette (barrel + cap).
-  // NOTE: this must be FILLED, not stroked. Stroking a path containing
-  // two OVERLAPPING subpaths traces each subpath's own edge — including
-  // the barrel's rear end where it sits inside the cap, and the cap's
-  // arc where it crosses the barrel. Those interior lines were the
-  // overlapping/glitchy double-outline. Filling both subpaths in ONE
-  // path gives their clean union (nonzero winding, uniform alpha, no
-  // interior seams); we fill a slightly enlarged copy underneath so the
-  // paint on top leaves just the expanded margin as a rim.
-  {
-    const o = Math.max(1.5, R * 0.08);
-    ctx.fillStyle = "rgba(16,20,28,0.9)";
+  const bL = bl.len * R;   // muzzle distance (== hitbox length)
+  const bW = bl.hw * R;    // barrel half-width (== hitbox width, bullet-sized)
+  const back = R * 0.34;   // breech reaches this far behind centre
+  const capLen = bL + back;
+  const capsule = (x0, x1, hw) => {
+    const r2 = Math.min(hw, (x1 - x0) * 0.5);
     ctx.beginPath();
-    if (ctx.roundRect) {
-      ctx.roundRect(-o, -(bWo + o), bLo + o * 2, (bWo + o) * 2, (bWo + o) * 0.5);
-    } else {
-      ctx.rect(-o, -(bWo + o), bLo + o * 2, (bWo + o) * 2);
-    }
-    ctx.moveTo(capR + o, 0);
-    ctx.arc(0, 0, capR + o, 0, Math.PI * 2);
-    ctx.fill();
-  }
+    if (ctx.roundRect) ctx.roundRect(x0, -hw, x1 - x0, hw * 2, r2);
+    else ctx.rect(x0, -hw, x1 - x0, hw * 2);
+  };
 
-  // Barrel: draw its base shape, then paint the skin/pattern over just
-  // the barrel's footprint (clipped) so a metal barrel shines and a
-  // pattern shows, matching the hull.
-  drawBarrel(ctx, wtype, R, shade(bodyHex, 0.2), shade(bodyHex, 0.5));
-  {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(-1, -bWo, bLo + 1, bWo * 2);
-    ctx.clip();
-    ctx.globalAlpha = 0.9; // let a little of the barrel's shading show through
-    ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
-    ctx.fillRect(-1, -bWo, bLo + 1, bWo * 2);
-    if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
-    ctx.globalAlpha = 1;
-    ctx.restore();
-  }
+  // 1) Outline — a dark capsule slightly larger, underneath; the paint
+  //    on top leaves a clean uniform rim. One shape, no seams, no cap.
+  const o = Math.max(1.5, R * 0.09);
+  ctx.fillStyle = "rgba(16,20,28,0.92)";
+  capsule(-back - o, bL + o, bW + o);
+  ctx.fill();
 
-  // Machine gun wind-up: the muzzle glows while it spins up.
-  if (t.weapon === "mg" && t.mgReadyAt && now < t.mgReadyAt) {
-    const bml = BARRELS.mg;
-    const f = 1 - (t.mgReadyAt - now) / MG.windupMs;
-    ctx.fillStyle = "#e8452e";
-    ctx.globalAlpha = 0.35 + 0.6 * Math.abs(Math.sin(f * 14));
-    ctx.beginPath();
-    ctx.arc(bml.len * R, 0, R * 0.16, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-  }
-
-  // Turret cap — same rotated frame, so its paint/pattern turns with the
-  // turret. The skin paint, then a domed bevel (highlight top-left,
-  // shade bottom-right) for volume. Its outline is part of the single
-  // silhouette stroke above — no separate ring on the cap.
-  ctx.beginPath();
-  ctx.arc(0, 0, capR, 0, Math.PI * 2);
+  // 2) Paint: skin finish + pattern, clipped to the capsule, so a gold
+  //    tank has a gold barrel and a camo tank's barrel is camo.
   ctx.save();
+  capsule(-back, bL, bW);
   ctx.clip();
   ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
-  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
+  ctx.fillRect(-back - 1, -bW - 1, capLen + 2, bW * 2 + 2);
   if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
-  const dome = ctx.createRadialGradient(-capR * 0.4, -capR * 0.4, capR * 0.1, 0, 0, capR);
-  dome.addColorStop(0, "rgba(255,255,255,0.30)");
-  dome.addColorStop(0.5, "rgba(255,255,255,0)");
-  dome.addColorStop(1, "rgba(0,0,0,0.30)");
-  ctx.fillStyle = dome;
-  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
+  // Rounded-tube bevel: light along the top edge, shadow along the
+  // bottom, so the barrel reads as a cylinder, not a flat strip.
+  const bev = ctx.createLinearGradient(0, -bW, 0, bW);
+  bev.addColorStop(0, "rgba(255,255,255,0.28)");
+  bev.addColorStop(0.5, "rgba(255,255,255,0)");
+  bev.addColorStop(1, "rgba(0,0,0,0.30)");
+  ctx.fillStyle = bev;
+  ctx.fillRect(-back - 1, -bW - 1, capLen + 2, bW * 2 + 2);
+  // Muzzle bore: a small dark oval at the very tip.
+  ctx.fillStyle = "rgba(0,0,0,0.40)";
+  ctx.beginPath();
+  ctx.ellipse(bL - bW * 0.34, 0, bW * 0.30, bW * 0.62, 0, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 
-  // Bots get a small "chip" dot so you can tell them apart.
+  // 3) MG spin-up glow at the muzzle.
+  if (t.weapon === "mg" && t.mgReadyAt && now < t.mgReadyAt) {
+    const f = 1 - (t.mgReadyAt - now) / MG.windupMs;
+    ctx.fillStyle = "#e8452e";
+    ctx.globalAlpha = (phasing ? PHASE.opacity : 1) * (0.35 + 0.6 * Math.abs(Math.sin(f * 14)));
+    ctx.beginPath();
+    ctx.arc(bL, 0, bW * 0.75, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = phasing ? PHASE.opacity : 1;
+  }
+
+  // 4) Bots keep a small chip near the breech so you can tell them apart.
   if (t.bot) {
     ctx.fillStyle = "#eef1f6";
     ctx.beginPath();
-    ctx.arc(0, 0, R * 0.14, 0, Math.PI * 2);
+    ctx.arc(0, 0, R * 0.13, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // 5) Hit flash over the turret too, so the WHOLE tank blinks red.
+  if (sinceHit < 170) {
+    ctx.globalAlpha = 0.62 * (1 - sinceHit / 170);
+    ctx.fillStyle = "#ff2d28";
+    capsule(-back, bL, bW);
+    ctx.fill();
+  }
+
   ctx.restore(); // turret rotation frame
   ctx.restore(); // tank translate/rotate frame
 }

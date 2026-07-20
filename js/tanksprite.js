@@ -374,49 +374,36 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   rr(-R * 1.0, -R * 0.36, R * 0.14, R * 0.16, R * 0.05);
   rr(-R * 1.0, R * 0.2, R * 0.14, R * 0.16, R * 0.05);
 
-  // Turret assembly (barrel + cap) — carries the same paint/pattern.
-  // Match the arena: shorter barrel, smaller cap.
-  const barLen = R * 0.9, barHW = R * 0.16;
-  const capR = R * 0.40;
-  // ONE outline around the whole turret silhouette (barrel + cap),
-  // drawn underneath as a thick dark stroke; the fills cover the inner
-  // half, leaving a rim on the outside edge only.
-  {
-    const ow = Math.max(1.5, R * 0.09);
-    ctx.strokeStyle = "rgba(16,20,28,0.9)";
-    ctx.lineWidth = ow * 2;
-    ctx.lineJoin = "round";
+  // ---- One-piece turret (matches the arena) ----
+  // A single capsule, no separate cap, carrying the paint/pattern.
+  const barLen = R * 1.15, barHW = R * 0.30, back = R * 0.34;
+  const capLen = barLen + back;
+  const capsule = (x0, x1, hw) => {
+    const r2 = Math.min(hw, (x1 - x0) * 0.5);
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(0, -barHW, barLen, barHW * 2, barHW * 0.6);
-    else ctx.rect(0, -barHW, barLen, barHW * 2);
-    ctx.moveTo(capR, 0);
-    ctx.arc(0, 0, capR, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  ctx.fillStyle = shade(bodyHex, 0.2);
-  rr(0, -barHW, barLen, barHW * 2, barHW * 0.6);
-  {
-    ctx.save();
-    ctx.beginPath(); ctx.rect(0, -barHW, barLen, barHW * 2); ctx.clip();
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
-    ctx.fillRect(0, -barHW, barLen, barHW * 2);
-    if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
-    ctx.globalAlpha = 1;
-    ctx.restore();
-  }
-  ctx.beginPath(); ctx.arc(0, 0, capR, 0, Math.PI * 2);
-  ctx.save(); ctx.clip();
+    if (ctx.roundRect) ctx.roundRect(x0, -hw, x1 - x0, hw * 2, r2);
+    else ctx.rect(x0, -hw, x1 - x0, hw * 2);
+  };
+  const o = Math.max(1.5, R * 0.09);
+  ctx.fillStyle = "rgba(16,20,28,0.92)";
+  capsule(-back - o, barLen + o, barHW + o);
+  ctx.fill();
+  ctx.save();
+  capsule(-back, barLen, barHW);
+  ctx.clip();
   ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
-  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
+  ctx.fillRect(-back - 1, -barHW - 1, capLen + 2, barHW * 2 + 2);
   if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
-  // Domed bevel so the cap has volume.
-  const dome = ctx.createRadialGradient(-capR * 0.4, -capR * 0.4, capR * 0.1, 0, 0, capR);
-  dome.addColorStop(0, "rgba(255,255,255,0.30)");
-  dome.addColorStop(0.5, "rgba(255,255,255,0)");
-  dome.addColorStop(1, "rgba(0,0,0,0.30)");
-  ctx.fillStyle = dome;
-  ctx.fillRect(-capR, -capR, capR * 2, capR * 2);
+  const bev = ctx.createLinearGradient(0, -barHW, 0, barHW);
+  bev.addColorStop(0, "rgba(255,255,255,0.28)");
+  bev.addColorStop(0.5, "rgba(255,255,255,0)");
+  bev.addColorStop(1, "rgba(0,0,0,0.30)");
+  ctx.fillStyle = bev;
+  ctx.fillRect(-back - 1, -barHW - 1, capLen + 2, barHW * 2 + 2);
+  ctx.fillStyle = "rgba(0,0,0,0.40)";
+  ctx.beginPath();
+  ctx.ellipse(barLen - barHW * 0.34, 0, barHW * 0.30, barHW * 0.62, 0, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 
   ctx.restore();

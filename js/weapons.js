@@ -34,20 +34,25 @@ export const WEAPON_CATEGORY = {
 // Barrel geometry in multiples of TANK_R. The barrel hitbox is the
 // rectangle from the hull center to len·R forward, hw·R half-wide —
 // exactly what's drawn.
+// len = muzzle distance, hw = barrel HALF-WIDTH — both × the tank
+// radius. hw is sized to each weapon's BULLET so the bore just fits the
+// round; the one-piece turret is drawn to these exact dims and so is
+// the barrel hitbox (tankHitPoint), so a shot that hits the visible
+// barrel connects, and the barrel can't clip walls.
 export const BARRELS = {
-  normal: { len: 1.2,  hw: 0.31 },
-  laser:  { len: 1.55, hw: 0.15 },
-  sniper: { len: 1.75, hw: 0.19 },
-  mg:     { len: 1.15, hw: 0.36 },
-  rocket: { len: 1.0,  hw: 0.44 },
-  cannon: { len: 0.9,  hw: 0.52 },
-  mortar: { len: 0.65, hw: 0.46 },
-  boost:  { len: 1.2,  hw: 0.31 },
-  phase:  { len: 1.2,  hw: 0.31 },
-  wall:   { len: 1.2,  hw: 0.31 },
-  armour: { len: 1.2,  hw: 0.31 },
-  heal:   { len: 1.2,  hw: 0.31 },
-  mud:    { len: 1.2,  hw: 0.31 },
+  normal: { len: 1.15, hw: 0.30 },
+  laser:  { len: 1.5,  hw: 0.28 },
+  sniper: { len: 1.6,  hw: 0.26 },
+  mg:     { len: 1.1,  hw: 0.24 },
+  rocket: { len: 1.0,  hw: 0.46 },
+  cannon: { len: 0.92, hw: 0.54 },
+  mortar: { len: 0.7,  hw: 0.44 },
+  boost:  { len: 1.1,  hw: 0.28 },
+  phase:  { len: 1.1,  hw: 0.28 },
+  wall:   { len: 1.1,  hw: 0.28 },
+  armour: { len: 1.1,  hw: 0.28 },
+  heal:   { len: 1.1,  hw: 0.28 },
+  mud:    { len: 1.1,  hw: 0.28 },
 };
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
@@ -191,7 +196,7 @@ export const CANNON = {
   // and BULLET_SPEED is U*3.2, so 2.25/3.2 makes the shell travel
   // U*2.25 — always a touch FASTER than a tank drives forward, however
   // the scale is retuned. (Was 0.594 = U*1.9, i.e. slower than you.)
-  speed: 2.25 / 3.2,
+  speed: 2.3625 / 3.2, // +5% shell speed
   r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 7000,     // twice as long adrift before it self-detonates
   shrapN: 36,        // irregular shrapnel burst on expiry / tank hit
