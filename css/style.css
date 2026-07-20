@@ -1738,3 +1738,13 @@ body {
   display: block;
 }
 .arena-wrap.has-touch .p2-hud { bottom: calc(var(--tp-size) + 44px); }
+
+/* Ranked couch-join hint (replaces the old couch button). */
+.duo-join-hint {
+  font-size: .72rem;
+  color: #9fb6dd;
+  letter-spacing: .02em;
+  text-align: center;
+  padding: 2px 4px;
+  opacity: .9;
+}

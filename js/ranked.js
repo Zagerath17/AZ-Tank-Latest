@@ -28,6 +28,7 @@
 // ================================================================
 
 import { toast, onEnter, onLeave, tankSVG, paintVar } from "./main.js";
+import { getBinds } from "./settings.js";
 import { ensureFirebase, createRankedLobby } from "./online.js";
 import { getAccount, getInvitableFriends, sendInvite } from "./social.js";
 import { isConfigured } from "./firebase-config.js";
@@ -356,13 +357,10 @@ function renderDuoPanel() {
       ? seat(`${rankBadge(mate.elo, 16)} ${mate.name}${mate.guest ? "" : (duo && duo.leader === mate.key ? " ★" : "")}`)
       : `<span class="duo-empty-seat">
            <button class="btn duo-invite-btn" id="duo-invite" type="button">+ INVITE FRIEND</button>
-           <button class="btn duo-couch-btn" id="duo-couch" type="button">+ PLAYER 2 (COUCH)</button>
+           <span class="duo-join-hint">Press Player 2's fire keybind to join</span>
          </span>`);
 
   document.getElementById("duo-invite")?.addEventListener("click", toggleDuoInvites);
-  document.getElementById("duo-couch")?.addEventListener("click", () => {
-    addLocalPlayer2().catch((e) => toast(e?.message ?? "Couldn't add Player 2."));
-  });
   leaveBtn.hidden = !duo;
   setQueueUI(queued ? "queued" : "idle");
 }
@@ -781,9 +779,11 @@ export function initRanked() {
     setQueueUI("idle");
     renderLeaderboard();
     boardTimer = setInterval(renderLeaderboard, 10000);
+    window.addEventListener("keydown", joinKeyListener);
   });
   onLeave("screen-ranked", () => {
     clearInterval(boardTimer);
+    window.removeEventListener("keydown", joinKeyListener);
     if (queued) leaveQueue();
     // Backing out of ranked DISSOLVES an idle team. Keeping it alive
     // meant returning to the screen showed your old partner still
@@ -793,4 +793,16 @@ export function initRanked() {
     if (duo && !duo.matched) leaveDuo();
     // Leaving the screen keeps the duo alive — you can come back to it.
   });
+}
+
+// While on the ranked screen with an empty second seat, pressing Player
+// 2's fire keybind seats a couch partner (registers the local guest so
+// the pair queues 2v2 together).
+function joinKeyListener(e) {
+  const key = getBinds()?.green?.shoot;
+  if (!key || e.code !== key) return;
+  // Only when there's a free seat to take.
+  if (duo && duo.members && duo.members.length >= 2) return;
+  e.preventDefault();
+  addLocalPlayer2().catch((err) => toast(err?.message ?? "Couldn't add Player 2."));
 }

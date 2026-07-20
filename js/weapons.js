@@ -11,7 +11,7 @@
 
 import { segmentHitsAnyRect } from "./maze.js";
 
-export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon", "sniper", "mortar", "boost", "phase", "wall", "armour", "heal", "mud"];
+export const WEAPON_TYPES = ["laser", "mg", "rocket", "cannon", "sniper", "mortar", "flame", "boost", "phase", "wall", "armour", "heal", "mud"];
 
 // Every pickup belongs to one loadout category. A tank holds at most
 // ONE item per category (offense / defense / agility), each with its
@@ -23,6 +23,7 @@ export const WEAPON_CATEGORY = {
   cannon: "offense",
   sniper: "offense",
   mortar: "offense",
+  flame: "offense",
   wall: "defense",
   armour: "defense",
   heal: "defense",
@@ -47,6 +48,7 @@ export const BARRELS = {
   rocket: { len: 1.0,  hw: 0.46 },
   cannon: { len: 0.92, hw: 0.54 },
   mortar: { len: 0.7,  hw: 0.44 },
+  flame:  { len: 0.85, hw: 0.34 },
   boost:  { len: 1.1,  hw: 0.28 },
   phase:  { len: 1.1,  hw: 0.28 },
   wall:   { len: 1.1,  hw: 0.28 },
@@ -189,6 +191,22 @@ export const ROCKET = {
   seekRangeCells: 4.5, // it can only smell tanks this close
   ownerGraceMs: 500,  // can't collide with its shooter right away
   trailLen: 26,
+};
+
+export const FLAME = {
+  // A short cone: reaches 2/3 of a cell, skinny at the nozzle and
+  // fanning to a tank's width at the tip.
+  reachCells: 2 / 3,   // stream length as a fraction of a cell
+  durationMs: 5000,    // held or not, the tank breathes fire for 5 s
+  tickMs: 1000,        // 1 base damage per second of contact
+  tickDmg: 1,
+  // Burn: lit on first contact, ticks 1 dmg every 2 s STARTING 1 s after
+  // the hit, and keeps burning for 10 s total from ignition.
+  burnFirstMs: 1000,   // first burn tick, 1 s after the initial hit
+  burnEveryMs: 2000,   // then every 2 s
+  burnTotalMs: 10000,  // burn persists this long from ignition
+  burnDmg: 1,
+  tipWidthMul: 1.0,    // tip half-width = this × the tank RADIUS... (see game.js)
 };
 
 export const CANNON = {
@@ -625,6 +643,7 @@ export const WEAPON_LABEL = {
   cannon: "Cannon",
   sniper: "Sniper",
   mortar: "Mortar",
+  flame: "Flame Thrower",
   wall: "Wall",
   armour: "Armour",
   heal: "Heal Station",
@@ -646,6 +665,7 @@ export const GEAR_RIM = {
   heal: "#2fbf5f",    // healing green
   mud: "#6b4a2a",     // muddy brown
   mortar: "#8a8f3c",  // olive drab
+  flame: "#ff5a1a",   // flame orange
 };
 function easeOutBack(t) {
   const c1 = 1.70158;

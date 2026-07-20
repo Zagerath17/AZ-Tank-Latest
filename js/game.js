@@ -21,7 +21,7 @@ import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ring
 import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
-  ARMOUR, HEAL, MUD, MORTAR, mortarFlightMs, mortarDistAt,
+  ARMOUR, HEAL, MUD, MORTAR, FLAME, mortarFlightMs, mortarDistAt,
   laserPath, castRaySlab, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
   WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
@@ -95,7 +95,8 @@ function magAvailable(t, now) {
 function specialInPlay(t) {
   return S.rockets.some((r) => r.by === t.id)
     || S.cannons.some((c) => c.by === t.id)
-    || S.beams.some((bm) => bm.by === t.id && !bm.doneAt);
+    || S.beams.some((bm) => bm.by === t.id && !bm.doneAt)
+    || (t.weapon === "flame" && t.flameUntil && performance.now() < t.flameUntil);
 }
 
 const ROUND_PAUSE = 2600;   // ms between rounds
@@ -879,6 +880,10 @@ function pollLocalJoins(binds) {
     if (seat) {
       seat.bot = null;
       seat.joinedLive = true;
+      // Persist across rounds: rounds rebuild tanks from S.roster, so the
+      // seat must stay human there too or the AI would retake it.
+      const spec = S.roster.find((sp) => (sp.slot ?? sp.color) === slot);
+      if (spec) { spec.bot = null; spec.joinedLive = true; }
       toast(`${SLOT_LABEL[slot] ?? "A player"} joined!`);
     }
   }
@@ -1015,6 +1020,7 @@ function frame(now) {
     if (S.cdLast !== 0) { S.cdLast = 0; sfx.count(0); } // GO!
     stepShrink(now);
     stepTanks(now, dt);
+    stepBurns(now);
     stepBullets(now, dt);
     stepSpecials(now, dt);
     maybeEndRound(now);
@@ -1339,6 +1345,25 @@ function stepTanks(now, dt) {
             if (t.local && !t.bot) sfx.winddown();
           }
         }
+      } else if (t.weapon === "flame" && t.flameUntil) {
+        // Flamethrower: a fixed 5 s burst. Every FLAME.tickMs, any tank
+        // caught in the cone takes 1 base damage AND is (re)lit with a
+        // burn. The stream is drawn in the render pass; here we only do
+        // hits. When the burst ends, the barrel reverts.
+        if (now >= t.flameUntil) {
+          t.flameUntil = 0;
+          t.flameTickAt = 0;
+          clearWeapon(t, now);
+        } else if (now >= (t.flameTickAt ?? 0)) {
+          t.flameTickAt = now + FLAME.tickMs;
+          for (const o of S.tanks) {
+            if (o === t || o.dead || o.gone) continue;
+            if (tankInFlameCone(t, o)) {
+              applyHit(o, FLAME.tickDmg, t.id, now, "flame");
+              igniteBurn(o, t.id, now); // start / refresh the burn
+            }
+          }
+        }
       }
     } else {
       // Remote tank. Render it NET_INTERP_MS in the past against the
@@ -1534,6 +1559,8 @@ function sendTypedShot(t, payload, now) {
 
 function clearWeapon(t, now) {
   t.weapon = null;
+  t.flameUntil = 0;
+  t.flameTickAt = 0;
   t.snNextAt = 0;
   if (t.mortarAiming) cancelMortarAim(t);
   t.mgReadyAt = 0;
@@ -1602,6 +1629,16 @@ function fireOffense(t, now) {
     const m = muzzlePoint(t, 1);
     fireLaser(t.id, m.x, m.y, aim, now);
     sendTypedShot(t, { w: "laser", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
+  } else if (w === "flame") {
+    // Light the flamethrower: it burns for a fixed 5 s from this press
+    // (the stream + damage are driven in stepTanks). One press commits
+    // the whole burst, so nothing else here — and it does NOT clear the
+    // weapon yet; stepTanks clears it when the 5 s elapse.
+    t.flameUntil = now + FLAME.durationMs;
+    t.flameTickAt = now; // first base tick lands at once → 5 ticks over 5 s
+    sfx.windup?.();
+    sendTypedShot(t, { w: "flame", x0: +t.x.toFixed(1), y0: +t.y.toFixed(1) }, now);
+    return; // stay equipped while it burns
   } else if (w === "rocket") {
     const m = muzzlePoint(t, ROCKET.r * BULLET_R);
     spawnRocket(t.id, m.x, m.y, aim, now);
@@ -1907,6 +1944,14 @@ function spawnShot(byId, sh, now = performance.now()) {
     case "heal": addHealZone(sh.x, sh.y, now); break;
     case "mud": addMudPit(sh.x, sh.y, sh.s ?? 1, now); break;
     case "mortar": launchMortar(byId, sh.x0, sh.y0, sh.x, sh.y, now); break;
+    case "flame": {
+      // Remote flamethrower: light the shooter's 5 s burst so this
+      // client draws the stream. Cone damage is applied by whoever owns
+      // each victim, so no hit is computed here.
+      const ft = S.tanks.find((x) => x.id === byId);
+      if (ft) { ft.flameUntil = now + FLAME.durationMs; ft.flameTickAt = now; }
+      break;
+    }
     case "detonate": {
       // Command detonation from the owner: burst their airborne ball.
       const ball = S.cannons.find((c) => c.by === byId);
@@ -2917,6 +2962,7 @@ function resetMultiKill() {
 function killTank(t) {
   if (t.dead) return;
   t.dead = true;
+  t.burnUntil = 0; t.burnNextAt = 0; t.flameUntil = 0; // a dead tank stops burning
   if (isMyTank(t)) resetMultiKill(); // dying ends your run
   const now = performance.now();
   // The full send-off: a dedicated explosion sound, a fireball flash,
@@ -3294,6 +3340,52 @@ function separate(a, b) {
 // Exact projectile (circle, radius r) vs tank test: the hitbox is
 // the body rectangle PLUS the barrel rectangle of whatever weapon
 // the tank carries. Transform into the tank's local frame and clamp.
+// ---- Flame cone: the stream reaches 2/3 of a cell, skinny at the
+// nozzle and fanning to a tank's width at the tip. A target is "in" the
+// cone if, in the turret frame, it sits between the nozzle and the
+// reach, within a half-width that grows linearly from skinny to a full
+// tank radius at the tip (plus the target's own radius).
+function tankInFlameCone(t, o) {
+  const aim = t.turret ?? t.a;
+  const reach = FLAME.reachCells * CELL;
+  const nozzle = BARRELS.flame.len * TANK_R * 0.5; // stream starts just off the muzzle
+  const dx = o.x - t.x, dy = o.y - t.y;
+  const c = Math.cos(aim), s = Math.sin(aim);
+  const lx = dx * c + dy * s;   // along the stream
+  const ly = -dx * s + dy * c;  // across
+  if (lx < nozzle - TANK_R || lx > reach + TANK_R) return false;
+  const f = Math.max(0, Math.min(1, (lx - nozzle) / Math.max(1, reach - nozzle)));
+  const halfW = (TANK_R * 0.22) + f * (TANK_R * 0.98);
+  return Math.abs(ly) < halfW + TANK_R * 0.9;
+}
+
+// ---- Burn (damage over time) --------------------------------------
+// Lit by the flamethrower on contact: the FIRST burn tick lands 1 s
+// after ignition, then every 2 s, and the burn persists 10 s total from
+// ignition (re-lighting refreshes the window). Only the client that
+// owns the victim's simulation applies the damage (authority).
+function igniteBurn(o, byId, now) {
+  o.burnUntil = now + FLAME.burnTotalMs;
+  o.burnBy = byId;
+  if (!o.burnNextAt || o.burnNextAt < now) {
+    o.burnNextAt = now + FLAME.burnFirstMs; // first tick 1 s after the hit
+  }
+}
+
+function stepBurns(now) {
+  for (const o of S.tanks) {
+    if (o.dead || o.gone || !o.burnUntil) continue;
+    if (now >= o.burnUntil) { o.burnUntil = 0; o.burnNextAt = 0; continue; }
+    if (now >= (o.burnNextAt ?? Infinity)) {
+      o.burnNextAt = now + FLAME.burnEveryMs;
+      if (S.mode === "local" || o.local) {
+        o.lastHitAt = now; // brief red flash per burn tick
+        applyHit(o, FLAME.burnDmg, o.burnBy ?? null, now, "burn");
+      }
+    }
+  }
+}
+
 function tankHitPoint(t, x, y, r) {
   const dx = x - t.x;
   const dy = y - t.y;
@@ -3335,6 +3427,111 @@ function tankHitPoint(t, x, y, r) {
    ================================================================ */
 
 // Trace a closed polygon path (world-space points) onto ctx.
+// Sample the flame's colour ramp 0..1 nozzle→tip: blue → white → yellow
+// → orange → red, like a real torch.
+function flameColorAt(u) {
+  const stops = [
+    [0.00, 90, 150, 255],   // blue
+    [0.22, 235, 245, 255],  // white-hot
+    [0.45, 255, 235, 120],  // yellow
+    [0.70, 255, 150, 40],   // orange
+    [1.00, 220, 55, 30],    // red
+  ];
+  u = Math.max(0, Math.min(1, u));
+  for (let i = 1; i < stops.length; i++) {
+    if (u <= stops[i][0]) {
+      const a = stops[i - 1], b = stops[i];
+      const k = (u - a[0]) / (b[0] - a[0]);
+      return [
+        Math.round(a[1] + (b[1] - a[1]) * k),
+        Math.round(a[2] + (b[2] - a[2]) * k),
+        Math.round(a[3] + (b[3] - a[3]) * k),
+      ];
+    }
+  }
+  return [220, 55, 30];
+}
+
+// The animated flamethrower cone: extends smoothly on ignition, pulls in
+// as it ends, built from many soft blobs along the centreline whose
+// radius grows skinny→tank-wide and whose colour runs the torch ramp,
+// flickering with layered noise, drawn additively.
+function drawFlameStream(t, now) {
+  const aim = t.turret ?? t.a;
+  const reach = FLAME.reachCells * CELL;
+  const nozzle = BARRELS.flame.len * TANK_R * 0.5;
+  const age = now - (t.flameUntil - FLAME.durationMs);
+  const remain = t.flameUntil - now;
+  const grow = Math.max(0, Math.min(1, age / 180));
+  const fade = Math.max(0, Math.min(1, remain / 160));
+  const len = (reach - nozzle) * grow * fade;
+  if (len <= 1) return;
+
+  ctx.save();
+  ctx.translate(t.x, t.y);
+  ctx.rotate(aim);
+  ctx.globalCompositeOperation = "lighter";
+  const tipHalf = TANK_R;
+  const rootHalf = TANK_R * 0.16;
+  const steps = 22;
+  const tms = now / 1000;
+  for (let layer = 0; layer < 3; layer++) {
+    const lay = layer - 1;
+    for (let i = 0; i <= steps; i++) {
+      const u = i / steps;
+      const along = nozzle + u * len;
+      const half = rootHalf + (tipHalf - rootHalf) * u;
+      const flick = Math.sin(tms * 18 + i * 0.9 + layer * 2.1) * half * 0.28
+        + Math.sin(tms * 27 - i * 1.7) * half * 0.14;
+      const off = lay * half * 0.55 + flick;
+      const [r, g, b] = flameColorAt(u);
+      const a = (0.42 - 0.30 * u) * (1 - Math.abs(lay) * 0.28) * fade;
+      const rad = half * (0.9 + 0.35 * Math.sin(tms * 20 + i));
+      const gr = ctx.createRadialGradient(along, off, 0, along, off, rad);
+      gr.addColorStop(0, `rgba(${r},${g},${b},${a})`);
+      gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+      ctx.fillStyle = gr;
+      ctx.beginPath();
+      ctx.arc(along, off, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const cg = ctx.createRadialGradient(nozzle, 0, 0, nozzle, 0, rootHalf * 3.2);
+  cg.addColorStop(0, `rgba(210,235,255,${0.7 * fade})`);
+  cg.addColorStop(1, "rgba(120,170,255,0)");
+  ctx.fillStyle = cg;
+  ctx.beginPath();
+  ctx.arc(nozzle, 0, rootHalf * 3.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Small flames licking off a burning tank + rising embers.
+function drawBurn(t, now) {
+  ctx.save();
+  ctx.translate(t.x, t.y);
+  ctx.globalCompositeOperation = "lighter";
+  const tms = now / 1000;
+  const n = 5;
+  for (let i = 0; i < n; i++) {
+    const ang = (i / n) * Math.PI * 2 + tms * 0.6;
+    const rx = Math.cos(ang) * TANK_R * 0.5;
+    const ry = Math.sin(ang) * TANK_R * 0.5;
+    const lick = (Math.sin(tms * 12 + i * 2) * 0.5 + 0.5);
+    const rad = TANK_R * (0.22 + 0.14 * lick);
+    const rise = -TANK_R * 0.3 * lick;
+    const [r, g, b] = flameColorAt(0.4 + 0.5 * lick);
+    const gr = ctx.createRadialGradient(rx, ry + rise, 0, rx, ry + rise, rad);
+    gr.addColorStop(0, `rgba(${r},${g},${b},0.5)`);
+    gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.fillStyle = gr;
+    ctx.beginPath();
+    ctx.arc(rx, ry + rise, rad, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function tracePoly(pts) {
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
@@ -3674,6 +3871,23 @@ function draw(now) {
     ctx.globalAlpha = 1;
   }
 
+  // Flamethrower streams: a short animated cone per firing tank, skinny
+  // at the nozzle and fanning to a tank's width at the tip. It extends
+  // smoothly on activation, and its colour runs blue → white → yellow →
+  // orange → red from the nozzle out, like a real torch. Drawn with
+  // additive blending and layered wisps for a soft, detailed look.
+  for (const t of S.tanks) {
+    if (t.dead || t.gone || t.weapon !== "flame" || !t.flameUntil || now >= t.flameUntil) continue;
+    drawFlameStream(t, now);
+  }
+
+  // Burning tanks: small licking flames + embers rising off the hull
+  // for as long as the burn lasts.
+  for (const t of S.tanks) {
+    if (t.dead || t.gone || !t.burnUntil || now >= t.burnUntil) continue;
+    drawBurn(t, now);
+  }
+
   // Explosion rings.
   for (const bo of S.booms) {
     const f = (now - bo.born) / 320;
@@ -3710,9 +3924,28 @@ function draw(now) {
     : S.tanks.find((t) => !t.bot);
   // The bottom-right loadout panel is retired: P1 now uses the SAME
   // compact stacked row as every other local player (see below).
-  if (loadoutHudEl && !loadoutHudEl.hidden) { loadoutHudEl.hidden = true; loadoutHudEl._sig = undefined; }
-  if (healthHudEl && !healthHudEl.hidden) { healthHudEl.hidden = true; healthHudEl._hp = undefined; }
-  if (armourHudEl && !armourHudEl.hidden) { armourHudEl.hidden = true; armourHudEl._ar = undefined; }
+  // P1's old bottom-left health/armour bars are gone — everyone uses the
+  // compact stacked rows now. The bottom-right loadout stays for MOBILE
+  // only: it's the touch player's interactive ability buttons.
+  if (loadoutHudEl) {
+    const alive = myTank && !myTank.dead && !myTank.gone;
+    if (!IS_TOUCH_DEVICE || !alive) {
+      loadoutHudEl.hidden = true; loadoutHudEl._sig = undefined;
+    } else {
+      const items = { offense: myTank.weapon ?? null, defense: myTank.defense ?? null, agility: myTank.agility ?? null };
+      const sig = `${items.offense}|${items.defense}|${items.agility}`;
+      loadoutHudEl.hidden = false;
+      if (loadoutHudEl._sig !== sig) {
+        loadoutHudEl._sig = sig;
+        for (const cv of loadoutHudEl.querySelectorAll(".loadout-icon")) drawLoadoutIcon(cv, items[cv.dataset.cat]);
+        for (const lbl of loadoutHudEl.querySelectorAll(".loadout-key")) {
+          const type = items[lbl.dataset.cat];
+          lbl.textContent = type ? (WEAPON_LABEL[type] ?? type) : "";
+          lbl.style.color = type ? (GEAR_RIM[type] ?? "#e8eefc") : "";
+        }
+      }
+    }
+  }
 
   // ALL LOCAL PLAYERS share one compact readout, stacked UPWARD. P1 sits
   // at the bottom (no "P1" tag); couch co-op / local seats 2–4 stack
@@ -3778,41 +4011,6 @@ function draw(now) {
 
   // Armour readout: blue pips above health, shown only while the shield
   // is up. Rebuilt only when the count changes.
-  if (armourHudEl) {
-    const alive = myTank && !myTank.dead && !myTank.gone;
-    const ar = alive && now < (myTank.armourUntil ?? 0) ? Math.max(0, Math.ceil(myTank.armour ?? 0)) : 0;
-    if (ar <= 0) {
-      armourHudEl.hidden = true;
-      armourHudEl._ar = undefined;
-    } else if (armourHudEl._ar !== ar) {
-      armourHudEl._ar = ar;
-      armourHudEl.hidden = false;
-      let pips = "";
-      for (let i = 0; i < ARMOUR.hp; i++) {
-        pips += `<span class="ar-pip${i < ar ? "" : " spent"}"></span>`;
-      }
-      armourHudEl.innerHTML = `<span class="ar-pips">${pips}</span><span class="ar-num">${ar}</span>`;
-    }
-  }
-
-  // Health readout: pips + number, bottom-left, for the local human's
-  // own tank. Rebuilt only when the value changes to avoid DOM churn.
-  if (healthHudEl) {
-    const alive = myTank && !myTank.dead && !myTank.gone;
-    const hp = alive ? Math.max(0, Math.ceil(myTank.hp ?? TANK_HP)) : 0;
-    if (!alive) {
-      healthHudEl.hidden = true;
-      healthHudEl._hp = undefined;
-    } else if (healthHudEl._hp !== hp) {
-      healthHudEl._hp = hp;
-      healthHudEl.hidden = false;
-      let pips = "";
-      for (let i = 0; i < TANK_HP; i++) {
-        pips += `<span class="hp-pip${i < hp ? "" : " spent"}"></span>`;
-      }
-      healthHudEl.innerHTML = `<span class="hp-pips">${pips}</span><span class="hp-num">${hp}/${TANK_HP}</span>`;
-    }
-  }
 
   // Multi-kill banner across the top of the arena.
   if (multiKillEl) {
