@@ -2608,6 +2608,9 @@ function stepCannons(now, dt) {
 
     for (const t of S.tanks) {
       if (t.dead || t.gone) continue;
+      // Brief grace so the shell doesn't clip its own barrel leaving —
+      // after that your own round is live against you, which is the
+      // risk that makes point-blank shots and ricochets bite.
       if (t.id === c.by && now - c.born < 100) continue;
       if (tankHitPoint(t, c.x, c.y, r)) {
         applyHit(t, DMG.cannonBall, c.by, now, "bullet");

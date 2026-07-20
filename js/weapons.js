@@ -34,20 +34,22 @@ export const WEAPON_CATEGORY = {
 // Barrel geometry in multiples of TANK_R. The barrel hitbox is the
 // rectangle from the hull center to len·R forward, hw·R half-wide —
 // exactly what's drawn.
+// Barrel geometry, in TANK_R units (TANK_R is ~26 px, so 0.15 here is
+// about 4 px). These lengths double as the barrel HITBOX.
 export const BARRELS = {
-  normal: { len: 1.5,  hw: 0.31 },
-  laser:  { len: 1.85, hw: 0.15 },
-  sniper: { len: 2.05, hw: 0.19 },
-  mg:     { len: 1.45, hw: 0.36 },
-  rocket: { len: 1.3,  hw: 0.44 },
-  cannon: { len: 1.2,  hw: 0.52 },
-  mortar: { len: 0.95, hw: 0.46 },
-  boost:  { len: 1.5,  hw: 0.31 },
-  phase:  { len: 1.5,  hw: 0.31 },
-  wall:   { len: 1.5,  hw: 0.31 },
-  armour: { len: 1.5,  hw: 0.31 },
-  heal:   { len: 1.5,  hw: 0.31 },
-  mud:    { len: 1.5,  hw: 0.31 },
+  normal: { len: 1.35,  hw: 0.31 },
+  laser:  { len: 1.7, hw: 0.15 },
+  sniper: { len: 1.9, hw: 0.19 },
+  mg:     { len: 1.3, hw: 0.36 },
+  rocket: { len: 1.15,  hw: 0.44 },
+  cannon: { len: 1.05,  hw: 0.52 },
+  mortar: { len: 0.8, hw: 0.46 },
+  boost:  { len: 1.35,  hw: 0.31 },
+  phase:  { len: 1.35,  hw: 0.31 },
+  wall:   { len: 1.35,  hw: 0.31 },
+  armour: { len: 1.35,  hw: 0.31 },
+  heal:   { len: 1.35,  hw: 0.31 },
+  mud:    { len: 1.35,  hw: 0.31 },
 };
 
 // Tunables (speeds/radii are multipliers of the normal bullet).
@@ -187,7 +189,12 @@ export const ROCKET = {
 };
 
 export const CANNON = {
-  speed: 0.594,      // one slow-ish projectile (8% quicker)
+  // Written as a ratio of the same scale the tank uses: MOVE_SPEED is
+  // U*2.1 and BULLET_SPEED is U*3.2, so 2.2/3.2 makes the shell travel
+  // U*2.2 — exactly a hair (U*0.1, about 6 px/s) faster than a tank
+  // drives forward. Deriving it this way means it can never silently
+  // fall behind the tank again if the scale is ever retuned.
+  speed: 2.2 / 3.2,
   r: 1.62,           // big ball, 8% bigger than before
   lifeMs: 7000,     // twice as long adrift before it self-detonates
   shrapN: 36,        // irregular shrapnel burst on expiry / tank hit
