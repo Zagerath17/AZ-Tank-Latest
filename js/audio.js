@@ -535,102 +535,158 @@ export function setFlame(active) {
       flame = { gain: g, src, lfo };
     }
     const t = ctx.currentTime;
-    flame.gain.gain.setTargetAtTime(active ? 0.32 : 0, t, active ? 0.03 : 0.08);
+    flame.gain.gain.setTargetAtTime(active ? 0.19 : 0, t, active ? 0.03 : 0.08);
   } catch (e) {}
 }
 
-/* ---------- music: a serious, driving score ---------- */
-// A step sequencer, but voiced for weight: a filtered synth bass with
-// a sub octave, a detuned saw lead, an optional fast arp for tension,
-// and a real drum kit (kick / snare / hats). Every track is minor-key.
-// The title carries the main HOOK — a four-bar anthem — and the combat
-// tracks echo its tonality so the whole score feels of a piece.
+/* ---------- music: a real, played score ---------- */
+// Not a chiptune bleep-track: the harmony is carried by an FM ELECTRIC
+// PIANO, the low end by a warm round BASS (triangle + sine sub, not a
+// buzzy saw), and the movement by a PLUCKED STRING — all under a proper
+// drum kit. Tracks are written as actual songs: real chord progressions
+// (mostly the I–V–vi–IV / i–VI–III–VII families), singable melodies, and,
+// for the title, a multi-section arrangement (intro → verse → chorus →
+// outro) that plays through before it loops.
 //
-// Notes are raw Hz. Reference (A-minor / A-phrygian palette):
-//   A1 55  C2 65.4  D2 73.4  E2 82.4  F2 87.3  G2 98
-//   A2 110 C3 130.8 D3 146.8 E3 164.8 F3 174.6 G3 196 A3 220 B3 246.9
-//   C4 261.6 D4 293.7 E4 329.6 F4 349.2 G4 392 A4 440 B4 493.9
-//   C5 523.3 D5 587.3 E5 659.3 F5 698.5 G5 784
+// Data model: each track is 32 steps = 4 bars of 4/4 (2 steps per beat).
+// `bass`/`mel`/`arp` hold one frequency per step (0 = rest); `chords`
+// holds an ARRAY of frequencies per step (a struck chord). Raw Hz:
+//   C2 65.41  D2 73.42  E2 82.41  F2 87.31  G2 98.00  A2 110.00  Bb2 116.54
+//   C3 130.81 E3 164.81 G3 196.00 A3 220.00 Bb3 233.08 B3 246.94 C#4 277.18
+//   D4 293.66 E4 329.63 F4 349.23 F#4 369.99 G4 392.00 A4 440.00 Bb4 466.16
+//   B4 493.88 C5 523.25 C#5 554.37 D5 587.33 E5 659.25 F5 698.46 G5 783.99
+const C = {
+  Cmaj: [261.63, 329.63, 392.00], Gmaj: [246.94, 293.66, 392.00],
+  Amin: [220.00, 261.63, 329.63], Fmaj: [220.00, 261.63, 349.23],
+  Emin: [246.94, 329.63, 392.00], Dmaj: [220.00, 293.66, 369.99],
+  Dmin: [220.00, 293.66, 349.23], Bbmaj: [293.66, 349.23, 466.16],
+  Gmin: [293.66, 392.00, 466.16], Amaj: [220.00, 277.18, 329.63],
+};
 
 const TRACKS = {
-  // The title THEME — a full arrangement in A minor that moves through
-  // distinct sections (intro → theme → answer → build → chorus → outro)
-  // and only then loops, so it plays like a song instead of one bar on
-  // repeat. Sections advance in order (see the scheduler).
+  // TITLE — a warm C-major song in four sections that play in order, then
+  // loop. I–V–vi–IV, an electric-piano lead singing over it.
   title: [
-    { bpm: 82, drums: "swell", section: "intro",
-      bass: [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
-      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
-      lead: [0,0,0,0, 329.63,0,0,0, 0,0,0,0, 349.23,0,0,0, 0,0,0,0, 392,0,0,0, 0,0,392,0, 440,0,0,0] },
-    { bpm: 82, drums: "swell", section: "theme",
-      bass: [55,0,0,55, 0,0,55,0, 43.65,0,0,43.65, 0,0,0,0, 65.41,0,0,65.41, 0,0,0,0, 49,0,0,49, 0,0,55,0],
-      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
-      lead: [440,0,523.25,493.88, 440,0,329.63,0, 349.23,0,440,392, 349.23,0,0,0, 329.63,0,392,523.25, 493.88,0,392,0, 293.66,0,392,493.88, 440,0,0,0] },
-    { bpm: 82, drums: "swell", section: "answer",
-      bass: [73.41,0,0,73.41, 0,0,0,0, 55,0,0,55, 0,0,0,0, 43.65,0,0,43.65, 0,0,0,0, 41.20,0,0,41.20, 0,0,0,0],
-      sub:  [73.41,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 41.20,0,0,0, 0,0,0,0],
-      lead: [587.33,0,523.25,440, 587.33,0,0,0, 523.25,0,493.88,0, 440,0,329.63,0, 349.23,0,440,523.25, 659.25,0,587.33,0, 659.25,0,0,493.88, 523.25,0,493.88,0] },
-    { bpm: 82, drums: "light", section: "build",
-      bass: [55,55,0,55, 49,49,0,49, 43.65,43.65,0,43.65, 41.20,41.20,0,41.20, 55,55,0,55, 49,49,0,49, 43.65,43.65,0,43.65, 41.20,0,41.20,0],
-      sub:  [55,0,0,0, 49,0,0,0, 43.65,0,0,0, 41.20,0,0,0, 55,0,0,0, 49,0,0,0, 43.65,0,0,0, 41.20,0,0,0],
-      lead: [440,0,0,0, 493.88,0,0,0, 523.25,0,0,0, 587.33,0,659.25,0, 440,0,493.88,0, 523.25,0,587.33,0, 659.25,0,698.46,0, 783.99,0,0,0],
-      arp:  [220,261.63,329.63,261.63, 246.94,293.66,349.23,293.66, 261.63,329.63,392,329.63, 293.66,349.23,440,349.23, 220,261.63,329.63,261.63, 246.94,293.66,349.23,293.66, 261.63,329.63,392,493.88, 587.33,493.88,392,329.63] },
-    { bpm: 82, drums: "light", section: "chorus",
-      bass: [55,0,55,0, 55,0,43.65,0, 43.65,0,43.65,0, 43.65,0,0,0, 65.41,0,65.41,0, 65.41,0,49,0, 49,0,49,0, 49,0,55,0],
-      sub:  [55,0,0,0, 0,0,0,0, 43.65,0,0,0, 0,0,0,0, 65.41,0,0,0, 0,0,0,0, 49,0,0,0, 0,0,0,0],
-      lead: [440,0,659.25,0, 880,0,783.99,659.25, 698.46,0,0,523.25, 440,0,523.25,0, 392,0,523.25,659.25, 783.99,0,659.25,523.25, 587.33,0,783.99,0, 493.88,0,587.33,0],
-      arp:  [220,329.63,440,329.63, 220,329.63,440,523.25, 174.61,261.63,349.23,261.63, 220,261.63,349.23,261.63, 261.63,329.63,392,329.63, 261.63,392,523.25,392, 196,246.94,392,246.94, 246.94,293.66,392,493.88] },
-    { bpm: 82, drums: "swell", section: "outro",
-      bass: [55,0,0,0, 0,0,0,0, 41.20,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0, 55,0,0,0, 55,0,0,0],
-      sub:  [55,0,0,0, 0,0,0,0, 41.20,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0, 55,0,0,0, 0,0,0,0],
-      lead: [440,0,0,392, 349.23,0,329.63,0, 293.66,0,329.63,0, 349.23,0,0,0, 329.63,0,0,0, 246.94,0,329.63,0, 220,0,0,0, 0,0,0,0] },
+    { bpm: 92, drums: "swell", section: "intro",
+      chords: [C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0, C.Amin,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0],
+      bass:   [65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 110,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0],
+      mel:    [0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,329.63,392] },
+    { bpm: 92, drums: "light", section: "verse",
+      chords: [C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Gmaj,0,0,0,C.Gmaj,0,0,0, C.Amin,0,0,0,C.Amin,0,0,0, C.Fmaj,0,0,0,C.Fmaj,0,0,0],
+      bass:   [65.41,0,0,0,98,0,0,0, 98,0,0,0,146.83,0,0,0, 110,0,0,0,164.81,0,0,0, 87.31,0,0,0,130.81,0,0,0],
+      mel:    [329.63,0,392,0,0,0,523.25,0, 493.88,0,0,0,440,0,392,0, 329.63,0,0,0,392,0,440,0, 392,0,0,0,349.23,0,329.63,0] },
+    { bpm: 92, drums: "full", section: "chorus",
+      chords: [C.Amin,0,0,0,C.Amin,0,0,0, C.Fmaj,0,0,0,C.Fmaj,0,0,0, C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Gmaj,0,0,0,C.Gmaj,0,0,0],
+      bass:   [110,0,0,0,164.81,0,0,0, 87.31,0,0,0,130.81,0,0,0, 65.41,0,0,0,98,0,0,0, 98,0,0,0,146.83,0,0,0],
+      mel:    [440,0,523.25,0,659.25,0,587.33,523.25, 523.25,0,440,0,349.23,0,440,523.25, 392,0,523.25,0,659.25,0,587.33,0, 587.33,0,493.88,0,392,0,493.88,587.33],
+      arp:    [220,329.63,440,329.63,261.63,329.63,440,329.63, 174.61,261.63,349.23,261.63,220,261.63,349.23,261.63, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,392,293.66,246.94,293.66,392,293.66] },
+    { bpm: 92, drums: "swell", section: "outro",
+      chords: [C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
+      bass:   [65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
+      mel:    [392,0,0,0,329.63,0,0,0, 293.66,0,0,0,246.94,0,0,0, 261.63,0,0,0,220,0,0,0, 261.63,0,0,0,0,0,0,0] },
   ],
-  // Tense anticipation — a steady pulse that coils, ready to break.
+  // LOBBY — calm anticipation: broken-chord electric piano over a slow
+  // Am–F–C–G, soft heartbeat underneath.
   lobby: [
-    { bpm: 96, drums: "light",
-      bass: [110,0,110,0, 110,0,110,0, 87.3,0,87.3,0, 98,0,98,0, 110,0,110,0, 110,0,130.8,0, 87.3,0,98,0, 82.4,0,82.4,0],
-      lead: [0,0,329.6,0, 0,0,440,0, 0,349.2,0,329.6, 0,0,0,0, 0,0,392,0, 0,440,0,493.9, 0,0,440,0, 0,0,0,0] },
+    { bpm: 84, drums: "swell",
+      chords: [C.Amin,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0],
+      bass:   [110,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0],
+      mel:    [220,0,261.63,0,329.63,0,440,0, 220,0,261.63,0,349.23,0,440,0, 196,0,261.63,0,329.63,0,392,0, 196,0,246.94,0,293.66,0,392,0] },
   ],
-  // Driving combat — relentless, aggressive, minor. Full kit + arps.
+  // GAME — driving combat, but still real music: minor progressions, a
+  // bass groove, electric-piano stabs, a plucked counter-line, full kit.
   game: [
-    { bpm: 140, drums: "full", // phrygian charge
-      bass: [110,0,110,110, 0,110,0,110, 87.3,0,87.3,0, 110,0,110,116.5, 110,0,110,110, 0,110,0,130.8, 116.5,0,110,0, 87.3,0,82.4,0],
-      lead: [440,0,0,523.3, 0,0,466.2,0, 0,440,0,349.2, 0,329.6,0,0, 440,0,0,523.3, 0,587.3,0,466.2, 0,440,0,0, 349.2,0,0,0],
-      arp:  [220,261.6,329.6,261.6, 220,261.6,329.6,349.2, 174.6,220,261.6,220, 220,261.6,329.6,261.6, 220,261.6,329.6,261.6, 220,261.6,392,329.6, 233,293.7,349.2,293.7, 174.6,220,261.6,329.6] },
-    { bpm: 132, drums: "full", // driving minor
-      bass: [82.4,82.4,0,82.4, 0,82.4,0,98, 0,82.4,82.4,0, 73.4,0,65.4,0, 82.4,82.4,0,82.4, 0,82.4,0,110, 0,98,0,82.4, 0,65.4,0,73.4],
-      lead: [329.6,0,0,392, 0,0,0,493.9, 0,0,392,0, 293.7,0,0,0, 329.6,0,0,392, 493.9,0,440,0, 392,0,0,293.7, 0,329.6,0,0],
-      arp:  [164.8,196,246.9,196, 164.8,196,246.9,293.7, 130.8,164.8,196,164.8, 146.8,196,261.6,196, 164.8,196,246.9,196, 220,246.9,329.6,246.9, 196,246.9,392,246.9, 146.8,196,246.9,293.7] },
-    { bpm: 150, drums: "full", // frantic runner
-      bass: [73.4,73.4,73.4,0, 87.3,0,73.4,0, 98,0,98,98, 87.3,0,73.4,0, 73.4,73.4,73.4,0, 87.3,0,110,0, 98,98,0,87.3, 0,73.4,0,65.4],
-      lead: [587.3,0,523.3,0, 440,0,0,349.2, 0,392,0,440, 0,0,0,0, 587.3,0,659.3,0, 587.3,0,523.3,0, 493.9,0,440,0, 392,0,0,0],
-      arp:  [293.7,349.2,440,349.2, 293.7,349.2,440,523.3, 349.2,440,523.3,440, 293.7,349.2,440,349.2, 293.7,349.2,440,349.2, 293.7,392,493.9,392, 246.9,329.6,392,329.6, 293.7,349.2,440,523.3] },
-    { bpm: 126, drums: "full", // stalking menace
-      bass: [65.4,0,0,65.4, 0,0,73.4,0, 0,65.4,0,0, 82.4,0,73.4,0, 65.4,0,0,65.4, 0,0,73.4,0, 87.3,0,82.4,0, 73.4,0,65.4,0],
-      lead: [0,0,261.6,0, 293.7,0,0,246.9, 0,0,261.6,0, 0,0,0,0, 0,0,329.6,0, 349.2,0,293.7,0, 0,261.6,0,246.9, 261.6,0,0,0],
-      arp:  [130.8,164.8,196,164.8, 146.8,174.6,220,174.6, 130.8,164.8,196,164.8, 164.8,196,246.9,196, 130.8,164.8,196,164.8, 174.6,220,261.6,220, 164.8,196,246.9,196, 146.8,174.6,220,261.6] },
+    { bpm: 128, drums: "full", // A minor: i–VI–III–VII
+      chords: [C.Amin,0,0,C.Amin,0,0,0,0, C.Fmaj,0,0,C.Fmaj,0,0,0,0, C.Cmaj,0,0,C.Cmaj,0,0,0,0, C.Gmaj,0,0,C.Gmaj,0,0,0,0],
+      bass:   [110,0,110,110,0,110,0,110, 87.31,0,87.31,87.31,0,87.31,0,87.31, 65.41,0,65.41,65.41,0,65.41,0,98, 98,0,98,98,0,98,0,98],
+      mel:    [440,0,0,523.25,0,493.88,0,440, 523.25,0,440,0,0,349.23,0,392, 659.25,0,0,587.33,0,523.25,0,392, 587.33,0,493.88,0,0,392,0,0],
+      arp:    [220,329.63,440,329.63,261.63,329.63,440,329.63, 174.61,261.63,349.23,261.63,220,261.63,349.23,261.63, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,392,293.66,246.94,293.66,392,293.66] },
+    { bpm: 140, drums: "full", // E minor: i–VI–III–VII, frantic
+      chords: [C.Emin,0,0,C.Emin,0,0,0,0, C.Cmaj,0,0,C.Cmaj,0,0,0,0, C.Gmaj,0,0,C.Gmaj,0,0,0,0, C.Dmaj,0,0,C.Dmaj,0,0,0,0],
+      bass:   [82.41,0,82.41,82.41,0,82.41,0,82.41, 65.41,0,65.41,65.41,0,65.41,0,65.41, 98,0,98,98,0,98,0,98, 73.42,0,73.42,73.42,0,73.42,0,73.42],
+      mel:    [493.88,0,659.25,0,587.33,0,493.88,0, 523.25,0,392,0,329.63,0,392,0, 587.33,0,493.88,0,392,0,493.88,0, 440,0,587.33,0,369.99,0,440,0],
+      arp:    [329.63,493.88,392,493.88,329.63,392,493.88,392, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,246.94,293.66,196,246.94,293.66,246.94, 293.66,440,369.99,440,293.66,369.99,440,369.99] },
+    { bpm: 118, drums: "light", // D minor: stalking menace i–VI–iv–V
+      chords: [C.Dmin,0,0,0,0,0,0,0, C.Bbmaj,0,0,0,0,0,0,0, C.Gmin,0,0,0,0,0,0,0, C.Amaj,0,0,0,0,0,0,0],
+      bass:   [73.42,0,0,0,73.42,0,0,0, 116.54,0,0,0,116.54,0,0,0, 98,0,0,0,98,0,0,0, 110,0,0,0,110,0,0,0],
+      mel:    [440,0,0,0,349.23,0,440,0, 587.33,0,0,0,466.16,0,0,0, 392,0,0,0,466.16,0,587.33,0, 554.37,0,0,0,440,0,0,0],
+      arp:    [220,0,293.66,0,349.23,0,293.66,0, 233.08,0,293.66,0,349.23,0,293.66,0, 196,0,233.08,0,293.66,0,233.08,0, 220,0,277.18,0,329.63,0,277.18,0] },
   ],
 };
 
-// --- drum voices ---
-function drumKick(when) {
+// --- instrument voices (all routed to music.gain) ---
+
+// FM electric piano / tine: a sine carrier shaped by a sine modulator
+// whose index decays, giving a struck-key attack that settles into a
+// warm, harmonic tone. The harmonic heart of every track.
+function mKeys(when, freq, dur, vel, ratio = 1, index = 2.2) {
+  const car = ctx.createOscillator(); car.type = "sine"; car.frequency.value = freq;
+  const mod = ctx.createOscillator(); mod.type = "sine"; mod.frequency.value = freq * ratio;
+  const md = ctx.createGain();
+  md.gain.setValueAtTime(freq * index, when);
+  md.gain.exponentialRampToValueAtTime(Math.max(1, freq * index * 0.04), when + dur * 0.55);
+  mod.connect(md).connect(car.frequency);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  car.connect(g).connect(music.gain);
+  mod.start(when); car.start(when);
+  mod.stop(when + dur + 0.05); car.stop(when + dur + 0.05);
+}
+
+// Warm round bass: a triangle with a sine sub through a gentle lowpass —
+// full and woody, not a buzzy saw.
+function mBass(when, freq, dur, vel = 0.2) {
+  const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = freq;
+  const sub = ctx.createOscillator(); sub.type = "sine"; sub.frequency.value = freq;
+  const sg = ctx.createGain(); sg.gain.value = 0.7;
+  const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 0.7;
+  f.frequency.setValueAtTime(Math.min(1400, freq * 5 + 200), when);
+  f.frequency.exponentialRampToValueAtTime(Math.max(140, freq * 2.2), when + dur * 0.8);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(f); sub.connect(sg).connect(f); f.connect(g).connect(music.gain);
+  o.start(when); sub.start(when);
+  o.stop(when + dur + 0.03); sub.stop(when + dur + 0.03);
+}
+
+// Plucked string: a bright saw snapped through a fast-closing lowpass so
+// it reads like a guitar/harp pluck. Carries the arps and counter-lines.
+function mPluck(when, freq, dur, vel = 0.05) {
+  const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = freq;
+  const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 1.4;
+  f.frequency.setValueAtTime(Math.min(7500, freq * 7), when);
+  f.frequency.exponentialRampToValueAtTime(Math.max(220, freq * 1.6), when + dur * 0.5);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(f).connect(g).connect(music.gain);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+
+// --- drum voices (v scales level so light/soft sections sit back) ---
+function drumKick(when, v = 1) {
   const o = ctx.createOscillator();
   const g = ctx.createGain();
   o.type = "sine";
   o.frequency.setValueAtTime(140, when);
   o.frequency.exponentialRampToValueAtTime(45, when + 0.11);
-  g.gain.setValueAtTime(0.42, when);
+  g.gain.setValueAtTime(0.42 * v, when);
   g.gain.exponentialRampToValueAtTime(0.0001, when + 0.16);
   o.connect(g).connect(music.gain);
   o.start(when); o.stop(when + 0.18);
 }
-function drumSnare(when) {
+function drumSnare(when, v = 1) {
   const src = ctx.createBufferSource();
   src.buffer = getNoise();
   const bp = ctx.createBiquadFilter();
   bp.type = "bandpass"; bp.frequency.value = 1900; bp.Q.value = 0.8;
   const g = ctx.createGain();
-  g.gain.setValueAtTime(0.2, when);
+  g.gain.setValueAtTime(0.2 * v, when);
   g.gain.exponentialRampToValueAtTime(0.0001, when + 0.14);
   src.connect(bp).connect(g).connect(music.gain);
   src.start(when); src.stop(when + 0.16);
@@ -638,19 +694,19 @@ function drumSnare(when) {
   const g2 = ctx.createGain();
   o.type = "triangle"; o.frequency.setValueAtTime(210, when);
   o.frequency.exponentialRampToValueAtTime(150, when + 0.09);
-  g2.gain.setValueAtTime(0.1, when);
+  g2.gain.setValueAtTime(0.1 * v, when);
   g2.gain.exponentialRampToValueAtTime(0.0001, when + 0.1);
   o.connect(g2).connect(music.gain);
   o.start(when); o.stop(when + 0.12);
 }
-function drumHat(when, open) {
+function drumHat(when, open, v = 1) {
   const src = ctx.createBufferSource();
   src.buffer = getNoise();
   const hp = ctx.createBiquadFilter();
   hp.type = "highpass"; hp.frequency.value = 8500;
   const g = ctx.createGain();
   const dur = open ? 0.09 : 0.032;
-  g.gain.setValueAtTime(open ? 0.05 : 0.045, when);
+  g.gain.setValueAtTime((open ? 0.05 : 0.045) * v, when);
   g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
   src.connect(hp).connect(g).connect(music.gain);
   src.start(when); src.stop(when + dur + 0.02);
@@ -660,80 +716,33 @@ function scheduleStep(step, when) {
   const tr = TRACKS[music.mode][music.trackIdx];
   const STEP = 60 / tr.bpm / 2;
   const bar = step % 32;
+  const pos = bar % 8; // position within the current bar (0..7 = 8th notes)
 
-  // Bass — filtered saw with a punchy decay.
-  const b = tr.bass?.[step % tr.bass.length];
-  if (b) {
-    const o = ctx.createOscillator();
-    const f = ctx.createBiquadFilter();
-    const g = ctx.createGain();
-    o.type = "sawtooth";
-    o.frequency.value = b;
-    f.type = "lowpass";
-    f.frequency.setValueAtTime(Math.min(2200, b * 6 + 260), when);
-    f.frequency.exponentialRampToValueAtTime(Math.max(120, b * 2), when + STEP);
-    f.Q.value = 3;
-    g.gain.setValueAtTime(0.13, when);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + STEP * 0.95);
-    o.connect(f).connect(g).connect(music.gain);
-    o.start(when); o.stop(when + STEP);
-  }
-  // Sub octave for weight (title's explicit sub, else derived).
-  const subN = tr.sub?.[step % (tr.sub?.length ?? 1)] ?? (b ? b / 2 : 0);
-  if (subN) {
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = "sine";
-    o.frequency.value = subN < 40 ? subN * 2 : subN; // keep it audible
-    g.gain.setValueAtTime(0.12, when);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + STEP * 1.3);
-    o.connect(g).connect(music.gain);
-    o.start(when); o.stop(when + STEP * 1.4);
-  }
-  // Lead — two slightly detuned saws through a lowpass: a big, serious
-  // voice with a longer release so the melody sings.
-  const l = tr.lead?.[step % tr.lead.length];
-  if (l) {
-    const f = ctx.createBiquadFilter();
-    f.type = "lowpass"; f.frequency.value = 2600; f.Q.value = 1.2;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.075, when);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + STEP * 2.4);
-    f.connect(g).connect(music.gain);
-    for (const det of [-6, 7]) {
-      const o = ctx.createOscillator();
-      o.type = "sawtooth";
-      o.frequency.value = l;
-      o.detune.value = det;
-      o.connect(f);
-      o.start(when); o.stop(when + STEP * 2.5);
-    }
-  }
-  // Arp — a fast, quiet ostinato that drives the combat tracks.
-  const a = tr.arp?.[step % tr.arp.length];
-  if (a) {
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = "square";
-    o.frequency.value = a;
-    g.gain.setValueAtTime(0.032, when);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + STEP * 0.8);
-    o.connect(g).connect(music.gain);
-    o.start(when); o.stop(when + STEP);
-  }
+  // Harmony — electric-piano chords (an array of notes), left to ring.
+  const ch = tr.chords ? tr.chords[step % tr.chords.length] : 0;
+  if (ch) for (const n of ch) if (n) mKeys(when, n, STEP * 6, 0.04, 1, 2.0);
+  // Melody — a singing electric-piano lead.
+  const m = tr.mel ? tr.mel[step % tr.mel.length] : 0;
+  if (m) mKeys(when, m, STEP * 3.4, 0.1, 1, 2.6);
+  // Bass — warm and round.
+  const b = tr.bass ? tr.bass[step % tr.bass.length] : 0;
+  if (b) mBass(when, b, STEP * 1.5);
+  // Counter-line — plucked string.
+  const a = tr.arp ? tr.arp[step % tr.arp.length] : 0;
+  if (a) mPluck(when, a, STEP * 0.95, 0.048);
 
   // Drums.
   const kit = tr.drums ?? "none";
   if (kit === "full") {
-    if (bar % 8 === 0 || bar % 8 === 6) drumKick(when);       // 1 and the "and" of 4
-    if (bar % 8 === 4) drumSnare(when);                        // backbeat
-    if (bar % 2 === 0) drumHat(when, bar % 8 === 4);           // steady 8ths
+    if (pos === 0 || pos === 4) drumKick(when);   // beats 1 & 3
+    if (pos === 2 || pos === 6) drumSnare(when);   // backbeat 2 & 4
+    drumHat(when, pos === 7);                       // steady 8ths, open on the & of 4
   } else if (kit === "light") {
-    if (bar % 8 === 0) drumKick(when);
-    if (bar % 4 === 2) drumHat(when, false);
+    if (pos === 0) drumKick(when, 0.8);
+    if (pos === 4) drumSnare(when, 0.55);
+    if (pos % 2 === 0) drumHat(when, false, 0.7);   // hats on the beats
   } else if (kit === "swell") {
-    // Title: just a deep heartbeat on the downbeat of each bar.
-    if (bar % 8 === 0) drumKick(when);
+    if (pos === 0) drumKick(when, 0.6);             // a soft heartbeat on each downbeat
   }
 }
 

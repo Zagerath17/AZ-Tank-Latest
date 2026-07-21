@@ -4843,7 +4843,7 @@ function drawTank(t, now) {
   // the turret frame (and its phase alpha), so each gun reads at a glance
   // instead of looking like a differently-sized version of the same tube.
   ctx.save();
-  drawTurretDetail(wtype, bL, bW, R, now);
+  drawTurretDetail(wtype, bL, bW, R, now, effBaseHex(t));
   ctx.restore();
 
   // Violet rim on the turret while phasing, so its outline pops too.
@@ -4975,7 +4975,7 @@ function turretOutline(wtype, bL, bW, R, grow = 0) {
 // edges (so shapes read on light AND dark tank paint) plus a signature
 // accent colour per gun. This is what makes the weapons distinct: without
 // it every barrel is just a rounded rectangle of a different size.
-function drawTurretDetail(wtype, bL, bW, R, now) {
+function drawTurretDetail(wtype, bL, bW, R, now, beamHex) {
   const dark = "#2b303b", steel = "#454e5d", lite = "#6b7488", edge = "#8a94a6";
   const tms = now / 1000;
   switch (wtype) {
@@ -4998,21 +4998,25 @@ function drawTurretDetail(wtype, bL, bW, R, now) {
     case "laser": {
       // A crystalline energy emitter: a glowing core stripe running the
       // barrel to a prism lens at the muzzle, flanked by heat-sink fins.
+      // The energy glows in the tank's OWN beam colour (the same colour it
+      // fires), with a hot near-white highlight down the centre.
       ctx.fillStyle = steel; rr(R * 0.34, -bW * 0.7, bL - R * 0.34, bW * 1.4, bW * 0.3);
       ctx.fillStyle = dark;
       for (const dy of [-1, 1]) rr(R * 0.42, dy * bW * 1.05 - bW * 0.12, R * 0.26, bW * 0.4, bW * 0.1); // fins
       const glow = 0.7 + 0.3 * Math.sin(tms * 6);
-      ctx.fillStyle = "#bfefff"; rr(R * 0.4, -bW * 0.18, bL - R * 0.55, bW * 0.36, bW * 0.16);
-      ctx.fillStyle = "#35c8ff"; rr(R * 0.4, -bW * 0.10, bL - R * 0.6, bW * 0.2, bW * 0.1);
-      ctx.fillStyle = "#35c8ff";
+      const beam = beamHex || "#35c8ff";
+      const beamLite = mix(beam, "#ffffff", 0.55);
+      ctx.fillStyle = beam; rr(R * 0.4, -bW * 0.18, bL - R * 0.55, bW * 0.36, bW * 0.16);       // energy core
+      ctx.fillStyle = beamLite; rr(R * 0.4, -bW * 0.09, bL - R * 0.62, bW * 0.18, bW * 0.09);    // hot highlight
+      ctx.fillStyle = beam;                                                                       // prism lens
       ctx.beginPath();
       ctx.moveTo(bL + R * 0.1, 0);
       ctx.lineTo(bL - R * 0.06, -bW * 0.95);
       ctx.lineTo(bL - R * 0.16, 0);
       ctx.lineTo(bL - R * 0.06, bW * 0.95);
       ctx.closePath(); ctx.fill();
-      ctx.fillStyle = `rgba(234,252,255,${0.7 + 0.3 * glow})`;
-      ctx.beginPath(); ctx.arc(bL - R * 0.02, 0, bW * (0.30 + 0.08 * glow), 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${0.7 + 0.3 * glow})`;                                     // white-hot focus
+      ctx.beginPath(); ctx.arc(bL - R * 0.02, 0, bW * (0.26 + 0.07 * glow), 0, Math.PI * 2); ctx.fill();
       break;
     }
     case "sniper": {
