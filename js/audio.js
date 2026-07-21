@@ -500,6 +500,45 @@ export function setEngine(active, localMoving, enemyMoving) {
   } catch (e) {}
 }
 
+// A sustained flamethrower ROAR — one shared voice for the whole arena,
+// driven once per frame by "is anyone breathing fire" (mirrors setEngine).
+// Looping noise split into a low body (lowpass) and an airy hiss
+// (bandpass); a slow LFO wobbles the low cutoff so it gutters like real
+// fire. The flicker rides the FILTER, never the output gain, so "off" is
+// truly silent — and it's routed through sfxBus, so it obeys the SFX /
+// master mix and mute like every other sound. Gain glides to its target,
+// so starting and stopping are click-free.
+let flame = null; // { gain, src, lfo }
+export function setFlame(active) {
+  if (!ready()) return;
+  try {
+    if (!flame) {
+      const src = ctx.createBufferSource();
+      src.buffer = getNoise();
+      src.loop = true;
+      const low = ctx.createBiquadFilter();
+      low.type = "lowpass"; low.frequency.value = 820; low.Q.value = 0.8;
+      const band = ctx.createBiquadFilter();
+      band.type = "bandpass"; band.frequency.value = 1700; band.Q.value = 0.7;
+      const bandGain = ctx.createGain(); bandGain.gain.value = 0.4;
+      const g = ctx.createGain();
+      g.gain.value = 0; // the master envelope — 0 here is genuinely silent
+      const lfo = ctx.createOscillator();
+      lfo.type = "sine"; lfo.frequency.value = 9;
+      const lfoDepth = ctx.createGain(); lfoDepth.gain.value = 170; // Hz of cutoff wobble
+      lfo.connect(lfoDepth).connect(low.frequency);
+      src.connect(low).connect(g);
+      src.connect(band); band.connect(bandGain).connect(g);
+      g.connect(sfxBus);
+      src.start();
+      lfo.start();
+      flame = { gain: g, src, lfo };
+    }
+    const t = ctx.currentTime;
+    flame.gain.gain.setTargetAtTime(active ? 0.32 : 0, t, active ? 0.03 : 0.08);
+  } catch (e) {}
+}
+
 /* ---------- music: a serious, driving score ---------- */
 // A step sequencer, but voiced for weight: a filtered synth bass with
 // a sub octave, a detuned saw lead, an optional fast arp for tension,
@@ -765,5 +804,8 @@ export function stopAll() {
   stopMusic();
   if (engine && ctx) {
     try { engine.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.1); } catch (e) {}
+  }
+  if (flame && ctx) {
+    try { flame.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.1); } catch (e) {}
   }
 }

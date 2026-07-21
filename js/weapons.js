@@ -194,17 +194,18 @@ export const ROCKET = {
 };
 
 export const FLAME = {
-  // A short cone: reaches 2/3 of a cell, skinny at the nozzle and
-  // fanning to a tank's width at the tip.
-  reachCells: 2 / 3,   // stream length as a fraction of a cell
-  durationMs: 5000,    // held or not, the tank breathes fire for 5 s
-  tickMs: 1000,        // 1 base damage per second of contact
+  // A cone reaching a FULL cell — 50% longer than the old 2/3 cell —
+  // skinny at the nozzle and fanning to a tank's width at the tip.
+  reachCells: 1,       // was 2/3; +50% distance
+  durationMs: 3000,    // total fuel: 3 s of fire while the trigger is held
+  tickMs: 500,         // direct damage: 1 every half-second of contact
   tickDmg: 1,
-  // Burn: lit on first contact, ticks 1 dmg every 2 s STARTING 1 s after
-  // the hit, and keeps burning for 10 s total from ignition.
-  burnFirstMs: 1000,   // first burn tick, 1 s after the initial hit
-  burnEveryMs: 2000,   // then every 2 s
-  burnTotalMs: 10000,  // burn persists this long from ignition
+  // Burn (damage-over-time): does NOT run while the flame is still on the
+  // target. It starts only once contact ENDS, then ticks 1 dmg every 1 s
+  // for 3 s.
+  contactGraceMs: 150, // contact counts as "over" after this gap with no hit
+  burnEveryMs: 1000,   // 1 damage per second
+  burnTotalMs: 3000,   // ...for 3 seconds
   burnDmg: 1,
   tipWidthMul: 1.0,    // tip half-width = this × the tank RADIUS... (see game.js)
 };
