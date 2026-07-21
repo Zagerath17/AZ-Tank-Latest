@@ -918,6 +918,30 @@ export function drawGear(ctx, g, R, pulse, now = 0) {
       ctx.fill();
       break;
     }
+    case "flame": {
+      // A tongue of fire: three nested teardrops running the torch ramp
+      // (orange rim → gold → white-hot core) so it reads as a flame even
+      // at HUD size. Each teardrop is pointed at the top, round at the
+      // belly, and leans very slightly for a live flicker.
+      const flame = (topY, botY, wid, lean) => {
+        const h = botY - topY;
+        ctx.beginPath();
+        ctx.moveTo(lean, topY); // sharp tip
+        ctx.bezierCurveTo(wid + lean * 0.4, topY + h * 0.42,
+                          wid, botY - h * 0.06, 0, botY); // down the right to the base
+        ctx.bezierCurveTo(-wid, botY - h * 0.06,
+                          -wid + lean * 0.4, topY + h * 0.42, lean, topY); // up the left
+        ctx.closePath();
+        ctx.fill();
+      };
+      ctx.fillStyle = rim;
+      flame(-R * 0.44, R * 0.40, R * 0.34, R * 0.05);
+      ctx.fillStyle = "#ffc63a";
+      flame(-R * 0.18, R * 0.34, R * 0.21, R * 0.03);
+      ctx.fillStyle = "#fff3cf";
+      flame(R * 0.03, R * 0.30, R * 0.10, R * 0.01);
+      break;
+    }
     case "armour": {
       // A shield crest.
       ctx.fillStyle = rim;

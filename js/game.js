@@ -41,6 +41,16 @@ const REVERSE_SPEED = U * 1.45;
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
 const TURRET_TURN_SPEED = TURN_SPEED * 1.2 * 0.9; // 1.2× hull, then a 10% turret debuff
 
+// ---- Flamethrower (held-fire) tunables ----
+// The flame is a HOLD weapon now: fuel drains only while the trigger is
+// down and the barrel reverts when it runs dry, exactly like the MG
+// empties its belt. FLAME.durationMs (from weapons.js) is the fuel pool
+// — total seconds of fire per pickup.
+const FLAME_GROW_MS = 180;     // stream extends over this on trigger-down
+const FLAME_FADE_MS = 160;     // ...and pulls back in over this on release
+const FLAME_NET_MS = 120;      // online: resend a "still firing" pulse this often
+const FLAME_NET_TTL = 360;     // ...and a peer's stream stays lit this long per pulse
+
 const GEAR_R = 14;             // pickup grab radius (added to the tank's)
 const GEAR_TYPE_MAX = 2;       // default depth: this many of each ability
 const GEAR_MAX = WEAPON_TYPES.length * GEAR_TYPE_MAX; // default field cap (24)
@@ -96,7 +106,7 @@ function specialInPlay(t) {
   return S.rockets.some((r) => r.by === t.id)
     || S.cannons.some((c) => c.by === t.id)
     || S.beams.some((bm) => bm.by === t.id && !bm.doneAt)
-    || (t.weapon === "flame" && t.flameUntil && performance.now() < t.flameUntil);
+    || (t.weapon === "flame" && t.flameOn);
 }
 
 const ROUND_PAUSE = 2600;   // ms between rounds
@@ -1345,24 +1355,50 @@ function stepTanks(now, dt) {
             if (t.local && !t.bot) sfx.winddown();
           }
         }
-      } else if (t.weapon === "flame" && t.flameUntil) {
-        // Flamethrower: a fixed 5 s burst. Every FLAME.tickMs, any tank
-        // caught in the cone takes 1 base damage AND is (re)lit with a
-        // burn. The stream is drawn in the render pass; here we only do
-        // hits. When the burst ends, the barrel reverts.
-        if (now >= t.flameUntil) {
-          t.flameUntil = 0;
-          t.flameTickAt = 0;
-          clearWeapon(t, now);
-        } else if (now >= (t.flameTickAt ?? 0)) {
-          t.flameTickAt = now + FLAME.tickMs;
-          for (const o of S.tanks) {
-            if (o === t || o.dead || o.gone) continue;
-            if (tankInFlameCone(t, o)) {
-              applyHit(o, FLAME.tickDmg, t.id, now, "flame");
-              igniteBurn(o, t.id, now); // start / refresh the burn
+      } else if (t.weapon === "flame") {
+        // Flamethrower: HOLD the trigger to breathe fire. Fuel drains
+        // ONLY while the button is down (it's not a toggle), the stream
+        // dies the instant you let go, and when the tank runs dry the
+        // barrel reverts — a charge that empties exactly like the MG's
+        // belt. Every FLAME.tickMs of contact deals 1 base damage and
+        // (re)lights a burn; the tick clock is NOT rewound on release, so
+        // tapping can never out-pace a steady hold.
+        t.flameFuel ??= FLAME.durationMs;
+        const firing = !!acts.shoot && t.flameFuel > 0;
+        if (firing) {
+          if (!t.flameOn) {
+            t.flameOn = true;
+            t.flameOnAt = now;      // stream starts to extend
+            t.flameNetAt = 0;       // push a fresh pulse to peers at once
+            sfx.windup?.();
+          }
+          t.flameFuel = Math.max(0, t.flameFuel - dt * 1000); // dt is seconds
+          if (now >= (t.flameTickAt ?? 0)) {
+            t.flameTickAt = now + FLAME.tickMs;
+            for (const o of S.tanks) {
+              if (o === t || o.dead || o.gone) continue;
+              if (tankInFlameCone(t, o)) {
+                applyHit(o, FLAME.tickDmg, t.id, now, "flame");
+                igniteBurn(o, t.id, now); // start / refresh the burn
+              }
             }
           }
+          // Online: keep peers' streams alive with a throttled pulse.
+          if (S.mode === "online" && t.local && now >= (t.flameNetAt ?? 0)) {
+            t.flameNetAt = now + FLAME_NET_MS;
+            sendTypedShot(t, { w: "flame", x0: +t.x.toFixed(1), y0: +t.y.toFixed(1) }, now);
+          }
+          if (t.flameFuel <= 0) {
+            t.flameOn = false;
+            t.flameOffAt = now;
+            clearWeapon(t, now);    // dry — barrel reverts, pickups unlock
+          }
+        } else if (t.flameOn) {
+          // Trigger released with fuel to spare: shut the stream (it pulls
+          // in and fades) and keep the rest for later.
+          t.flameOn = false;
+          t.flameOffAt = now;
+          if (t.local && !t.bot) sfx.winddown?.();
         }
       }
     } else {
@@ -1428,6 +1464,14 @@ function stepTanks(now, dt) {
       if (Math.abs(fwd) > 28 * dt && now >= (t.dustAt ?? 0)) {
         const boosting = now < (t.boostUntil ?? 0);
         emitDriveDust(t, fwd > 0 ? -1 : 1, boosting, now);
+      }
+
+      // Flamethrower stream for a remote shooter: it stays lit only while
+      // their "still firing" pulses keep arriving. When they release (or
+      // lag out) the pulses stop, so we let it pull in and fade.
+      if (t.flameOn && now > (t.flamePulseUntil ?? 0)) {
+        t.flameOn = false;
+        t.flameOffAt = now;
       }
     }
   }
@@ -1559,8 +1603,13 @@ function sendTypedShot(t, payload, now) {
 
 function clearWeapon(t, now) {
   t.weapon = null;
-  t.flameUntil = 0;
+  t.flameUntil = 0;      // legacy field, kept zeroed for safety
   t.flameTickAt = 0;
+  t.flameOn = false;
+  t.flameOnAt = 0;
+  t.flameOffAt = 0;
+  t.flameFuel = null;    // a fresh flame pickup refills the pool
+  t.flameNetAt = 0;
   t.snNextAt = 0;
   if (t.mortarAiming) cancelMortarAim(t);
   t.mgReadyAt = 0;
@@ -1591,7 +1640,8 @@ function tryFire(t, now) {
     return;
   }
 
-  if (t.weapon === "mg") return; // manual fire — handled in stepTanks
+  if (t.weapon === "mg") return;    // manual fire — handled in stepTanks
+  if (t.weapon === "flame") return; // held fire — handled in stepTanks
 
   if (t.weapon) {
     fireOffense(t, now);
@@ -1629,16 +1679,6 @@ function fireOffense(t, now) {
     const m = muzzlePoint(t, 1);
     fireLaser(t.id, m.x, m.y, aim, now);
     sendTypedShot(t, { w: "laser", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +aim.toFixed(3) }, now);
-  } else if (w === "flame") {
-    // Light the flamethrower: it burns for a fixed 5 s from this press
-    // (the stream + damage are driven in stepTanks). One press commits
-    // the whole burst, so nothing else here — and it does NOT clear the
-    // weapon yet; stepTanks clears it when the 5 s elapse.
-    t.flameUntil = now + FLAME.durationMs;
-    t.flameTickAt = now; // first base tick lands at once → 5 ticks over 5 s
-    sfx.windup?.();
-    sendTypedShot(t, { w: "flame", x0: +t.x.toFixed(1), y0: +t.y.toFixed(1) }, now);
-    return; // stay equipped while it burns
   } else if (w === "rocket") {
     const m = muzzlePoint(t, ROCKET.r * BULLET_R);
     spawnRocket(t.id, m.x, m.y, aim, now);
@@ -1945,11 +1985,16 @@ function spawnShot(byId, sh, now = performance.now()) {
     case "mud": addMudPit(sh.x, sh.y, sh.s ?? 1, now); break;
     case "mortar": launchMortar(byId, sh.x0, sh.y0, sh.x, sh.y, now); break;
     case "flame": {
-      // Remote flamethrower: light the shooter's 5 s burst so this
-      // client draws the stream. Cone damage is applied by whoever owns
-      // each victim, so no hit is computed here.
+      // Remote flamethrower: the shooter sends a pulse every FLAME_NET_MS
+      // while holding, and each one keeps this peer's stream lit for
+      // FLAME_NET_TTL. Cone damage is applied by whoever owns each victim,
+      // so nothing is computed here beyond the visual. The remote branch
+      // in stepTanks snuffs the stream once the pulses stop.
       const ft = S.tanks.find((x) => x.id === byId);
-      if (ft) { ft.flameUntil = now + FLAME.durationMs; ft.flameTickAt = now; }
+      if (ft) {
+        if (!ft.flameOn) { ft.flameOn = true; ft.flameOnAt = now; }
+        ft.flamePulseUntil = now + FLAME_NET_TTL;
+      }
       break;
     }
     case "detonate": {
@@ -2131,6 +2176,16 @@ function stepGear(now) {
       if (cat === "offense") {
         t.weapon = g.type; // barrel (sprite + hitbox) swaps immediately
         if (g.type === "sniper") t.snAmmo = SNIPER.shots;
+        if (g.type === "flame") {
+          // A fresh tank of fuel, and a clean slate so the first pull
+          // ticks at once and can't be tap-spammed.
+          t.flameFuel = FLAME.durationMs;
+          t.flameTickAt = 0;
+          t.flameOn = false;
+          t.flameOnAt = 0;
+          t.flameOffAt = 0;
+          t.flameNetAt = 0;
+        }
         // sendPickup atomically removes the crate AND announces the gun
         // (the gun channel drives every remote client's barrel).
         if (S.mode === "online") S.sendPickup?.(g.key, t.id, g.type);
@@ -2962,7 +3017,8 @@ function resetMultiKill() {
 function killTank(t) {
   if (t.dead) return;
   t.dead = true;
-  t.burnUntil = 0; t.burnNextAt = 0; t.flameUntil = 0; // a dead tank stops burning
+  t.burnUntil = 0; t.burnNextAt = 0;
+  t.flameUntil = 0; t.flameOn = false; t.flameOffAt = 0; // a dead tank stops burning/flaming
   if (isMyTank(t)) resetMultiKill(); // dying ends your run
   const now = performance.now();
   // The full send-off: a dedicated explosion sound, a fireball flash,
@@ -3452,29 +3508,59 @@ function flameColorAt(u) {
   return [220, 55, 30];
 }
 
-// The animated flamethrower cone: extends smoothly on ignition, pulls in
-// as it ends, built from many soft blobs along the centreline whose
-// radius grows skinny→tank-wide and whose colour runs the torch ramp,
-// flickering with layered noise, drawn additively.
+// The animated flamethrower cone. It extends over FLAME_GROW_MS on
+// trigger-down, holds while the button is held, and pulls in over
+// FLAME_FADE_MS on release. Drawn in TWO passes: an opaque torch-coloured
+// BODY with normal blending (so the stream is visible on ANY floor — pure
+// additive fire is invisible on the white arena, since white + light =
+// white), then additive wisps + a hot pilot on top for the glow.
 function drawFlameStream(t, now) {
   const aim = t.turret ?? t.a;
   const reach = FLAME.reachCells * CELL;
   const nozzle = BARRELS.flame.len * TANK_R * 0.5;
-  const age = now - (t.flameUntil - FLAME.durationMs);
-  const remain = t.flameUntil - now;
-  const grow = Math.max(0, Math.min(1, age / 180));
-  const fade = Math.max(0, Math.min(1, remain / 160));
+  // Grow while emitting (from the moment the trigger went down); once
+  // released, the stream is at full length and only `fade` pulls it in.
+  const grow = t.flameOn
+    ? Math.max(0, Math.min(1, (now - (t.flameOnAt ?? now)) / FLAME_GROW_MS))
+    : 1;
+  const fade = t.flameOn
+    ? 1
+    : Math.max(0, Math.min(1, 1 - (now - (t.flameOffAt ?? 0)) / FLAME_FADE_MS));
   const len = (reach - nozzle) * grow * fade;
   if (len <= 1) return;
+
+  const tipHalf = TANK_R;
+  const rootHalf = TANK_R * 0.16;
+  const tms = now / 1000;
+  const tip = nozzle + len;
 
   ctx.save();
   ctx.translate(t.x, t.y);
   ctx.rotate(aim);
+
+  // ---- Pass 1: opaque flame BODY (normal blend) — a flickering cone
+  // filled with the torch ramp along its length, so it reads on white. ----
+  const wig = (phase, amt) => Math.sin(tms * 16 + phase) * tipHalf * amt;
+  ctx.beginPath();
+  ctx.moveTo(nozzle, -rootHalf);
+  ctx.quadraticCurveTo(nozzle + len * 0.55, -tipHalf * 0.85 + wig(0.4, 0.12),
+                       tip, -tipHalf * 0.5 + wig(1.1, 0.14));
+  ctx.quadraticCurveTo(tip + tipHalf * 0.55, wig(1.6, 0.10), tip, tipHalf * 0.5 + wig(2.0, 0.14));
+  ctx.quadraticCurveTo(nozzle + len * 0.55, tipHalf * 0.85 + wig(2.7, 0.12), nozzle, rootHalf);
+  ctx.closePath();
+  const cAt = (u, a) => { const [r, g, b] = flameColorAt(u); return `rgba(${r},${g},${b},${a})`; };
+  const body = ctx.createLinearGradient(nozzle, 0, tip, 0);
+  body.addColorStop(0.00, cAt(0.06, 0.50 * fade));
+  body.addColorStop(0.28, cAt(0.34, 0.88 * fade));
+  body.addColorStop(0.72, cAt(0.72, 0.92 * fade));
+  body.addColorStop(0.90, cAt(0.94, 0.66 * fade));
+  body.addColorStop(1.00, cAt(1.00, 0.0));
+  ctx.fillStyle = body;
+  ctx.fill();
+
+  // ---- Pass 2: additive wisps for the glow on dark areas. ----
   ctx.globalCompositeOperation = "lighter";
-  const tipHalf = TANK_R;
-  const rootHalf = TANK_R * 0.16;
   const steps = 22;
-  const tms = now / 1000;
   for (let layer = 0; layer < 3; layer++) {
     const lay = layer - 1;
     for (let i = 0; i <= steps; i++) {
@@ -3485,7 +3571,7 @@ function drawFlameStream(t, now) {
         + Math.sin(tms * 27 - i * 1.7) * half * 0.14;
       const off = lay * half * 0.55 + flick;
       const [r, g, b] = flameColorAt(u);
-      const a = (0.42 - 0.30 * u) * (1 - Math.abs(lay) * 0.28) * fade;
+      const a = (0.34 - 0.24 * u) * (1 - Math.abs(lay) * 0.28) * fade;
       const rad = half * (0.9 + 0.35 * Math.sin(tms * 20 + i));
       const gr = ctx.createRadialGradient(along, off, 0, along, off, rad);
       gr.addColorStop(0, `rgba(${r},${g},${b},${a})`);
@@ -3496,6 +3582,7 @@ function drawFlameStream(t, now) {
       ctx.fill();
     }
   }
+  // Bright blue-white pilot flame at the nozzle.
   const cg = ctx.createRadialGradient(nozzle, 0, 0, nozzle, 0, rootHalf * 3.2);
   cg.addColorStop(0, `rgba(210,235,255,${0.7 * fade})`);
   cg.addColorStop(1, "rgba(120,170,255,0)");
@@ -3873,11 +3960,13 @@ function draw(now) {
 
   // Flamethrower streams: a short animated cone per firing tank, skinny
   // at the nozzle and fanning to a tank's width at the tip. It extends
-  // smoothly on activation, and its colour runs blue → white → yellow →
-  // orange → red from the nozzle out, like a real torch. Drawn with
-  // additive blending and layered wisps for a soft, detailed look.
+  // smoothly on trigger-down, holds while the button is down, and pulls
+  // back in over FLAME_FADE_MS on release. Colour runs blue → white →
+  // yellow → orange → red from the nozzle out, like a real torch.
   for (const t of S.tanks) {
-    if (t.dead || t.gone || t.weapon !== "flame" || !t.flameUntil || now >= t.flameUntil) continue;
+    if (t.dead || t.gone) continue;
+    const flaming = t.flameOn || (t.flameOffAt && now - t.flameOffAt < FLAME_FADE_MS);
+    if (!flaming) continue;
     drawFlameStream(t, now);
   }
 
@@ -4699,6 +4788,15 @@ function drawTank(t, now) {
   }
   ctx.restore();
 
+  // Weapon-specific turret DETAIL (gatling tubes, laser emitter, sniper
+  // scope, rocket nose, cannon brake, mortar bore, flame nozzle…). Drawn
+  // UNCLIPPED so muzzle devices can poke past the barrel, but still inside
+  // the turret frame (and its phase alpha), so each gun reads at a glance
+  // instead of looking like a differently-sized version of the same tube.
+  ctx.save();
+  drawTurretDetail(wtype, bL, bW, R, now);
+  ctx.restore();
+
   // Violet rim on the turret while phasing, so its outline pops too.
   if (phasing) {
     ctx.save();
@@ -4758,6 +4856,7 @@ function turretOutline(wtype, bL, bW, R, grow = 0) {
     case "laser":  HW = R * 0.42; xBack = -R * 0.4; xFront = R * 0.40; shape = "box"; round = R * 0.06; break;
     case "mg":     HW = R * 0.50; xBack = -R * 0.4; xFront = R * 0.30; shape = "box"; round = R * 0.12; break;
     case "rocket": HW = R * 0.54; xBack = -R * 0.38; xFront = R * 0.26; shape = "box"; round = R * 0.14; break;
+    case "flame":  HW = R * 0.52; xBack = -R * 0.4; xFront = R * 0.28; shape = "round"; round = R * 0.22; break;
     default: break; // normal + utility: rounded housing
   }
   HW += g; const bw = bW + g; const bl2 = bL + g;
@@ -4819,6 +4918,120 @@ function turretOutline(wtype, bL, bW, R, grow = 0) {
     ctx.lineTo(xb - r * 0.2, -HW + r);
     ctx.quadraticCurveTo(xb - r * 0.2, -HW + r * 0.2, xb + r, -HW);
     ctx.closePath();
+  }
+}
+
+// Per-weapon turret DETAIL, painted over the finished turret in the turret
+// frame (+x forward, origin = hull centre). Gunmetal fills with light
+// edges (so shapes read on light AND dark tank paint) plus a signature
+// accent colour per gun. This is what makes the weapons distinct: without
+// it every barrel is just a rounded rectangle of a different size.
+function drawTurretDetail(wtype, bL, bW, R, now) {
+  const dark = "#2b303b", steel = "#454e5d", lite = "#6b7488", edge = "#8a94a6";
+  const tms = now / 1000;
+  switch (wtype) {
+    case "mg": {
+      // Gatling: three tubes down the barrel with bright bores, plus a
+      // round ammo drum seated on the housing.
+      ctx.fillStyle = dark;
+      for (const dy of [-1, 0, 1]) rr(R * 0.30, dy * bW * 0.62 - bW * 0.30, bL - R * 0.30, bW * 0.60, bW * 0.30);
+      ctx.fillStyle = lite;
+      for (const dy of [-1, 0, 1]) { ctx.beginPath(); ctx.arc(bL - bW * 0.24, dy * bW * 0.62, bW * 0.24, 0, Math.PI * 2); ctx.fill(); }
+      ctx.fillStyle = steel;
+      ctx.beginPath(); ctx.arc(-R * 0.05, R * 0.42, R * 0.26, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = edge; ctx.lineWidth = Math.max(1, R * 0.05);
+      ctx.beginPath(); ctx.arc(-R * 0.05, R * 0.42, R * 0.26, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(-R * 0.05, R * 0.42, R * 0.11, 0, Math.PI * 2); ctx.stroke();
+      break;
+    }
+    case "laser": {
+      // Slim emitter rail: two focusing rings + a pulsing red lens.
+      ctx.strokeStyle = dark; ctx.lineWidth = Math.max(2, bW * 0.55);
+      for (const fx of [0.5, 0.74]) {
+        const x = R * 0.4 + (bL - R * 0.4) * fx;
+        ctx.beginPath(); ctx.moveTo(x, -bW * 1.3); ctx.lineTo(x, bW * 1.3); ctx.stroke();
+      }
+      const pulse = 0.7 + 0.3 * Math.sin(tms * 6);
+      ctx.fillStyle = "#e8452e";
+      ctx.beginPath(); ctx.arc(bL - R * 0.02, 0, bW * (0.85 + 0.18 * pulse), 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#ffe0d2";
+      ctx.beginPath(); ctx.arc(bL - R * 0.02, 0, bW * 0.42, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case "sniper": {
+      // A mounted scope offset from the bore, with a teal lens, and a
+      // slotted muzzle brake at the tip.
+      ctx.fillStyle = dark; rr(-R * 0.30, -bW * 1.7, R * 0.64, bW * 1.5, bW * 0.5);
+      ctx.fillStyle = lite; rr(-R * 0.24, -bW * 1.58, R * 0.5, bW * 0.34, bW * 0.16); // scope highlight
+      ctx.fillStyle = "#33c2b0";
+      ctx.beginPath(); ctx.arc(R * 0.30, -bW * 0.95, bW * 0.52, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = steel; rr(bL - R * 0.24, -bW * 1.75, R * 0.22, bW * 3.5, bW * 0.35);
+      ctx.fillStyle = dark;
+      for (const dy of [-1, 1]) rr(bL - R * 0.2, dy * bW * 1.08 - bW * 0.2, R * 0.15, bW * 0.4, bW * 0.12);
+      break;
+    }
+    case "rocket": {
+      // A launcher: two side rails and a live rocket nosed in the tube.
+      ctx.fillStyle = dark;
+      for (const dy of [-1, 1]) rr(R * 0.2, dy * bW * 0.72 - bW * 0.15, bL - R * 0.2, bW * 0.30, bW * 0.1);
+      ctx.fillStyle = "#2f7bff";
+      ctx.beginPath();
+      ctx.moveTo(bL + R * 0.16, 0);
+      ctx.lineTo(bL - R * 0.14, -bW * 0.62);
+      ctx.lineTo(bL - R * 0.14, bW * 0.62);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#e8452e";
+      ctx.beginPath(); ctx.arc(bL - R * 0.03, 0, bW * 0.24, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case "cannon": {
+      // Heavy: a big slotted muzzle brake, two barrel bands, and a
+      // reinforced breech at the base.
+      ctx.fillStyle = dark; rr(bL - R * 0.26, -bW * 1.14, R * 0.26, bW * 2.28, bW * 0.2);
+      ctx.fillStyle = "#1c212c"; rr(bL - R * 0.15, -bW * 0.3, R * 0.05, bW * 0.6, bW * 0.08); // brake slot
+      ctx.fillStyle = steel;
+      for (const fx of [0.34, 0.58]) {
+        const x = R * 0.30 + (bL - R * 0.30) * fx;
+        rr(x, -bW * 1.08, R * 0.06, bW * 2.16, bW * 0.08);
+      }
+      ctx.fillStyle = dark; rr(-R * 0.52, -R * 0.3, R * 0.3, R * 0.6, R * 0.08);
+      ctx.fillStyle = lite; rr(-R * 0.5, -R * 0.24, R * 0.26, R * 0.1, R * 0.05); // breech highlight
+      break;
+    }
+    case "mortar": {
+      // Squat launcher: reinforcing rings, a base plate, and a deep bore.
+      ctx.strokeStyle = dark; ctx.lineWidth = Math.max(2, bW * 0.32);
+      for (const fx of [0.3, 0.62]) {
+        const x = R * 0.22 + (bL - R * 0.22) * fx;
+        ctx.beginPath(); ctx.moveTo(x, -bW * 1.02); ctx.lineTo(x, bW * 1.02); ctx.stroke();
+      }
+      ctx.fillStyle = dark; rr(-R * 0.5, -R * 0.34, R * 0.24, R * 0.68, R * 0.1);
+      ctx.fillStyle = "#1c212c";
+      ctx.beginPath(); ctx.ellipse(bL - bW * 0.28, 0, bW * 0.52, bW * 0.9, 0, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case "flame": {
+      // A flaring nozzle (wider at the muzzle — unlike every other barrel),
+      // a fuel tank on the housing, and a lit pilot bead.
+      ctx.fillStyle = steel;
+      ctx.beginPath();
+      ctx.moveTo(R * 0.5, -bW * 0.55);
+      ctx.lineTo(bL, -bW * 1.18);
+      ctx.lineTo(bL, bW * 1.18);
+      ctx.lineTo(R * 0.5, bW * 0.55);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#1c212c";
+      ctx.beginPath(); ctx.ellipse(bL, 0, bW * 0.3, bW * 1.08, 0, 0, Math.PI * 2); ctx.fill(); // nozzle mouth
+      ctx.fillStyle = lite; rr(-R * 0.46, R * 0.24, R * 0.52, R * 0.3, R * 0.15);   // fuel tank
+      ctx.strokeStyle = edge; ctx.lineWidth = Math.max(1, R * 0.04);
+      ctx.beginPath(); ctx.moveTo(-R * 0.30, R * 0.24); ctx.lineTo(-R * 0.30, R * 0.54); ctx.stroke();
+      const flick = 0.7 + 0.3 * Math.sin(tms * 12);
+      ctx.fillStyle = "#ffb24a";
+      ctx.beginPath(); ctx.arc(bL - bW * 0.05, -bW * 0.95, bW * (0.28 + 0.1 * flick), 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    default:
+      break; // normal + utility guns keep a clean, plain barrel
   }
 }
 

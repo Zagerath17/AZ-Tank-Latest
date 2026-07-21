@@ -21,7 +21,7 @@
 // ================================================================
 
 import { segmentHitsAnyRect } from "./maze.js";
-import { ROCKET, SNIPER, MORTAR, mortarFlightMs, LASER, laserPath, WEAPON_CATEGORY } from "./weapons.js";
+import { ROCKET, SNIPER, MORTAR, FLAME, mortarFlightMs, LASER, laserPath, WEAPON_CATEGORY } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
@@ -612,6 +612,13 @@ export function botActions(t, world, dt, now) {
     if (special === "mg") {
       // The MG is manual now: HOLD the trigger while the sight is on.
       if (aligned && inFireRange && !mediumHold) acts.shoot = true;
+    } else if (special === "flame") {
+      // The flamethrower is a held, VERY short-range stream (it only
+      // reaches ~2/3 of a cell). Hold the trigger while lined up and
+      // right on top of the target; fuel drains only while held, so the
+      // bot naturally lets go when it backs off or the target slips away.
+      const flameRange = (FLAME.reachCells + 0.9) * cell;
+      if (aligned && dist <= flameRange && !mediumHold) acts.shoot = true;
     } else if (aligned && inFireRange && !mediumHold && canFire && now >= ai.fireAt) {
       if (special && special !== "mortar") {
         // Pickup weapons fire on a clean look — no ricochet trace

@@ -1,12 +1,14 @@
 // ================================================================
 // local.js — OFFLINE battle setup.
 //
-// Offline is strictly YOU vs the AI. Seat 1 is always the human
-// player (WASD to drive, mouse to aim, left-click to fire); the
-// other three seats can each hold a bot of a chosen difficulty.
-// Paint isn't picked here any more: you wear whatever you bought and
-// equipped in the SHOP, and bots take random primaries that avoid it.
-// Impossible bots are locked to black.
+// Offline is couch multiplayer vs the AI. Seat 1 starts with a human so
+// the screen is never empty; every other player joins by pressing THEIR
+// OWN fire key (each seat shows which key that is), which seats them
+// instantly — even taking over a bot. The per-seat chip is only for
+// adding/cycling a bot (off → tiers → off), or "LEAVE" on a human seat.
+// Paint isn't picked here: you wear whatever you bought and equipped in
+// the SHOP, and bots take random primaries that avoid it. Impossible
+// bots are locked to black.
 // ================================================================
 
 import { onEnter, onLeave, COLORS, tankSVG, paintVar } from "./main.js";
@@ -15,6 +17,8 @@ import { freeBotSkin, BOT_SKINS } from "./skins.js";
 import { startLocalGame, GEAR_CAP_LIMIT } from "./game.js";
 import { AI_LEVELS } from "./ai.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
+import { getBinds, keyLabel } from "./settings.js";
+import { sfx } from "./audio.js";
 
 /* ---------- offline match settings (same knobs as a custom lobby) ---------- */
 
@@ -154,8 +158,10 @@ const seat = { red: "human", green: "off", blue: "off", yellow: "off" };
 const PICKABLE = BOT_SKINS.slice();      // the seven primaries
 const paint = { red: "red", green: "green", blue: "blue", yellow: "yellow" };
 
-// Cycle: off → each bot tier → human → off …
-const SEAT_CYCLE = ["off", ...AI_LEVELS, "human"];
+// Chip cycle: off → each bot tier → off … A player is NEVER in this
+// cycle any more — humans take a seat by pressing their own fire key
+// (see wireJoinKeys), so the chip is purely for seating/cycling bots.
+const SEAT_CYCLE = ["off", ...AI_LEVELS];
 
 function isActive(slot) { return seat[slot] !== "off"; }
 function isHumanSeat(slot) { return seat[slot] === "human"; }
@@ -226,15 +232,20 @@ function render() {
     const bot = isBotSeat(slot);
 
     const status = human ? "PLAYER" : bot ? "BOT" : "OPEN";
+    // On an empty seat, tell this player exactly which key seats them.
+    const fireKey = keyLabel(getBinds()?.[slot]?.shoot);
     const prompt = human
       ? KEY_HINT[slot]
       : bot
         ? "A bot drives this tank"
-        : "Tap to seat a player or bot";
+        : `Press ${fireKey} to join · or add a bot`;
 
-    const chipText = mode === "off"
-      ? "+ ADD"
-      : human ? "PLAYER" : "BOT · " + mode.toUpperCase();
+    // The chip only ever manages a BOT now. On a human seat it becomes a
+    // "leave" button (drops the player back to an open seat); the player
+    // can always rejoin by tapping their fire key again.
+    const chipText = human
+      ? "LEAVE"
+      : mode === "off" ? "+ BOT" : "BOT · " + mode.toUpperCase();
 
     // Colour swatch doubles as the picker (locked for Impossible).
     const locked = mode === "impossible";
@@ -260,7 +271,10 @@ function render() {
       </div>`;
   }).join("");
 
-  // The chip cycles the seat: off → bot tiers → player → off.
+  // The chip cycles the seat's BOT: off → bot tiers → off. A human seat
+  // isn't in the cycle, so the first tap on one drops the player (→ off)
+  // and the next begins the bot tiers — indexOf("human") is -1, so the
+  // very same "next" step lands on "off" with no special-casing.
   host.querySelectorAll("[data-seat]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -282,6 +296,51 @@ function render() {
   });
 
   updateStart();
+}
+
+/* ---------- join by fire key ---------- */
+
+// Couch play joins the arcade way: a player takes an open (or bot) seat
+// by tapping THAT seat's own fire key. No cycling through bot tiers to
+// reach "player" any more — the seat flips straight to a human.
+function seatPlayer(slot) {
+  if (seat[slot] === "human") return false; // already in
+  seat[slot] = "human";
+  paint[slot] = null;      // fresh coat for the new occupant
+  ensureAllPaint();
+  render();
+  sfx.pickup?.();
+  return true;
+}
+
+// True when the key event is landing in a real text field, so a rebind or
+// a typed character never doubles as a join. Range sliders / checkboxes
+// don't consume typed keys, so a fire key still seats a player while one
+// of those happens to be focused.
+function typingInField(e) {
+  const el = e.target;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "INPUT") {
+    const type = (el.type || "text").toLowerCase();
+    return !["range", "checkbox", "radio", "button", "submit", "reset", "color"].includes(type);
+  }
+  return false;
+}
+
+function onLocalFireKey(e) {
+  if (e.repeat || typingInField(e)) return;
+  const binds = getBinds();
+  for (const slot of SEATS) {
+    if (binds?.[slot]?.shoot !== e.code) continue;
+    // It's a bound fire key: swallow it (so Space can't scroll the page
+    // or click a focused chip) whether or not it changes anything.
+    e.preventDefault();
+    seatPlayer(slot);
+    return;
+  }
 }
 
 function updateStart() {
@@ -306,9 +365,14 @@ export function initLocal() {
     ensureAllPaint(); // keep every seat on a free primary
     render();
     renderLocalSettings();
+    // Listen (capture phase) so a fire key seats its player before any
+    // focused control can react to it.
+    window.addEventListener("keydown", onLocalFireKey, true);
   });
 
-  onLeave("screen-local", () => {});
+  onLeave("screen-local", () => {
+    window.removeEventListener("keydown", onLocalFireKey, true);
+  });
 
   // Collapsible settings header (mirrors the custom-lobby panel).
   const setToggle = document.getElementById("loc-settings-toggle");
