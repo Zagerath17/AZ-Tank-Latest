@@ -1026,6 +1026,11 @@ body {
   text-align: center;
 }
 
+/* The player HUD — both players' health + shield readouts and the
+   ability slots — sits at half opacity so it reads lightly over the
+   arena without pulling focus from the action. */
+.health-hud, .p2-hud, .armour-hud, .loadout-hud { opacity: .5; }
+
 /* Health readout, bottom-left of the arena: pips (hearts) plus a
    number, both outside the play canvas. */
 .health-hud {
