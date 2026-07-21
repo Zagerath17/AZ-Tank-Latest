@@ -728,13 +728,22 @@ export function getTags() {
   return account?.tags ?? 0;
 }
 
+// A skin is owned if it's a FREE default (no cost, no rank gate — red and
+// the three extra primaries) or has been explicitly bought.
+function isFreeSkin(id) {
+  const s = SKINS[id];
+  return !!s && !s.reserved && (s.cost ?? 0) === 0 && s.tier == null;
+}
+
 export function ownsSkin(id) {
-  if (id === DEFAULT_SKIN) return true;
+  if (id === DEFAULT_SKIN || isFreeSkin(id)) return true;
   return !!account?.owned?.[id];
 }
 
 export function ownedSkins() {
-  return { ...(account?.owned ?? {}), [DEFAULT_SKIN]: true };
+  const free = {};
+  for (const id of Object.keys(SKINS)) if (isFreeSkin(id)) free[id] = true;
+  return { ...free, ...(account?.owned ?? {}), [DEFAULT_SKIN]: true };
 }
 
 // The rating the shop gates on: your BEST of the two ladders, so a

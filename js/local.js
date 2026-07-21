@@ -155,7 +155,7 @@ const seat = { red: "human", green: "off", blue: "off", yellow: "off" };
 
 // Shop paint and patterns do NOT carry into local play — everyone picks
 // a primary colour here, and no two tanks at the table may share one.
-const PICKABLE = BOT_SKINS.slice();      // the seven primaries
+const PICKABLE = BOT_SKINS.slice();      // the ten primaries
 const paint = { red: "red", green: "green", blue: "blue", yellow: "yellow" };
 
 // Chip cycle: off → each bot tier → off … A player is NEVER in this

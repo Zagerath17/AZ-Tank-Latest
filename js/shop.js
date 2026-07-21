@@ -89,8 +89,10 @@ function renderColours() {
   const tags = getTags();
   const worn = getSkin();
 
-  // Group by the rank that unlocks them; the default sits on its own.
-  const groups = [{ tier: null, label: "Standard issue", ids: [DEFAULT_SKIN] }];
+  // Group by the rank that unlocks them; the free defaults sit on their
+  // own (red plus the three extra no-cost primaries).
+  const freeIds = SHOP_SKINS.filter((id) => SKINS[id].tier == null && !isEliteSkin(id));
+  const groups = [{ tier: null, label: "Standard issue", ids: freeIds.length ? freeIds : [DEFAULT_SKIN] }];
   for (const t of TIER_ORDER) {
     const ids = SHOP_SKINS.filter((id) => SKINS[id].tier === t);
     if (ids.length) groups.push({ tier: t, label: `${t} rank`, ids });

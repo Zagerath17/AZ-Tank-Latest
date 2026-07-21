@@ -138,18 +138,20 @@ function myId() {
   return id;
 }
 
-// Paint is bought in the shop and worn as-is — a player's colour is
-// their identity now, so nobody gets bumped off theirs. Bots fill in
-// around them: a random PRIMARY that no human at the table wears (and
-// that no other bot has taken), resolved deterministically in join
-// order so every client agrees. Impossible bots are always black.
+// Paint is bought in the shop and worn as-is, but no two PLAYERS may
+// share a colour: the earliest to join keeps exactly what they equipped,
+// and anyone joining later in the same colour is bumped to a free primary
+// so the table always reads clearly. Bots then fill in around everyone.
+// It's all resolved deterministically in join order, so every client
+// agrees on who wears what. Impossible bots are always black.
 function resolveColors(entries) {
   const out = {};
   const taken = new Set();
-  // Humans first — they keep exactly what they equipped.
+  // Humans first — earliest join wins the colour; later clashers move.
   for (const [id, p] of entries) {
     if (p.bot) continue;
-    const c = SKINS[p.color] && !SKINS[p.color].reserved ? p.color : DEFAULT_SKIN;
+    let c = SKINS[p.color] && !SKINS[p.color].reserved ? p.color : DEFAULT_SKIN;
+    if (taken.has(c)) c = pickBotColor(taken, id); // already worn → bump to a free primary
     out[id] = c;
     taken.add(c);
   }
@@ -157,7 +159,7 @@ function resolveColors(entries) {
   for (const [id, p] of entries) {
     if (!p.bot) continue;
     if (p.bot === "impossible") { out[id] = "black"; continue; }
-    // A bot's stored colour stands unless a player wears it.
+    // A bot's stored colour stands unless someone already wears it.
     let c = p.color && BOT_SKINS.includes(p.color) && !taken.has(p.color) ? p.color : null;
     if (!c) c = pickBotColor(taken, id);
     out[id] = c;

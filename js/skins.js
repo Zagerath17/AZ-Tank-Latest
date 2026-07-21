@@ -29,6 +29,14 @@ export const SKINS = {
   // ---- the default: everyone starts here, costs nothing ----
   red: { name: "Red", hex: "#ff5147", tier: null, cost: 0, finish: "flat", fam: "base" },
 
+  // ---- three more FREE defaults, each distinct from every other paint
+  // in the game: they fill the gaps plain ROYGBIV leaves (lime between
+  // yellow/green, cyan between green/blue, pink between violet/red), so a
+  // full table can always be handed clash-free colours. ----
+  lime: { name: "Lime", hex: "#88e01a", tier: null, cost: 0, finish: "flat", fam: "base" },
+  cyan: { name: "Cyan", hex: "#10c2b8", tier: null, cost: 0, finish: "flat", fam: "base" },
+  pink: { name: "Pink", hex: "#ff2e96", tier: null, cost: 0, finish: "flat", fam: "base" },
+
   // ---- Primary ROYGBIV — Copper rank, 10 tags each ----
   orange: { name: "Orange", hex: "#f3993f", tier: "Copper", cost: 10, finish: "flat", fam: "base" },
   yellow: { name: "Yellow", hex: "#f3d53f", tier: "Copper", cost: 10, finish: "flat", fam: "base" },
