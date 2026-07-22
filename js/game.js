@@ -322,6 +322,10 @@ function opts_toState(o) {
     roster: o.roster,
     sendPos: o.sendPos,
     sendShot: o.sendShot,
+    // Shooter-authoritative damage. Without this forwarded, S.sendHit is
+    // undefined, sendHitTo() bails on every hit, and NOBODY ever takes
+    // damage online — the shots land visually and nothing happens.
+    sendHit: o.sendHit,
     sendDead: o.sendDead,
     sendNextRound: o.sendNextRound,
     sendGear: o.sendGear,
@@ -725,7 +729,16 @@ function startRound(seed) {
   S.booms = [];
   S.seenShots = {};
   S.seenHits = {};
-  S.touchSeat = (S.roster.find((p) => !p.bot) ?? {}).id ?? null;
+  // Who owns the on-screen (touch) controls? There's only one pair of
+  // sticks, so exactly one tank answers to them.
+  //  • Local play → the first human seat (several people, one device).
+  //  • Online     → MY OWN tank. It used to take the first non-bot in
+  //    the roster, which is join order — i.e. the HOST. Any phone that
+  //    joined someone else's lobby was therefore driving nothing: no
+  //    movement, no firing. It has to key off myId here.
+  S.touchSeat = S.mode === "online"
+    ? (S.myId ?? null)
+    : ((S.roster.find((p) => !p.bot) ?? {}).id ?? null);
   // Couch co-op that was set up in the lobby (ranked 2v2 local duo)
   // starts already paired: the guest tank answers to Player 2 (green)
   // binds immediately, no fire-key opt-in needed. Online couch play

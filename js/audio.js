@@ -561,29 +561,71 @@ const C = {
   Emin: [246.94, 329.63, 392.00], Dmaj: [220.00, 293.66, 369.99],
   Dmin: [220.00, 293.66, 349.23], Bbmaj: [293.66, 349.23, 466.16],
   Gmin: [293.66, 392.00, 466.16], Amaj: [220.00, 277.18, 329.63],
+  Bmaj: [246.94, 311.13, 369.99],
 };
 
 const TRACKS = {
-  // TITLE — a warm C-major song in four sections that play in order, then
-  // loop. I–V–vi–IV, an electric-piano lead singing over it.
+  // TITLE / menus — THREE separate songs in three different styles. Each
+  // one plays its sections through in order, then the menu moves to a
+  // different song, so the front end never sounds like one loop on
+  // repeat. `song` groups a song's sections together.
   title: [
-    { bpm: 92, drums: "swell", section: "intro",
+    // ——— Song 1: "First Light" — warm C-major electric-piano song ———
+    { song: "firstlight", bpm: 92, drums: "swell", section: "intro",
       chords: [C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0, C.Amin,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0],
       bass:   [65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 110,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0],
       mel:    [0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,329.63,392] },
-    { bpm: 92, drums: "light", section: "verse",
+    { song: "firstlight", bpm: 92, drums: "light", section: "verse",
       chords: [C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Gmaj,0,0,0,C.Gmaj,0,0,0, C.Amin,0,0,0,C.Amin,0,0,0, C.Fmaj,0,0,0,C.Fmaj,0,0,0],
       bass:   [65.41,0,0,0,98,0,0,0, 98,0,0,0,146.83,0,0,0, 110,0,0,0,164.81,0,0,0, 87.31,0,0,0,130.81,0,0,0],
       mel:    [329.63,0,392,0,0,0,523.25,0, 493.88,0,0,0,440,0,392,0, 329.63,0,0,0,392,0,440,0, 392,0,0,0,349.23,0,329.63,0] },
-    { bpm: 92, drums: "full", section: "chorus",
+    { song: "firstlight", bpm: 92, drums: "full", section: "chorus",
       chords: [C.Amin,0,0,0,C.Amin,0,0,0, C.Fmaj,0,0,0,C.Fmaj,0,0,0, C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Gmaj,0,0,0,C.Gmaj,0,0,0],
       bass:   [110,0,0,0,164.81,0,0,0, 87.31,0,0,0,130.81,0,0,0, 65.41,0,0,0,98,0,0,0, 98,0,0,0,146.83,0,0,0],
       mel:    [440,0,523.25,0,659.25,0,587.33,523.25, 523.25,0,440,0,349.23,0,440,523.25, 392,0,523.25,0,659.25,0,587.33,0, 587.33,0,493.88,0,392,0,493.88,587.33],
       arp:    [220,329.63,440,329.63,261.63,329.63,440,329.63, 174.61,261.63,349.23,261.63,220,261.63,349.23,261.63, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,392,293.66,246.94,293.66,392,293.66] },
-    { bpm: 92, drums: "swell", section: "outro",
+    { song: "firstlight", bpm: 92, drums: "swell", section: "outro",
       chords: [C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
       bass:   [65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
       mel:    [392,0,0,0,329.63,0,0,0, 293.66,0,0,0,246.94,0,0,0, 261.63,0,0,0,220,0,0,0, 261.63,0,0,0,0,0,0,0] },
+
+    // ——— Song 2: "Moonlit Waltz" — a 3/4 folk waltz. Nylon-string
+    // GUITAR strums on beats 2 and 3 over a walking root, a FLUTE
+    // carrying the tune, brushes instead of sticks. 6 steps to the bar
+    // (3 beats × 2), which is what makes it lilt instead of march. ———
+    { song: "waltz", bpm: 150, meter: 6, drums: "waltz", section: "verse",
+      voice: { chord: "guitar", lead: "flute", arp: "guitar" },
+      vel:   { chord: 0.055, lead: 0.075, arp: 0.035 },
+      chords: [0,0,C.Dmin,0,C.Dmin,0,  0,0,C.Bbmaj,0,C.Bbmaj,0,  0,0,C.Fmaj,0,C.Fmaj,0,  0,0,C.Cmaj,0,C.Cmaj,0],
+      bass:   [73.42,0,0,0,0,0,  116.54,0,0,0,0,0,  87.31,0,0,0,0,0,  130.81,0,0,0,0,0],
+      mel:    [440,0,587.33,0,523.25,0,  466.16,0,440,0,349.23,0,  349.23,0,440,0,523.25,0,  392,0,329.63,0,0,0],
+      arp:    [0,293.66,0,349.23,0,440,  0,233.08,0,349.23,0,466.16,  0,261.63,0,349.23,0,440,  0,261.63,0,329.63,0,392] },
+    { song: "waltz", bpm: 150, meter: 6, drums: "waltz", section: "turn",
+      voice: { chord: "guitar", lead: "flute", arp: "guitar" },
+      vel:   { chord: 0.055, lead: 0.075, arp: 0.035 },
+      chords: [0,0,C.Gmin,0,C.Gmin,0,  0,0,C.Cmaj,0,C.Cmaj,0,  0,0,C.Fmaj,0,C.Fmaj,0,  0,0,C.Amaj,0,C.Amaj,0],
+      bass:   [98,0,0,0,0,0,  130.81,0,0,0,0,0,  87.31,0,0,0,0,0,  110,0,0,0,0,0],
+      mel:    [466.16,0,392,0,349.23,0,  392,0,523.25,0,392,0,  349.23,0,523.25,0,466.16,0,  440,0,554.37,0,440,0],
+      arp:    [0,293.66,0,392,0,466.16,  0,261.63,0,329.63,0,392,  0,261.63,0,349.23,0,440,  0,277.18,0,329.63,0,440] },
+
+    // ——— Song 3: "Sunrise Hymn" — a slow, drumless chorale in F major.
+    // Drawbar ORGAN holds the pads, BELLS carry the melody. Nothing but
+    // sustain and space, which is about as far from the other two as the
+    // front end can get. ———
+    { song: "hymn", bpm: 76, drums: "none", section: "verse",
+      voice: { chord: "organ", lead: "bell" },
+      vel:   { chord: 0.03, lead: 0.055 },
+      sus: 7.5,
+      chords: [C.Fmaj,0,0,0,0,0,0,0, C.Bbmaj,0,0,0,0,0,0,0, C.Dmin,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
+      bass:   [87.31,0,0,0,0,0,0,0, 116.54,0,0,0,0,0,0,0, 73.42,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
+      mel:    [349.23,0,0,0,440,0,0,0, 466.16,0,0,0,440,0,0,0, 349.23,0,0,0,587.33,0,0,0, 523.25,0,0,0,0,0,0,0] },
+    { song: "hymn", bpm: 76, drums: "swell", section: "rise",
+      voice: { chord: "organ", lead: "bell" },
+      vel:   { chord: 0.034, lead: 0.06 },
+      sus: 7.5,
+      chords: [C.Bbmaj,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Gmin,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
+      bass:   [116.54,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
+      mel:    [587.33,0,0,0,523.25,0,0,0, 440,0,0,0,349.23,0,0,0, 466.16,0,0,0,392,0,0,0, 523.25,0,0,0,349.23,0,0,0] },
   ],
   // LOBBY — calm anticipation: broken-chord electric piano over a slow
   // Am–F–C–G, soft heartbeat underneath.
@@ -611,6 +653,30 @@ const TRACKS = {
       bass:   [73.42,0,0,0,73.42,0,0,0, 116.54,0,0,0,116.54,0,0,0, 98,0,0,0,98,0,0,0, 110,0,0,0,110,0,0,0],
       mel:    [440,0,0,0,349.23,0,440,0, 587.33,0,0,0,466.16,0,0,0, 392,0,0,0,466.16,0,587.33,0, 554.37,0,0,0,440,0,0,0],
       arp:    [220,0,293.66,0,349.23,0,293.66,0, 233.08,0,293.66,0,349.23,0,293.66,0, 196,0,233.08,0,293.66,0,233.08,0, 220,0,277.18,0,329.63,0,277.18,0] },
+
+    // "Iron March" — a military brass march in D minor. BRASS carries
+    // both the stabs and the fanfare over a tuba-ish root-and-fifth
+    // bass, with a marching kit (rolls and toms, no hats). Descending
+    // i–VII–VI–V: about as martial as four bars get.
+    { bpm: 116, drums: "march",
+      voice: { chord: "brass", lead: "brass" },
+      vel:   { chord: 0.03, lead: 0.062 },
+      sus: 2.6,
+      chords: [C.Dmin,0,0,0,C.Dmin,0,0,0, C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Bbmaj,0,0,0,C.Bbmaj,0,0,0, C.Amaj,0,0,0,C.Amaj,0,0,C.Amaj],
+      bass:   [73.42,0,0,0,73.42,0,110,0, 65.41,0,0,0,65.41,0,98,0, 116.54,0,0,0,116.54,0,87.31,0, 110,0,0,0,110,0,82.41,0],
+      mel:    [440,0,587.33,0,523.25,0,440,0, 392,0,523.25,0,466.16,0,392,0, 349.23,0,466.16,0,440,0,349.23,0, 329.63,0,440,0,554.37,0,0,0] },
+
+    // "Dust Devil" — a fast surf/rockabilly shuffle in E minor. Twangy
+    // Karplus GUITAR does both the offbeat chops and the pentatonic
+    // lead, over a walking bass and a swung kit. No keys anywhere, so it
+    // sounds like a band rather than a synth.
+    { bpm: 150, drums: "shuffle",
+      voice: { chord: "guitar", lead: "guitar" },
+      vel:   { chord: 0.04, lead: 0.075 },
+      sus: 1.5,
+      chords: [0,C.Emin,0,C.Emin,0,C.Emin,0,C.Emin, 0,C.Gmaj,0,C.Gmaj,0,C.Gmaj,0,C.Gmaj, 0,C.Amin,0,C.Amin,0,C.Amin,0,C.Amin, 0,C.Bmaj,0,C.Bmaj,0,C.Bmaj,0,C.Bmaj],
+      bass:   [82.41,0,82.41,0,123.47,0,98,0, 98,0,98,0,146.83,0,123.47,0, 110,0,110,0,164.81,0,130.81,0, 123.47,0,123.47,0,185.00,0,146.83,0],
+      mel:    [329.63,0,392,0,493.88,0,440,0, 392,0,493.88,0,587.33,0,493.88,0, 440,0,523.25,0,659.25,0,587.33,0, 493.88,0,587.33,0,369.99,0,493.88,0] },
   ],
 };
 
@@ -668,6 +734,140 @@ function mPluck(when, freq, dur, vel = 0.05) {
   o.start(when); o.stop(when + dur + 0.03);
 }
 
+// DRAWBAR ORGAN: additive sine partials (the classic 1/2/3/4 drawbars)
+// with a slow swell and a gentle rotary-speaker wobble. Sustains, so it
+// holds a hymn's pads where the electric piano would decay away.
+function mOrgan(when, freq, dur, vel = 0.05) {
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.09);       // soft swell in
+  g.gain.setValueAtTime(vel, when + Math.max(0.1, dur - 0.18));
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  const vib = ctx.createOscillator(); vib.type = "sine"; vib.frequency.value = 5.6;
+  const vibD = ctx.createGain(); vibD.gain.value = 2.2;         // Hz of rotary wobble
+  const parts = [[1, 1], [2, 0.5], [3, 0.28], [4, 0.16]];
+  const oscs = [];
+  for (const [mult, lvl] of parts) {
+    const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = freq * mult;
+    const lg = ctx.createGain(); lg.gain.value = lvl;
+    vib.connect(vibD).connect(o.frequency);
+    o.connect(lg).connect(g);
+    o.start(when); o.stop(when + dur + 0.05);
+    oscs.push(o);
+  }
+  vib.start(when); vib.stop(when + dur + 0.05);
+  g.connect(music.gain);
+}
+
+// FLUTE / whistle: a mostly-pure sine with a breath of noise on top and
+// a delayed vibrato, so a held note blooms rather than sitting static.
+function mFlute(when, freq, dur, vel = 0.07) {
+  const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = freq;
+  const o2 = ctx.createOscillator(); o2.type = "triangle"; o2.frequency.value = freq * 2;
+  const o2g = ctx.createGain(); o2g.gain.value = 0.08;          // faint octave shimmer
+  const vib = ctx.createOscillator(); vib.type = "sine"; vib.frequency.value = 5.2;
+  const vibD = ctx.createGain();
+  vibD.gain.setValueAtTime(0.0001, when);                        // vibrato fades IN
+  vibD.gain.exponentialRampToValueAtTime(Math.max(0.5, freq * 0.008), when + dur * 0.7);
+  vib.connect(vibD).connect(o.frequency);
+  const air = ctx.createBufferSource(); air.buffer = getNoise(); air.loop = true;
+  const airF = ctx.createBiquadFilter(); airF.type = "bandpass";
+  airF.frequency.value = Math.min(6000, freq * 3); airF.Q.value = 0.8;
+  const airG = ctx.createGain(); airG.gain.value = vel * 0.16;   // breath
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.07);         // soft attack
+  g.gain.setValueAtTime(vel, when + Math.max(0.08, dur - 0.14));
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); o2.connect(o2g).connect(g);
+  air.connect(airF).connect(airG).connect(g);
+  g.connect(music.gain);
+  o.start(when); o2.start(when); vib.start(when); air.start(when);
+  const end = when + dur + 0.05;
+  o.stop(end); o2.stop(end); vib.stop(end); air.stop(end);
+}
+
+// ACOUSTIC/TWANG GUITAR — real Karplus-Strong: a burst of noise fired
+// into a delay line one wavelength long, fed back through a lowpass. The
+// noise settles into a pitched, decaying string. Genuinely a plucked
+// string rather than a filtered oscillator, so it sits in a different
+// world from mPluck.
+function mGuitar(when, freq, dur, vel = 0.09, bright = 1) {
+  const period = 1 / Math.max(20, freq);
+  const dl = ctx.createDelay(0.06);
+  dl.delayTime.value = Math.min(0.059, period);
+  const fb = ctx.createGain(); fb.gain.value = 0.965;            // string decay
+  const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
+  lp.frequency.value = Math.min(9000, 1600 * bright + freq * 4); // damping = tone
+  dl.connect(lp).connect(fb).connect(dl);                        // the loop
+  const exc = ctx.createBufferSource(); exc.buffer = getNoise();
+  const eg = ctx.createGain(); eg.gain.value = vel * 3.2;
+  exc.connect(eg).connect(dl);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(1, when);
+  g.gain.setValueAtTime(1, when + dur * 0.7);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);        // hard stop, no ring-on
+  dl.connect(g).connect(music.gain);
+  exc.start(when); exc.stop(when + Math.min(0.02, period * 2));   // the pluck itself
+  fb.gain.setValueAtTime(0.965, when);
+  fb.gain.linearRampToValueAtTime(0, when + dur);                 // kill the loop
+  exc.onended = () => { try { eg.disconnect(); } catch (e) {} };
+  setTimeout(() => { try { dl.disconnect(); lp.disconnect(); fb.disconnect(); g.disconnect(); } catch (e) {} },
+    Math.max(50, (dur + 0.3) * 1000));
+}
+
+// BELL / glockenspiel: FM with an INHARMONIC ratio, which is what makes
+// metal sound like metal. Short strike, long shimmering tail.
+function mBell(when, freq, dur, vel = 0.06) {
+  const car = ctx.createOscillator(); car.type = "sine"; car.frequency.value = freq;
+  const mod = ctx.createOscillator(); mod.type = "sine"; mod.frequency.value = freq * 1.41; // √2: inharmonic
+  const md = ctx.createGain();
+  md.gain.setValueAtTime(freq * 1.6, when);
+  md.gain.exponentialRampToValueAtTime(Math.max(1, freq * 0.05), when + dur * 0.35);
+  mod.connect(md).connect(car.frequency);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.004);        // hard strike
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);        // long tail
+  car.connect(g).connect(music.gain);
+  car.start(when); mod.start(when);
+  car.stop(when + dur + 0.05); mod.stop(when + dur + 0.05);
+}
+
+// BRASS section: two detuned saws behind a filter that snaps open and
+// settles back — the "blat" that reads as a horn stab.
+function mBrass(when, freq, dur, vel = 0.06) {
+  const a = ctx.createOscillator(); a.type = "sawtooth"; a.frequency.value = freq;
+  const b = ctx.createOscillator(); b.type = "sawtooth"; b.frequency.value = freq;
+  b.detune.value = 8;                                            // section width
+  const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 3.2;
+  f.frequency.setValueAtTime(Math.max(200, freq * 1.2), when);
+  f.frequency.exponentialRampToValueAtTime(Math.min(6500, freq * 6.5), when + 0.05); // the blat
+  f.frequency.exponentialRampToValueAtTime(Math.min(3200, freq * 3), when + dur * 0.7);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.02);
+  g.gain.setValueAtTime(vel, when + Math.max(0.03, dur - 0.1));
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  a.connect(f); b.connect(f); f.connect(g).connect(music.gain);
+  a.start(when); b.start(when);
+  a.stop(when + dur + 0.03); b.stop(when + dur + 0.03);
+}
+
+// One dispatcher so a track can name its instruments.
+function playVoice(name, when, freq, dur, vel) {
+  switch (name) {
+    case "organ":  return mOrgan(when, freq, dur, vel);
+    case "flute":  return mFlute(when, freq, dur, vel);
+    case "guitar": return mGuitar(when, freq, dur, vel);
+    case "bell":   return mBell(when, freq, dur, vel);
+    case "brass":  return mBrass(when, freq, dur, vel);
+    case "pluck":  return mPluck(when, freq, dur, vel);
+    case "bass":   return mBass(when, freq, dur, vel);
+    default:       return mKeys(when, freq, dur, vel);
+  }
+}
+
 // --- drum voices (v scales level so light/soft sections sit back) ---
 function drumKick(when, v = 1) {
   const o = ctx.createOscillator();
@@ -711,25 +911,64 @@ function drumHat(when, open, v = 1) {
   src.connect(hp).connect(g).connect(music.gain);
   src.start(when); src.stop(when + dur + 0.02);
 }
+// A wire BRUSH on the snare head: darker and longer than a stick hit, so
+// the waltz breathes instead of cracking.
+function drumBrush(when, v = 1) {
+  const src = ctx.createBufferSource();
+  src.buffer = getNoise();
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass"; lp.frequency.value = 2600; lp.Q.value = 0.5;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.055 * v, when);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + 0.17);
+  src.connect(lp).connect(g).connect(music.gain);
+  src.start(when); src.stop(when + 0.2);
+}
+// A marching TOM for the march's rolls and pickups.
+function drumTom(when, freq = 150, v = 1) {
+  const o = ctx.createOscillator();
+  o.type = "triangle";
+  o.frequency.setValueAtTime(freq, when);
+  o.frequency.exponentialRampToValueAtTime(freq * 0.62, when + 0.13);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.16 * v, when);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + 0.16);
+  o.connect(g).connect(music.gain);
+  o.start(when); o.stop(when + 0.18);
+}
 
 function scheduleStep(step, when) {
   const tr = TRACKS[music.mode][music.trackIdx];
   const STEP = 60 / tr.bpm / 2;
-  const bar = step % 32;
-  const pos = bar % 8; // position within the current bar (0..7 = 8th notes)
+  // Steps per BAR: 8 for common time (4 beats × 2), 6 for a 3/4 waltz
+  // (3 beats × 2). Everything rhythmic keys off this, so a track can
+  // change metre without touching the scheduler.
+  const meter = tr.meter ?? 8;
+  const pos = step % meter;
+  // Which instrument plays what, and how hard. Defaults reproduce the
+  // original electric-piano trio exactly, so older tracks are untouched.
+  const V = tr.voice ?? {};
+  const vel = tr.vel ?? {};
+  const chordVoice = V.chord ?? "keys";
+  const leadVoice = V.lead ?? "keys";
+  const arpVoice = V.arp ?? "pluck";
 
-  // Harmony — electric-piano chords (an array of notes), left to ring.
+  // Harmony — a struck/held chord, left to ring under everything.
   const ch = tr.chords ? tr.chords[step % tr.chords.length] : 0;
-  if (ch) for (const n of ch) if (n) mKeys(when, n, STEP * 6, 0.04, 1, 2.0);
-  // Melody — a singing electric-piano lead.
+  if (ch) {
+    const dur = STEP * (tr.sus ?? 6);
+    const v = vel.chord ?? 0.04;
+    for (const n of ch) if (n) playVoice(chordVoice, when, n, dur, v);
+  }
+  // Melody — the line that sings.
   const m = tr.mel ? tr.mel[step % tr.mel.length] : 0;
-  if (m) mKeys(when, m, STEP * 3.4, 0.1, 1, 2.6);
+  if (m) playVoice(leadVoice, when, m, STEP * (tr.lead ?? 3.4), vel.lead ?? 0.1);
   // Bass — warm and round.
   const b = tr.bass ? tr.bass[step % tr.bass.length] : 0;
-  if (b) mBass(when, b, STEP * 1.5);
-  // Counter-line — plucked string.
+  if (b) mBass(when, b, STEP * 1.5, vel.bass ?? 0.2);
+  // Counter-line.
   const a = tr.arp ? tr.arp[step % tr.arp.length] : 0;
-  if (a) mPluck(when, a, STEP * 0.95, 0.048);
+  if (a) playVoice(arpVoice, when, a, STEP * 0.95, vel.arp ?? 0.048);
 
   // Drums.
   const kit = tr.drums ?? "none";
@@ -743,7 +982,38 @@ function scheduleStep(step, when) {
     if (pos % 2 === 0) drumHat(when, false, 0.7);   // hats on the beats
   } else if (kit === "swell") {
     if (pos === 0) drumKick(when, 0.6);             // a soft heartbeat on each downbeat
+  } else if (kit === "waltz") {
+    // ONE-two-three: kick on the downbeat, brushes on 2 and 3.
+    if (pos === 0) drumKick(when, 0.62);
+    if (pos === 2 || pos === 4) drumBrush(when, pos === 2 ? 0.9 : 0.75);
+  } else if (kit === "march") {
+    // Marching band: kick on 1 and 3, a crisp snare backbeat with the
+    // ghosted double that gives a march its roll, and toms for the
+    // pickup into the next bar. No hats — bands don't have them.
+    if (pos === 0 || pos === 4) drumKick(when, 1);
+    if (pos === 2 || pos === 6) drumSnare(when, 0.85);
+    if (pos === 3 || pos === 7) drumSnare(when, 0.3);   // ghost roll
+    if (pos === 7) drumTom(when, 165, 0.7);              // pickup
+  } else if (kit === "shuffle") {
+    // Swung: the offbeat lands late (on the third 16th), which is the
+    // whole feel. Approximated by putting the hat on 1 and 3 of each
+    // beat-pair and leaning the snare hard on the backbeat.
+    if (pos === 0 || pos === 3 || pos === 4) drumKick(when, pos === 3 ? 0.55 : 0.95);
+    if (pos === 2 || pos === 6) drumSnare(when, 0.9);
+    if (pos % 2 === 1) drumHat(when, pos === 7, 0.8);    // swung offbeat hats
   }
+}
+
+// Where a mode begins. In-game picks any track; the menus pick a random
+// SONG and start at its first section (never mid-arrangement).
+function startIdx(mode) {
+  const pool = TRACKS[mode] ?? [];
+  if (!pool.length) return 0;
+  if (mode !== "title") return Math.floor(Math.random() * pool.length);
+  const songs = [...new Set(pool.map((t) => t.song ?? 0))];
+  const pick = songs[Math.floor(Math.random() * songs.length)];
+  const i = pool.findIndex((t) => (t.song ?? 0) === pick);
+  return i < 0 ? 0 : i;
 }
 
 export function startMusic(mode = "game") {
@@ -753,7 +1023,7 @@ export function startMusic(mode = "game") {
     if (music.mode === mode) return;
     // Swap themes in place: new pattern from the top of the bar.
     music.mode = mode;
-    music.trackIdx = mode === "title" ? 0 : Math.floor(Math.random() * TRACKS[mode].length);
+    music.trackIdx = startIdx(mode);
     music.step = 0;
     music.loops = 0;
     return;
@@ -764,7 +1034,7 @@ export function startMusic(mode = "game") {
     gain.connect(musicBus);
     music = {
       gain, timer: 0, nextAt: 0, step: 0, loops: 0,
-      mode, trackIdx: mode === "title" ? 0 : Math.floor(Math.random() * TRACKS[mode].length),
+      mode, trackIdx: startIdx(mode),
     };
     music.timer = setInterval(() => {
       if (!ready() || !music) return;
@@ -779,9 +1049,23 @@ export function startMusic(mode = "game") {
           music.loops += 1;
           const pool = TRACKS[music.mode];
           if (music.mode === "title") {
-            // Walk the song's sections in order, then loop — a real
-            // arrangement, not one bar on repeat.
-            music.trackIdx = (music.trackIdx + 1) % pool.length;
+            // Menus hold several SONGS, each split into sections. Walk
+            // the current song's sections in order; when it ends, move
+            // to a DIFFERENT song and start it from the top — a real
+            // arrangement followed by a real change of tune.
+            const cur = pool[music.trackIdx] ?? {};
+            const nextIdx = music.trackIdx + 1;
+            if (nextIdx < pool.length && (pool[nextIdx].song ?? 0) === (cur.song ?? 0)) {
+              music.trackIdx = nextIdx;
+            } else {
+              const songs = [...new Set(pool.map((t) => t.song ?? 0))];
+              let pick = cur.song ?? 0;
+              if (songs.length > 1) {
+                while (pick === (cur.song ?? 0)) pick = songs[Math.floor(Math.random() * songs.length)];
+              }
+              const i = pool.findIndex((t) => (t.song ?? 0) === pick);
+              music.trackIdx = i < 0 ? 0 : i;
+            }
           } else if (pool.length > 1 && music.loops >= 3) {
             // In-game: shuffle to a DIFFERENT track every few loops.
             music.loops = 0;

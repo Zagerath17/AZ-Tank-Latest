@@ -129,12 +129,35 @@ function serverNow() {
 }
 
 // Per-tab id, so two tabs count as two players (handy for testing).
+// Stable per-tab identity, cached in memory as well as sessionStorage:
+// if storage is blocked (private mode / embedded webview) the memory copy
+// is the only thing keeping the id from changing on every call.
+let cachedMyId = null;
+
 function myId() {
-  let id = sessionStorage.getItem("tank.playerId");
+  if (cachedMyId) return cachedMyId;
+  let id = null;
+  // sessionStorage can THROW outright (Safari private mode, embedded
+  // webviews with storage blocked), so never let it kill the join.
+  try { id = sessionStorage.getItem("tank.playerId"); } catch (e) { id = null; }
   if (!id) {
-    id = crypto.randomUUID?.() ?? "p" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    sessionStorage.setItem("tank.playerId", id);
+    // crypto.randomUUID only exists in a SECURE context. A phone joining
+    // a PC's lobby over plain http:// on the LAN has no crypto at all, so
+    // touching crypto.randomUUID there throws and the player ends up with
+    // no identity — their tank isn't "theirs", so they can't move, shoot,
+    // or take damage. Feel for it defensively and fall back.
+    try {
+      id = (typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function")
+        ? crypto.randomUUID()
+        : null;
+    } catch (e) { id = null; }
+    if (!id) {
+      id = "p" + Math.random().toString(36).slice(2) + Date.now().toString(36)
+        + Math.random().toString(36).slice(2, 6);
+    }
+    try { sessionStorage.setItem("tank.playerId", id); } catch (e) { /* memory-only id */ }
   }
+  cachedMyId = id;
   return id;
 }
 
@@ -540,17 +563,10 @@ function tableColors(exceptId) {
   return new Set(Object.entries(res).filter(([id]) => id !== exceptId).map(([, c]) => c));
 }
 
-async function addBot() {
-  if (!current) return;
-  const f = await ensureFirebase();
-  const id = "bot-" + Math.random().toString(36).slice(2, 8);
-  await f.set(f.ref(f.db, `lobbies/${current.code}/players/${id}`), {
-    joinedAt: f.serverTimestamp(),
-    bot: "easy",
-    color: freeColor(tableColors(null)), // random paint nobody wears
-  });
-}
-
+// NOTE: there's no "add a bot" control in the custom lobby any more —
+// lobbies fill with real players. cycleBot/removeBot are kept because a
+// lobby created before this change (or by an older client) can still
+// contain bot entries the host needs to adjust or clear.
 async function cycleBot(id, level) {
   if (!current) return;
   const f = await ensureFirebase();
@@ -1119,7 +1135,6 @@ function renderLobby(code, lobby) {
   socialBtn.hidden = !(isHost && social.getAccount()) || !!lobby.ranked;
   renderSettings(lobby, isHost);
   if (lobby.ranked) {
-    document.getElementById("lobby-addbot").hidden = true;
     document.getElementById("lobby-start").hidden = true;
     if (isHost && lobby.state === "waiting") {
       const count = Object.keys(lobby.players ?? {}).length;
@@ -1221,8 +1236,6 @@ function renderLobby(code, lobby) {
       </li>`;
   }).join("");
 
-  document.getElementById("lobby-addbot").hidden = !(isHost && entries.length < MAX_PLAYERS);
-
   const startBtn = document.getElementById("lobby-start");
   const status = document.getElementById("lobby-status");
 
@@ -1309,7 +1322,6 @@ export function initOnline() {
   });
 
   const copyBtn = document.getElementById("lobby-copy");
-  const addBotBtn = document.getElementById("lobby-addbot");
 
   onEnter("screen-online", () => {
     document.getElementById("online-actions").hidden = !isConfigured;
@@ -1334,7 +1346,6 @@ export function initOnline() {
   }));
 
   startBtn.addEventListener("click", guard(startBtn, startMatch));
-  addBotBtn.addEventListener("click", guard(addBotBtn, addBot));
 
   // Bot difficulty / removal chips (host only; delegated). Paint is
   // no longer touchable here — it comes from the shop.
