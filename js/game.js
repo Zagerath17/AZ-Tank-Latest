@@ -1416,7 +1416,7 @@ function stepTanks(now, dt) {
         // reverts — a charge that empties like the MG's belt.
         //
         // DAMAGE: while a tank is in the cone it takes 1 damage every
-        // FLAME.tickMs (0.5 s). We ALSO stamp the contact every frame so
+        // FLAME.tickMs (400 ms). We ALSO stamp the contact every frame so
         // stepFlameBurns can start a burn once the flame LEAVES it — the
         // burn never overlaps the direct damage.
         t.flameFuel ??= FLAME.durationMs;
@@ -1439,7 +1439,7 @@ function stepTanks(now, dt) {
             o.flameHitAt = now;
             o.flameHitBy = t.id;
             o.flameContact = true;
-            if (doTick) applyHit(o, FLAME.tickDmg, t.id, now, "flame"); // 1 dmg / 0.5 s
+            if (doTick) applyHit(o, FLAME.tickDmg, t.id, now, "flame"); // 1 dmg / 400 ms
           }
           // Online: keep peers' streams alive with a throttled pulse.
           if (S.mode === "online" && t.local && now >= (t.flameNetAt ?? 0)) {
@@ -3488,7 +3488,7 @@ function stepFlameBurns(now) {
       // again and this re-arms once contact ends anew.)
       o.flameContact = false;
       o.burnUntil = now + FLAME.burnTotalMs + 60; // +margin so the final tick lands
-      o.burnNextAt = now + FLAME.burnEveryMs;     // first tick 1 s after contact ends
+      o.burnNextAt = now + FLAME.burnEveryMs;     // first burn tick 1 s after contact ends
       o.burnBy = o.flameHitBy ?? null;
     }
   }
