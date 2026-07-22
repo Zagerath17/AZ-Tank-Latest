@@ -1063,16 +1063,21 @@ function beginOnlineGame(code, lobby) {
       }, SHOT_TTL);
     },
     // Shooter-authoritative hits: the SHOOTER decides a hit landed and
-    // posts it to the VICTIM's inbox. The victim stays the authority on
-    // its own health, so hp can't diverge — but what the shooter saw is
-    // what actually counts, which is the fix for "I hit them and
-    // nothing happened".
+    // publishes it in ITS OWN node, addressed to the victim.
+    //
+    // It used to write straight into the victim's node
+    // (players/<victim>/hits/...). That's a CROSS-NODE write, and any
+    // rule stricter than "anyone may write anything under this lobby" —
+    // e.g. per-player write rules — rejects it. write() swallows the
+    // rejection, so hits vanished silently while pos/shots (own-node
+    // writes) kept working. Publishing to our own subtree means every
+    // client only ever writes where it is unambiguously allowed to.
     sendHit: (victimId, key, hit) => {
-      write(`players/${victimId}/hits/${key}`, hit);
+      write(`players/${me}/outHits/${key}`, { ...hit, to: victimId });
       setTimeout(() => {
         if (current && fb) {
           try {
-            fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${victimId}/hits/${key}`)).catch(() => {});
+            fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${me}/outHits/${key}`)).catch(() => {});
           } catch (e) { /* invalid key — nothing to clean */ }
         }
       }, SHOT_TTL);

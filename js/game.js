@@ -383,6 +383,18 @@ export function __tanksForTest() {
 }
 export function __frameForTest(now) { if (S) frame(now); }
 
+// Test-only: drive the damage path directly, exactly as a bullet impact
+// would. Lets the headless netcode harness prove that a SHOOTER's hit
+// actually reaches the wire (S.sendHit), not just that a victim can
+// apply one. Never used by the app itself.
+export function __applyHitForTest(victimId, amount = 1, byId = null) {
+  if (!S) return "no-state";
+  const t = S.tanks.find((x) => x.id === victimId);
+  if (!t) return "no-such-tank";
+  applyHit(t, amount, byId, performance.now(), "bullet");
+  return "called";
+}
+
 // My tanks' received-damage ledger (attacker → total), for reporting.
 export function getMatchStats() {
   return S ? { dmgBy: S.dmgBy ?? {}, killsBy: S.killsBy ?? {}, myId: S.myId } : null;
@@ -495,19 +507,46 @@ export function onlineLobbyUpdate(lobby) {
           spawnShot(t.id, sh);
         }
       }
-      // Inbound authoritative hits, but only for MY tank — I'm the one
-      // who owns my health. Deduped by key so a re-delivered packet
-      // can't double-count.
-      if (p.hits && t.local) {
-        const seenH = (S.seenHits ??= {});
-        const mine = (seenH[t.id] ??= new Set());
-        for (const [key, h] of Object.entries(p.hits)) {
-          if (mine.has(key)) continue;
-          mine.add(key);
-          if (!t.dead && !t.gone) {
-            t.lastHitAt = performance.now();
-            damageTank(t, h.d ?? 1, h.by ?? null);
-          }
+    }
+
+    // Inbound authoritative damage, applied ONLY to my own tank — I own
+    // my health. Deduped by key so a re-delivered snapshot can't
+    // double-count.
+    //
+    // Two sources, because the transport changed:
+    //  1. outHits — the CURRENT scheme. Each shooter publishes hits in
+    //     its OWN node tagged with `to`. Own-node writes are always
+    //     permitted, so this survives tightened security rules.
+    //  2. hits — the LEGACY inbox a shooter wrote directly into the
+    //     victim's node. Kept so a client on the old build can still
+    //     damage us.
+    // This block must sit OUTSIDE the `!t.local` branch above: it was
+    // once nested inside it, making the test `!t.local && t.local` —
+    // impossible — so no online hit ever landed.
+    if (p.outHits) {
+      const seenH = (S.seenHits ??= {});
+      const seen = (seenH[t.id] ??= new Set());
+      for (const [key, h] of Object.entries(p.outHits)) {
+        if (seen.has(key)) continue;
+        // `t` is the SHOOTER here; h.to names the victim.
+        const victim = S.tanks.find((x) => x.id === h.to && x.local);
+        if (!victim) continue; // addressed to someone else's machine
+        seen.add(key);
+        if (!victim.dead && !victim.gone) {
+          victim.lastHitAt = performance.now();
+          damageTank(victim, h.d ?? 1, h.by ?? t.id);
+        }
+      }
+    }
+    if (p.hits && t.local) {
+      const seenH = (S.seenHits ??= {});
+      const mine = (seenH[t.id] ??= new Set());
+      for (const [key, h] of Object.entries(p.hits)) {
+        if (mine.has(key)) continue;
+        mine.add(key);
+        if (!t.dead && !t.gone) {
+          t.lastHitAt = performance.now();
+          damageTank(t, h.d ?? 1, h.by ?? null);
         }
       }
     }

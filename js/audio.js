@@ -653,30 +653,6 @@ const TRACKS = {
       bass:   [73.42,0,0,0,73.42,0,0,0, 116.54,0,0,0,116.54,0,0,0, 98,0,0,0,98,0,0,0, 110,0,0,0,110,0,0,0],
       mel:    [440,0,0,0,349.23,0,440,0, 587.33,0,0,0,466.16,0,0,0, 392,0,0,0,466.16,0,587.33,0, 554.37,0,0,0,440,0,0,0],
       arp:    [220,0,293.66,0,349.23,0,293.66,0, 233.08,0,293.66,0,349.23,0,293.66,0, 196,0,233.08,0,293.66,0,233.08,0, 220,0,277.18,0,329.63,0,277.18,0] },
-
-    // "Iron March" — a military brass march in D minor. BRASS carries
-    // both the stabs and the fanfare over a tuba-ish root-and-fifth
-    // bass, with a marching kit (rolls and toms, no hats). Descending
-    // i–VII–VI–V: about as martial as four bars get.
-    { bpm: 116, drums: "march",
-      voice: { chord: "brass", lead: "brass" },
-      vel:   { chord: 0.03, lead: 0.062 },
-      sus: 2.6,
-      chords: [C.Dmin,0,0,0,C.Dmin,0,0,0, C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Bbmaj,0,0,0,C.Bbmaj,0,0,0, C.Amaj,0,0,0,C.Amaj,0,0,C.Amaj],
-      bass:   [73.42,0,0,0,73.42,0,110,0, 65.41,0,0,0,65.41,0,98,0, 116.54,0,0,0,116.54,0,87.31,0, 110,0,0,0,110,0,82.41,0],
-      mel:    [440,0,587.33,0,523.25,0,440,0, 392,0,523.25,0,466.16,0,392,0, 349.23,0,466.16,0,440,0,349.23,0, 329.63,0,440,0,554.37,0,0,0] },
-
-    // "Dust Devil" — a fast surf/rockabilly shuffle in E minor. Twangy
-    // Karplus GUITAR does both the offbeat chops and the pentatonic
-    // lead, over a walking bass and a swung kit. No keys anywhere, so it
-    // sounds like a band rather than a synth.
-    { bpm: 150, drums: "shuffle",
-      voice: { chord: "guitar", lead: "guitar" },
-      vel:   { chord: 0.04, lead: 0.075 },
-      sus: 1.5,
-      chords: [0,C.Emin,0,C.Emin,0,C.Emin,0,C.Emin, 0,C.Gmaj,0,C.Gmaj,0,C.Gmaj,0,C.Gmaj, 0,C.Amin,0,C.Amin,0,C.Amin,0,C.Amin, 0,C.Bmaj,0,C.Bmaj,0,C.Bmaj,0,C.Bmaj],
-      bass:   [82.41,0,82.41,0,123.47,0,98,0, 98,0,98,0,146.83,0,123.47,0, 110,0,110,0,164.81,0,130.81,0, 123.47,0,123.47,0,185.00,0,146.83,0],
-      mel:    [329.63,0,392,0,493.88,0,440,0, 392,0,493.88,0,587.33,0,493.88,0, 440,0,523.25,0,659.25,0,587.33,0, 493.88,0,587.33,0,369.99,0,493.88,0] },
   ],
 };
 
@@ -745,12 +721,16 @@ function mOrgan(when, freq, dur, vel = 0.05) {
   g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
   const vib = ctx.createOscillator(); vib.type = "sine"; vib.frequency.value = 5.6;
   const vibD = ctx.createGain(); vibD.gain.value = 2.2;         // Hz of rotary wobble
+  vib.connect(vibD);                    // ONCE — connecting inside the
+                                        // partial loop below stacked four
+                                        // parallel paths and quadrupled
+                                        // the wobble depth.
   const parts = [[1, 1], [2, 0.5], [3, 0.28], [4, 0.16]];
   const oscs = [];
   for (const [mult, lvl] of parts) {
     const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = freq * mult;
     const lg = ctx.createGain(); lg.gain.value = lvl;
-    vib.connect(vibD).connect(o.frequency);
+    vibD.connect(o.frequency);
     o.connect(lg).connect(g);
     o.start(when); o.stop(when + dur + 0.05);
     oscs.push(o);
@@ -787,33 +767,38 @@ function mFlute(when, freq, dur, vel = 0.07) {
   o.stop(end); o2.stop(end); vib.stop(end); air.stop(end);
 }
 
-// ACOUSTIC/TWANG GUITAR — real Karplus-Strong: a burst of noise fired
-// into a delay line one wavelength long, fed back through a lowpass. The
-// noise settles into a pitched, decaying string. Genuinely a plucked
-// string rather than a filtered oscillator, so it sits in a different
-// world from mPluck.
-function mGuitar(when, freq, dur, vel = 0.09, bright = 1) {
-  const period = 1 / Math.max(20, freq);
-  const dl = ctx.createDelay(0.06);
-  dl.delayTime.value = Math.min(0.059, period);
-  const fb = ctx.createGain(); fb.gain.value = 0.965;            // string decay
-  const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
-  lp.frequency.value = Math.min(9000, 1600 * bright + freq * 4); // damping = tone
-  dl.connect(lp).connect(fb).connect(dl);                        // the loop
-  const exc = ctx.createBufferSource(); exc.buffer = getNoise();
-  const eg = ctx.createGain(); eg.gain.value = vel * 3.2;
-  exc.connect(eg).connect(dl);
+// ACOUSTIC/TWANG GUITAR. This used to be a true Karplus-Strong string: a
+// noise burst fired into a delay line with ~0.96 feedback. That's a
+// RESONATOR, and its output ran at unity gain (only the exciter was
+// scaled by velocity), so a bar with sixteen overlapping notes stacked
+// sixteen full-scale resonators — which clipped into a piercing,
+// fire-alarm squeal. Rebuilt WITHOUT any feedback: a detuned saw pair
+// plus a noise-burst "pick" through a fast-closing filter. Still reads
+// as a plucked string, but it can never run away or self-oscillate.
+function mGuitar(when, freq, dur, vel = 0.05, bright = 1) {
+  const a = ctx.createOscillator(); a.type = "sawtooth"; a.frequency.value = freq;
+  const b = ctx.createOscillator(); b.type = "triangle"; b.frequency.value = freq;
+  b.detune.value = -6;                                    // a touch of string chorus
+  const bg = ctx.createGain(); bg.gain.value = 0.6;
+  const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 1.1;
+  f.frequency.setValueAtTime(Math.min(6000, freq * 6 * bright), when);
+  f.frequency.exponentialRampToValueAtTime(Math.max(200, freq * 1.5), when + dur * 0.55);
   const g = ctx.createGain();
-  g.gain.setValueAtTime(1, when);
-  g.gain.setValueAtTime(1, when + dur * 0.7);
-  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);        // hard stop, no ring-on
-  dl.connect(g).connect(music.gain);
-  exc.start(when); exc.stop(when + Math.min(0.02, period * 2));   // the pluck itself
-  fb.gain.setValueAtTime(0.965, when);
-  fb.gain.linearRampToValueAtTime(0, when + dur);                 // kill the loop
-  exc.onended = () => { try { eg.disconnect(); } catch (e) {} };
-  setTimeout(() => { try { dl.disconnect(); lp.disconnect(); fb.disconnect(); g.disconnect(); } catch (e) {} },
-    Math.max(50, (dur + 0.3) * 1000));
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vel, when + 0.005);  // the pick
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur); // string decay
+  // A whisper of pick noise at the very start, gone in 25 ms.
+  const pick = ctx.createBufferSource(); pick.buffer = getNoise();
+  const pf = ctx.createBiquadFilter(); pf.type = "bandpass";
+  pf.frequency.value = Math.min(5000, freq * 4); pf.Q.value = 0.9;
+  const pg = ctx.createGain();
+  pg.gain.setValueAtTime(vel * 0.5, when);
+  pg.gain.exponentialRampToValueAtTime(0.0001, when + 0.025);
+  pick.connect(pf).connect(pg).connect(g);
+  a.connect(f); b.connect(bg).connect(f); f.connect(g).connect(music.gain);
+  a.start(when); b.start(when); pick.start(when);
+  const end = when + dur + 0.03;
+  a.stop(end); b.stop(end); pick.stop(when + 0.05);
 }
 
 // BELL / glockenspiel: FM with an INHARMONIC ratio, which is what makes
@@ -822,7 +807,7 @@ function mBell(when, freq, dur, vel = 0.06) {
   const car = ctx.createOscillator(); car.type = "sine"; car.frequency.value = freq;
   const mod = ctx.createOscillator(); mod.type = "sine"; mod.frequency.value = freq * 1.41; // √2: inharmonic
   const md = ctx.createGain();
-  md.gain.setValueAtTime(freq * 1.6, when);
+  md.gain.setValueAtTime(freq * 0.9, when); // was 1.6 — very wide inharmonic sidebands
   md.gain.exponentialRampToValueAtTime(Math.max(1, freq * 0.05), when + dur * 0.35);
   mod.connect(md).connect(car.frequency);
   const g = ctx.createGain();
@@ -840,10 +825,10 @@ function mBrass(when, freq, dur, vel = 0.06) {
   const a = ctx.createOscillator(); a.type = "sawtooth"; a.frequency.value = freq;
   const b = ctx.createOscillator(); b.type = "sawtooth"; b.frequency.value = freq;
   b.detune.value = 8;                                            // section width
-  const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 3.2;
+  const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 1.0; // was 3.2 — a resonant peak that far up screamed
   f.frequency.setValueAtTime(Math.max(200, freq * 1.2), when);
-  f.frequency.exponentialRampToValueAtTime(Math.min(6500, freq * 6.5), when + 0.05); // the blat
-  f.frequency.exponentialRampToValueAtTime(Math.min(3200, freq * 3), when + dur * 0.7);
+  f.frequency.exponentialRampToValueAtTime(Math.min(3200, freq * 4), when + 0.05); // the blat, ceiling lowered
+  f.frequency.exponentialRampToValueAtTime(Math.min(1900, freq * 2.4), when + dur * 0.7);
   const g = ctx.createGain();
   g.gain.setValueAtTime(0.0001, when);
   g.gain.exponentialRampToValueAtTime(vel, when + 0.02);
@@ -1031,7 +1016,22 @@ export function startMusic(mode = "game") {
   try {
     const gain = ctx.createGain();
     gain.gain.value = 0.55;
-    gain.connect(musicBus);
+    // SAFETY LIMITER. Music is many independent voices summing freely; a
+    // busy bar could previously stack into clipping, which is what turns
+    // a chord into a piercing squeal. This catches any such peak before
+    // it reaches the bus, so no arrangement can ever shriek again.
+    const lim = ctx.createDynamicsCompressor();
+    lim.threshold.value = -14;
+    lim.knee.value = 6;
+    lim.ratio.value = 12;
+    lim.attack.value = 0.004;
+    lim.release.value = 0.18;
+    // ...and roll off the very top, where "alarm" lives.
+    const tame = ctx.createBiquadFilter();
+    tame.type = "lowpass";
+    tame.frequency.value = 7000;
+    tame.Q.value = 0.5;
+    gain.connect(lim).connect(tame).connect(musicBus);
     music = {
       gain, timer: 0, nextAt: 0, step: 0, loops: 0,
       mode, trackIdx: startIdx(mode),
@@ -1039,7 +1039,19 @@ export function startMusic(mode = "game") {
     music.timer = setInterval(() => {
       if (!ready() || !music) return;
       if (!music.nextAt) music.nextAt = ctx.currentTime + 0.1;
-      while (music.nextAt < ctx.currentTime + 0.35) {
+      // CATCH-UP GUARD. setInterval is throttled hard when a tab is
+      // backgrounded or the window is minimised (very common on desktop),
+      // and the AudioContext clock keeps running. Without this, the loop
+      // below would try to "catch up" the whole missed stretch at once:
+      // every step whose time is already in the PAST fires the instant
+      // it's scheduled, so a few seconds away = hundreds of notes landing
+      // simultaneously — a wall of sound that clips into a piercing
+      // squeal. If we've fallen behind, just resume from NOW instead.
+      if (music.nextAt < ctx.currentTime) music.nextAt = ctx.currentTime + 0.05;
+      // Belt and braces: never schedule more than a sensible burst in one
+      // tick, whatever the clock says.
+      let guard = 0;
+      while (music.nextAt < ctx.currentTime + 0.35 && guard++ < 24) {
         const tr = TRACKS[music.mode][music.trackIdx];
         scheduleStep(music.step, music.nextAt);
         music.nextAt += 60 / tr.bpm / 2;
