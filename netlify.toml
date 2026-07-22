@@ -7,3 +7,17 @@
   for = "/index.html"
   [headers.values]
     Cache-Control = "no-cache"
+
+# ...and the same for the ES modules + styles. index.html is unversioned
+# (no hashed filenames), so a cached js/*.js could otherwise keep running
+# an OLD build long after a deploy — which looks exactly like "my fix
+# didn't work". Revalidate these every load.
+[[headers]]
+  for = "/js/*"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/css/*"
+  [headers.values]
+    Cache-Control = "no-cache"
