@@ -540,120 +540,681 @@ export function setFlame(active) {
 }
 
 /* ---------- music: a real, played score ---------- */
-// Not a chiptune bleep-track: the harmony is carried by an FM ELECTRIC
-// PIANO, the low end by a warm round BASS (triangle + sine sub, not a
-// buzzy saw), and the movement by a PLUCKED STRING — all under a proper
-// drum kit. Tracks are written as actual songs: real chord progressions
-// (mostly the I–V–vi–IV / i–VI–III–VII families), singable melodies, and,
-// for the title, a multi-section arrangement (intro → verse → chorus →
-// outro) that plays through before it loops.
+// Every song here is a full arrangement, not a loop: each one is a run of
+// distinct SECTIONS (intro, verses, choruses, a bridge, an outro) that
+// play through in order before the mode moves to a different song. Nothing
+// repeats a single bar for minutes on end, and every song runs past 1:30.
 //
-// Data model: each track is 32 steps = 4 bars of 4/4 (2 steps per beat).
-// `bass`/`mel`/`arp` hold one frequency per step (0 = rest); `chords`
-// holds an ARRAY of frequencies per step (a struck chord). Raw Hz:
-//   C2 65.41  D2 73.42  E2 82.41  F2 87.31  G2 98.00  A2 110.00  Bb2 116.54
-//   C3 130.81 E3 164.81 G3 196.00 A3 220.00 Bb3 233.08 B3 246.94 C#4 277.18
-//   D4 293.66 E4 329.63 F4 349.23 F#4 369.99 G4 392.00 A4 440.00 Bb4 466.16
-//   B4 493.88 C5 523.25 C#5 554.37 D5 587.33 E5 659.25 F5 698.46 G5 783.99
-const C = {
-  Cmaj: [261.63, 329.63, 392.00], Gmaj: [246.94, 293.66, 392.00],
-  Amin: [220.00, 261.63, 329.63], Fmaj: [220.00, 261.63, 349.23],
-  Emin: [246.94, 329.63, 392.00], Dmaj: [220.00, 293.66, 369.99],
-  Dmin: [220.00, 293.66, 349.23], Bbmaj: [293.66, 349.23, 466.16],
-  Gmin: [293.66, 392.00, 466.16], Amaj: [220.00, 277.18, 329.63],
-  Bmaj: [246.94, 311.13, 369.99],
+// To keep that much music readable, a section is written as a CHORD
+// PROGRESSION (one chord per bar) plus a melody line. The backing —
+// chord voicings, bass, counter-line — is generated from the progression
+// by `sect()` according to a named style, so a ninety-second song is a
+// handful of lines instead of thousands of hand-typed numbers.
+
+// Note table (Hz).
+const N = {
+  C2: 65.41, D2: 73.42, E2: 82.41, F2: 87.31, G2: 98.00, A2: 110.00, Bb2: 116.54, B2: 123.47,
+  C3: 130.81, D3: 146.83, E3: 164.81, F3: 174.61, G3: 196.00, A3: 220.00, Bb3: 233.08, B3: 246.94,
+  C4: 261.63, Cs4: 277.18, D4: 293.66, E4: 329.63, F4: 349.23, Fs4: 369.99, G4: 392.00,
+  Gs4: 415.30, A4: 440.00, Bb4: 466.16, B4: 493.88,
+  C5: 523.25, Cs5: 554.37, D5: 587.33, E5: 659.25, F5: 698.46, Fs5: 739.99, G5: 783.99,
+  A5: 880.00, B5: 987.77,
 };
 
+// Chords: the notes that sound, plus the root the bass walks on.
+const CH = {
+  Cmaj:  { n: [N.C4, N.E4, N.G4],   r: N.C2 },
+  Gmaj:  { n: [N.B3, N.D4, N.G4],   r: N.G2 },
+  Amin:  { n: [N.A3, N.C4, N.E4],   r: N.A2 },
+  Fmaj:  { n: [N.A3, N.C4, N.F4],   r: N.F2 },
+  Emin:  { n: [N.B3, N.E4, N.G4],   r: N.E2 },
+  Dmin:  { n: [N.A3, N.D4, N.F4],   r: N.D2 },
+  Dmaj:  { n: [N.A3, N.D4, N.Fs4],  r: N.D2 },
+  Bbmaj: { n: [N.D4, N.F4, N.Bb4],  r: N.Bb2 },
+  Gmin:  { n: [N.D4, N.G4, N.Bb4],  r: N.G2 },
+  Amaj:  { n: [N.A3, N.Cs4, N.E4],  r: N.A2 },
+  Bmin:  { n: [N.B3, N.D4, N.Fs4],  r: N.B2 },
+
+  // Extended voicings — sevenths, ninths, and one inversion. A triad is
+  // fine for a battle theme, but the title music needs colours a triad
+  // can't give it: the 9th that keeps a C chord from sounding finished,
+  // the sus that leans on the dominant instead of resolving it. Note that
+  // Fmaj9 and Am7 are the SAME four notes over different roots, which is
+  // why F moving to Am here doesn't sound like the chord changed so much
+  // as the floor did.
+  Cmaj7: { n: [N.E4, N.G4, N.B4],         r: N.C2 },
+  Cmaj9: { n: [N.E4, N.G4, N.B4, N.D5],   r: N.C2 },
+  Fmaj9: { n: [N.A3, N.C4, N.E4, N.G4],   r: N.F2 },
+  Am7:   { n: [N.A3, N.C4, N.E4, N.G4],   r: N.A2 },
+  Dm7:   { n: [N.A3, N.C4, N.D4, N.F4],   r: N.D2 },
+  Em7:   { n: [N.G3, N.B3, N.D4, N.E4],   r: N.E2 },
+  G7:    { n: [N.B3, N.D4, N.F4],         r: N.G2 },
+  Gsus4: { n: [N.C4, N.D4, N.G4],         r: N.G2 },
+  "G/B": { n: [N.B3, N.D4, N.G4],         r: N.B2 },  // G with B in the bass
+  Dadd9: { n: [N.A3, N.D4, N.E4, N.Fs4],  r: N.D2 },
+  Gadd9: { n: [N.B3, N.D4, N.G4, N.A4],   r: N.G2 },
+  Bmin7: { n: [N.B3, N.D4, N.Fs4, N.A4],  r: N.B2 },
+};
+
+const seq = (...parts) => parts.flat();
+
+// Build one section from a chord-per-bar progression. `style` decides how
+// the backing is played; the melody is passed in.
+function sect(o) {
+  const meter = o.meter ?? 8;
+  const style = o.style ?? "flow";
+  const steps = o.prog.length * meter;
+  const chords = new Array(steps).fill(0);
+  const bass = new Array(steps).fill(0);
+  const arp = new Array(steps).fill(0);
+  o.prog.forEach((c, bar) => {
+    const at = bar * meter;
+    const [n1, n2, n3] = c.n;
+    const fifth = c.r * 1.5; // a perfect fifth above the root
+    if (style === "waltz") {
+      // 3/4: root on the downbeat, chord on beats two and three.
+      bass[at] = c.r;
+      chords[at + 2] = c.n; chords[at + 4] = c.n;
+      arp[at + 1] = n1; arp[at + 3] = n2; arp[at + 5] = n3;
+    } else if (style === "pad") {
+      // One held chord per bar — hymn/organ writing.
+      bass[at] = c.r;
+      chords[at] = c.n;
+    } else if (style === "drive") {
+      // Combat: a pushing bass and a running counter-line.
+      bass[at] = c.r; bass[at + 2] = c.r; bass[at + 3] = c.r;
+      bass[at + 5] = c.r; bass[at + 6] = fifth;
+      chords[at] = c.n; chords[at + 3] = c.n;
+      arp[at] = n1; arp[at + 1] = n2; arp[at + 2] = n3; arp[at + 3] = n2;
+      arp[at + 4] = n1; arp[at + 5] = n2; arp[at + 6] = n3; arp[at + 7] = n2;
+    } else {
+      // "flow" — gentle common time, chord on each half bar.
+      bass[at] = c.r; bass[at + 4] = c.r; bass[at + 6] = fifth;
+      chords[at] = c.n; chords[at + 4] = c.n;
+      arp[at] = n1; arp[at + 2] = n2; arp[at + 4] = n3; arp[at + 6] = n2;
+    }
+  });
+  const mel = o.mel ?? new Array(steps).fill(0);
+  return { ...o, meter, chords, bass, arp, mel };
+}
+
+// ====================== TITLE / MENU SONGS ======================
+
+// ---- "First Light" — the title theme, and the one track here that gets
+// a full ARRANGEMENT rather than a loop. C major, 92 BPM, sixty-four bars,
+// about two minutes fifty: a bell dawn; an eight-bar theme; that theme
+// rewritten with a flute holding long notes under it; a pre-chorus that
+// climbs an octave; a chorus with brass beneath the tune; a nylon-guitar
+// bridge over organ; a flute interlude that quietly tilts the harmony
+// toward D; the final chorus A WHOLE TONE HIGHER; and a coda that walks
+// D–G–C back home for the bells to finish on. No melodic phrase in the
+// piece is ever played twice.
+//
+// Three things do most of the work:
+//
+//   1. Sevenths and ninths instead of bare triads, plus one inversion
+//      (G/B) so the bass FALLS C–B–A–F under the theme instead of hopping
+//      root to root.
+//
+//   2. `flSect` — a per-BAR accompaniment writer. `sect()` stamps the same
+//      eight steps of backing into every bar of every section, and that,
+//      far more than any melody, is what makes generated music wear out:
+//      you hear the loop, not the tune. Here the comping figure moves with
+//      the bar — the counter-line changes shape each bar, the bass walks
+//      chromatically into the next chord, and at the end of a chorus
+//      phrase the COMING chord is pushed an eighth-note early.
+//
+//   3. `phrase()` — real note lengths. Every other track holds every
+//      melody note for a fixed 3.4 steps, which is why they smear; here a
+//      note lasts exactly until the next one, so runs come out crisp and
+//      the last note of a line is allowed to ring.
+
+// Fold a chord tone down into the bass register — within an octave above
+// the root, which is where a bass player would actually put it.
+const fold = (f, r) => { while (f > r * 1.9) f /= 2; while (f < r * 0.95) f *= 2; return f; };
+// A chromatic approach note: a semitone under the chord we're walking to,
+// or over it if we're coming down. 2^(±1/12).
+const approach = (from, to) => (to > from ? to * 0.9439 : to * 1.0595);
+
+// Give every note in a line the time until the next note starts, in steps
+// (slightly short, so repeated notes re-articulate instead of merging).
+function phrase(line, max = 8) {
+  const n = line.length;
+  const out = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    if (!line[i]) continue;
+    let k = 1;
+    while (k < n && !line[(i + k) % n]) k++;
+    out[i] = Math.max(0.9, Math.min(max, k * 0.92));
+  }
+  return out;
+}
+
+// Build a First Light section. Same idea as `sect()`, but the backing is
+// written bar by bar and `fig` chooses the comping pattern.
+function flSect(o) {
+  const meter = 8;
+  const bars = o.prog.length;
+  const steps = bars * meter;
+  const chords = new Array(steps).fill(0);
+  const bass = new Array(steps).fill(0);
+  const arp = new Array(steps).fill(0);
+  let early = false; // set by the previous bar when it pushed its chord in
+
+  o.prog.forEach((c, bar) => {
+    const at = bar * meter;
+    const next = o.prog[bar + 1] || null;
+    const last = bar === bars - 1;
+    const t = c.n;
+    const n1 = t[0], n2 = t[1], n3 = t[2], n4 = t[3] ?? t[0] * 2;
+    const r = c.r;
+    const bt = t.map((f) => fold(f, r));   // chord tones down in the bass
+    const app = next ? approach(r, next.r) : 0;
+    const pushed = early;
+    early = false;
+
+    if (o.fig === "dawn") {
+      // Barely there: one long root, one held pad, and a bell rolling up
+      // the chord — the other way round every second bar.
+      bass[at] = r;
+      if (bar % 2 === 1) bass[at + 4] = bt[1];
+      chords[at] = t;
+      if (bar % 2 === 0) { arp[at + 1] = n2; arp[at + 4] = n3; arp[at + 6] = n4; }
+      else { arp[at + 2] = n4; arp[at + 5] = n2; }
+
+    } else if (o.fig === "amble") {
+      // Unhurried common time. The chord answers off the beat (the "&" of
+      // three), and the counter-line runs one of FOUR shapes depending on
+      // where we are in the phrase, so the backing never repeats until the
+      // fifth bar — by which point the harmony has moved anyway.
+      bass[at] = r;
+      if (bar % 2 === 0) { bass[at + 4] = bt[1]; bass[at + 6] = bt[0]; }
+      else { bass[at + 3] = r; bass[at + 4] = bt[1]; }
+      if (!pushed) chords[at] = t;
+      chords[at + 5] = t;
+      if (bar % 4 === 3 && !last) chords[at + 3] = t;
+      const p = bar % 4;
+      if (p === 0) { arp[at] = n1; arp[at + 2] = n2; arp[at + 4] = n3; arp[at + 6] = n2; }
+      else if (p === 1) { arp[at + 1] = n2; arp[at + 3] = n3; arp[at + 5] = n4; arp[at + 7] = n2; }
+      else if (p === 2) { arp[at] = n4; arp[at + 2] = n3; arp[at + 4] = n2; arp[at + 6] = n3; }
+      else { arp[at] = n1; arp[at + 3] = n3; arp[at + 5] = n2; arp[at + 7] = n3; }
+      if (app && bar % 2 === 1) bass[at + 7] = app;   // walk into the next chord
+
+    } else if (o.fig === "push") {
+      // 3 + 3 + 2. The bar leans forward, which is what a pre-chorus is
+      // for, and the counter-line climbs an octave into the downbeat.
+      bass[at] = r; bass[at + 3] = r; bass[at + 6] = bt[1];
+      chords[at] = t; chords[at + 3] = t; chords[at + 6] = t;
+      const up = [n1, n2, n3, n4, n1 * 2, n2 * 2, n3 * 2, n4 * 2];
+      for (let i = 0; i < 8; i++) arp[at + i] = last ? up[i] : up[(i + bar * 3) % 8];
+      if (app) bass[at + 7] = app;
+
+    } else if (o.fig === "open") {
+      // The chorus. Root on one and three, a fifth under the turnaround,
+      // and at the end of each four-bar phrase the NEXT chord arrives an
+      // eighth early — the single most "played by people" thing in here.
+      // The bar it lands in then skips its own downbeat, so it reads as a
+      // push and not as a stutter.
+      bass[at] = r; bass[at + 4] = r;
+      if (bar % 2 === 1) bass[at + 6] = bt[1];
+      if (app && bar % 4 === 1) bass[at + 7] = app;
+      if (!pushed) chords[at] = t;
+      chords[at + 4] = t;
+      if (next && bar % 4 === 3) { chords[at + 7] = next.n; early = true; }
+      // Running eighths up on top, out of the way of the chord and the
+      // tune on the strong beats. Notes are lifted an octave only if they
+      // sit low, which wraps the line into one register instead of letting
+      // it climb out of the mix.
+      const line = [n1, n2, n3, n4, n3, n2, n1, n2].map((f) => (f > 460 ? f : f * 2));
+      for (const i of [1, 2, 3, 5, 6, 7]) arp[at + i] = line[(i + bar) % 8];
+
+    } else if (o.fig === "pulse") {
+      // Bridge: organ holds the bar, the guitar answers on every offbeat.
+      // Nothing else in the game sits on the "and" like this.
+      bass[at] = r;
+      bass[at + 4] = bt[1];
+      chords[at] = t;
+      if (bar % 2 === 0) { arp[at + 1] = n2; arp[at + 3] = n3; arp[at + 5] = n4; arp[at + 7] = n3; }
+      else { arp[at + 1] = n4; arp[at + 3] = n3; arp[at + 5] = n2; arp[at + 7] = n3; }
+      if (bar % 4 === 3) arp[at + 6] = n1 * 2;
+
+    } else {
+      // "float" — the interlude. One root, one chord, two plucks. Room for
+      // the flute to breathe.
+      bass[at] = r;
+      chords[at] = t;
+      arp[at + 2] = n3; arp[at + 5] = n4;
+      if (bar % 2 === 1) arp[at + 6] = n2 * 2;
+    }
+  });
+
+  const mel = o.mel ?? new Array(steps).fill(0);
+  const out = { ...o, meter, chords, bass, arp, mel, melDur: phrase(mel, o.ring ?? 8) };
+  if (o.mel2) out.mel2Dur = phrase(o.mel2, o.ring2 ?? 8);
+  return out;
+}
+
+// --- the tunes. Eight steps to a bar; each line is commented with the
+// chord it sings over. Nothing below is reused anywhere else in the song.
+
+// Dawn: six notes, spread thin — G–C–D–E–D–C, the seed of the theme.
+const flDawn = [
+  /* Cmaj9 */ 0,0,0,0,            N.G4,0,0,0,
+  /* Fmaj9 */ N.C5,0,0,0,         0,0,N.D5,0,
+  /* Am7   */ N.E5,0,0,0,         0,0,0,0,
+  /* Gsus4 */ 0,0,N.D5,0,         N.C5,0,0,0,
+];
+
+// The theme. Four bars that rise and answer, four that walk back down.
+const flTheme = [
+  /* Cmaj9 */ N.G4,0,0,0,         N.C5,0,N.D5,0,
+  /* G/B   */ N.E5,0,0,N.D5,      N.C5,0,N.B4,0,
+  /* Am7   */ N.A4,0,0,0,         N.C5,0,N.E5,0,
+  /* Fmaj9 */ N.D5,0,0,N.C5,      N.A4,0,0,0,
+  /* Cmaj7 */ N.G4,0,N.A4,0,      N.B4,0,N.C5,0,
+  /* Fmaj9 */ N.D5,0,N.C5,0,      N.A4,0,0,0,
+  /* Dm7   */ N.F4,0,N.A4,0,      N.D5,0,0,0,
+  /* Gsus4 */ N.C5,0,N.B4,0,      N.A4,0,N.G4,0,
+];
+
+// The theme restated — same shape, different notes, pitched higher, with
+// the flute below holding one long tone per bar.
+const flTheme2 = [
+  /* Fmaj9 */ N.A4,N.C5,N.F5,0,   0,0,N.E5,0,
+  /* Cmaj7 */ N.E5,0,0,N.D5,      N.C5,0,0,0,
+  /* Dm7   */ N.D5,0,N.F5,0,      N.E5,0,N.D5,0,
+  /* G7    */ N.B4,0,0,0,         N.D5,0,N.F5,0,
+  /* Em7   */ N.E5,0,0,N.D5,      N.B4,0,0,0,
+  /* Am7   */ N.C5,0,N.B4,0,      N.A4,0,0,0,
+  /* Fmaj9 */ N.F4,N.A4,N.C5,0,   N.E5,0,N.G5,0,
+  /* Gsus4 */ N.F5,0,N.E5,0,      N.D5,0,0,0,
+];
+const flTheme2Alt = [
+  N.F4,0,0,0, 0,0,0,0,   N.G4,0,0,0, 0,0,0,0,
+  N.A4,0,0,0, 0,0,0,0,   N.G4,0,0,0, 0,0,N.B4,0,
+  N.G4,0,0,0, 0,0,0,0,   N.E4,0,0,0, 0,0,0,0,
+  N.A4,0,0,0, 0,0,N.C5,0, N.G4,0,0,0, 0,0,0,0,
+];
+
+// Pre-chorus: a four-bar ladder, A4 to A5, with brass swelling behind it.
+const flLift = [
+  /* Am7   */ N.A4,0,N.B4,0,      N.C5,0,0,0,
+  /* Fmaj9 */ N.C5,0,N.D5,0,      N.E5,0,0,0,
+  /* Cmaj7 */ N.E5,0,N.F5,0,      N.G5,0,0,0,
+  /* Gsus4 */ N.A5,0,0,N.G5,      N.E5,0,0,0,
+];
+const flLiftAlt = [
+  N.E4,0,0,0, 0,0,0,0,   N.F4,0,0,0, 0,0,0,0,
+  N.G4,0,0,0, 0,0,0,0,   N.G4,0,0,0, N.D5,0,0,0,
+];
+
+// Chorus. The hook is bars one and two; bars five and six answer it from
+// higher up rather than repeating it.
+const flChorus = [
+  /* Cmaj7 */ N.E5,0,N.G5,0,      N.A5,0,N.G5,0,
+  /* Gmaj  */ N.D5,0,0,0,         N.B4,0,N.D5,0,
+  /* Am7   */ N.C5,0,N.E5,0,      N.A5,0,0,0,
+  /* Fmaj9 */ N.G5,0,0,N.E5,      N.C5,0,0,0,
+  /* Cmaj9 */ N.E5,0,N.G5,0,      N.B5,0,N.A5,0,
+  /* Gmaj  */ N.G5,0,0,N.Fs5,     N.D5,0,0,0,
+  /* Fmaj9 */ N.E5,0,N.D5,0,      N.C5,0,N.A4,0,
+  /* Gmaj  */ N.D5,0,0,0,         N.C5,0,0,0,
+];
+const flChorusAlt = [
+  N.C5,0,0,0, N.E5,0,0,0,   N.B4,0,0,0, N.G4,0,0,0,
+  N.A4,0,0,0, N.C5,0,0,0,   N.C5,0,0,0, N.A4,0,0,0,
+  N.C5,0,0,0, N.E5,0,0,0,   N.B4,0,0,0, N.D5,0,0,0,
+  N.A4,0,0,0, N.F4,0,0,0,   N.B4,0,0,0, N.D5,0,0,0,
+];
+
+// Bridge: low, close, conversational. The Bb in bar seven is borrowed
+// from C minor and is the one moment of shade in the piece.
+const flBridge = [
+  /* Am7   */ N.A4,0,N.C5,N.B4,   N.A4,0,0,0,
+  /* Em7   */ N.G4,0,N.B4,0,      N.E4,0,0,0,
+  /* Fmaj9 */ N.F4,0,N.A4,0,      N.C5,0,N.A4,0,
+  /* Cmaj7 */ N.G4,0,0,0,         N.E4,0,0,0,
+  /* Dm7   */ N.D5,N.C5,N.A4,0,   N.F4,0,0,0,
+  /* Gsus4 */ N.G4,0,N.A4,0,      N.B4,0,N.C5,0,
+  /* Bbmaj */ N.D5,0,0,0,         N.F5,0,0,0,
+  /* Fmaj9 */ N.E5,0,N.D5,0,      N.C5,0,0,0,
+];
+
+// Interlude: flute alone. The C# in the last bar is the door to D major.
+const flInter = [
+  /* Dm7  */ N.A4,0,N.D5,0,       N.F5,0,0,0,
+  /* Gmaj */ N.E5,0,N.D5,0,       N.B4,0,0,0,
+  /* Em7  */ N.G4,0,N.B4,0,       N.E5,0,0,0,
+  /* Amaj */ N.Cs5,0,0,0,         N.E5,0,0,0,
+];
+
+// Four bars of new key, gathering itself: D, Bm, G, and an A that wants
+// D badly (the G natural on top of it makes it an A7).
+const flRebuild = [
+  /* Dadd9 */ N.A4,0,N.D5,0,      N.Fs5,0,0,0,
+  /* Bmin7 */ N.Fs5,0,N.E5,0,     N.D5,0,0,0,
+  /* Gadd9 */ N.B4,0,N.D5,0,      N.G5,0,0,0,
+  /* Amaj  */ N.A5,0,0,N.G5,      N.Fs5,0,0,0,
+];
+const flRebuildAlt = [
+  N.D4,0,0,0, 0,0,0,0,   N.Fs4,0,0,0, 0,0,0,0,
+  N.G4,0,0,0, 0,0,0,0,   N.A4,0,0,0, N.Cs5,0,0,0,
+];
+
+// The last chorus, a whole tone up, bells doubling the tune. Bar eight
+// hangs a D over the A and lets it fall to C# — a 4–3 suspension, the
+// oldest trick there is for making an ending feel earned.
+const flChorusD = [
+  /* Dadd9 */ N.Fs5,0,N.A5,0,     N.B5,0,N.A5,0,
+  /* Amaj  */ N.E5,0,0,0,         N.Cs5,0,N.E5,0,
+  /* Bmin7 */ N.D5,0,N.Fs5,0,     N.B5,0,0,0,
+  /* Gadd9 */ N.A5,0,0,N.Fs5,     N.D5,0,0,0,
+  /* Dadd9 */ N.A5,0,N.Fs5,0,     N.B5,0,N.A5,0,
+  /* Bmin7 */ N.B5,0,N.A5,0,      N.Fs5,0,0,0,
+  /* Gadd9 */ N.G5,0,N.E5,0,      N.D5,0,N.B4,0,
+  /* Amaj  */ N.D5,0,0,0,         N.Cs5,0,0,0,
+];
+const flChorusDAlt = [
+  N.Fs5,0,0,0, 0,0,0,0,   0,0,0,0, N.Cs5,0,0,0,
+  N.D5,0,0,0, 0,0,0,0,    N.A5,0,0,0, 0,0,0,0,
+  N.A5,0,0,0, 0,0,0,0,    N.B5,0,0,0, 0,0,0,0,
+  N.G5,0,0,0, 0,0,0,0,    N.D5,0,0,0, N.Cs5,0,0,0,
+];
+
+// Coda: D to G to C, three descending fifths, and we're home. Bar three
+// is the opening bell figure again, played by the piano this time.
+const flCoda = [
+  /* Dmaj  */ N.Fs5,0,N.E5,0,     N.D5,0,0,0,
+  /* Gmaj  */ N.D5,0,N.B4,0,      N.G4,0,0,0,
+  /* Cmaj9 */ N.G4,0,0,0,         N.C5,0,N.E5,0,
+  /* Fmaj9 */ N.D5,0,0,0,         N.C5,0,0,0,
+];
+const flCodaAlt = [
+  N.A4,0,0,0, 0,0,0,0,   N.B4,0,0,0, 0,0,0,0,
+  N.E4,0,0,0, 0,0,0,0,   N.A4,0,0,0, 0,0,0,0,
+];
+
+// Outro: the dawn figure inverted — G, C, E, G, going up into the light
+// instead of settling. One note a bar, and the last one just rings.
+const flOutro = [
+  /* Cmaj9 */ N.G4,0,0,0, 0,0,0,0,
+  /* Am7   */ N.C5,0,0,0, 0,0,0,0,
+  /* Fmaj9 */ N.E5,0,0,0, 0,0,0,0,
+  /* Cmaj9 */ N.G5,0,0,0, 0,0,0,0,
+];
+
+const songFirstLight = [
+  // Bells over an organ pad, no kit at all.
+  { section: "dawn", fig: "dawn", prog: [CH.Cmaj9, CH.Fmaj9, CH.Am7, CH.Gsus4], mel: flDawn,
+    drums: "none", sus: 7.8, bassDur: 3.6, arpDur: 4,
+    voice: { chord: "organ", lead: "bell", arp: "bell" },
+    vel: { chord: 0.026, lead: 0.05, arp: 0.026, bass: 0.14 } },
+
+  // The theme: electric piano, brushes, and that falling C–B–A–F bass.
+  { section: "theme", fig: "amble", groove: true,
+    prog: [CH.Cmaj9, CH["G/B"], CH.Am7, CH.Fmaj9, CH.Cmaj7, CH.Fmaj9, CH.Dm7, CH.Gsus4],
+    mel: flTheme, drums: "brush", sus: 3.2,
+    vel: { chord: 0.04, lead: 0.1, arp: 0.038, bass: 0.19 } },
+
+  // Said again, differently, with a flute underneath.
+  { section: "theme2", fig: "amble", groove: true,
+    prog: [CH.Fmaj9, CH.Cmaj7, CH.Dm7, CH.G7, CH.Em7, CH.Am7, CH.Fmaj9, CH.Gsus4],
+    mel: flTheme2, mel2: flTheme2Alt, drums: "brush", sus: 3.2,
+    voice: { lead2: "flute" },
+    vel: { chord: 0.036, lead: 0.1, arp: 0.038, bass: 0.19, lead2: 0.05 } },
+
+  // Pre-chorus. Everything tilts forward.
+  { section: "lift", fig: "push", groove: true,
+    prog: [CH.Am7, CH.Fmaj9, CH.Cmaj7, CH.Gsus4],
+    mel: flLift, mel2: flLiftAlt, drums: "push", sus: 2.4,
+    voice: { lead2: "brass" },
+    vel: { chord: 0.042, lead: 0.105, arp: 0.034, bass: 0.2, lead2: 0.05 } },
+
+  // Chorus.
+  { section: "chorus", fig: "open", groove: true,
+    prog: [CH.Cmaj7, CH.Gmaj, CH.Am7, CH.Fmaj9, CH.Cmaj9, CH.Gmaj, CH.Fmaj9, CH.Gmaj],
+    mel: flChorus, mel2: flChorusAlt, drums: "anthem", sus: 3.4, ring2: 2.8,
+    voice: { lead2: "brass" },
+    vel: { chord: 0.038, lead: 0.112, arp: 0.026, bass: 0.185, lead2: 0.044 } },
+
+  // Bridge: guitar over organ, brushes pulled right back.
+  { section: "bridge", fig: "pulse", groove: true,
+    prog: [CH.Am7, CH.Em7, CH.Fmaj9, CH.Cmaj7, CH.Dm7, CH.Gsus4, CH.Bbmaj, CH.Fmaj9],
+    mel: flBridge, drums: "brush", drumV: 0.62, sus: 8, bassDur: 2.2,
+    voice: { chord: "organ", lead: "guitar", arp: "guitar" },
+    vel: { chord: 0.026, lead: 0.075, arp: 0.03, bass: 0.16 } },
+
+  // Interlude: flute, and the harmony starts leaving C major.
+  { section: "interlude", fig: "float",
+    prog: [CH.Dm7, CH.Gmaj, CH.Em7, CH.Amaj],
+    mel: flInter, drums: "swell", sus: 5.5, bassDur: 2.6,
+    voice: { lead: "flute" },
+    vel: { chord: 0.032, lead: 0.08, arp: 0.028, bass: 0.15 } },
+
+  // The gear change.
+  { section: "rebuild", fig: "push", groove: true,
+    prog: [CH.Dadd9, CH.Bmin7, CH.Gadd9, CH.Amaj],
+    mel: flRebuild, mel2: flRebuildAlt, drums: "push", sus: 2.4,
+    voice: { lead2: "brass" },
+    vel: { chord: 0.04, lead: 0.108, arp: 0.032, bass: 0.19, lead2: 0.05 } },
+
+  // Last chorus, up a tone, bells on the tune.
+  { section: "chorusD", fig: "open", groove: true,
+    prog: [CH.Dadd9, CH.Amaj, CH.Bmin7, CH.Gadd9, CH.Dadd9, CH.Bmin7, CH.Gadd9, CH.Amaj],
+    mel: flChorusD, mel2: flChorusDAlt, drums: "anthem", sus: 3.4,
+    voice: { lead2: "bell" },
+    vel: { chord: 0.038, lead: 0.112, arp: 0.026, bass: 0.185, lead2: 0.032 } },
+
+  // Coda: back to C.
+  { section: "coda", fig: "amble", groove: true,
+    prog: [CH.Dmaj, CH.Gmaj, CH.Cmaj9, CH.Fmaj9],
+    mel: flCoda, mel2: flCodaAlt, drums: "brush", drumV: 0.7, sus: 3.6,
+    voice: { lead2: "flute" },
+    vel: { chord: 0.038, lead: 0.092, arp: 0.03, bass: 0.17, lead2: 0.045 } },
+
+  // Bells, and out.
+  { section: "outro", fig: "dawn", prog: [CH.Cmaj9, CH.Am7, CH.Fmaj9, CH.Cmaj9], mel: flOutro,
+    drums: "none", sus: 7.8, bassDur: 3.6, arpDur: 4,
+    voice: { chord: "organ", lead: "bell", arp: "bell" },
+    vel: { chord: 0.024, lead: 0.048, arp: 0.024, bass: 0.13 } },
+].map((s) => flSect({ ...s, song: "firstlight", bpm: 92 }));
+
+// ---- "Moonlit Waltz" — 3/4 folk waltz in D minor: nylon GUITAR on beats
+// two and three, FLUTE singing the tune, brushes. Eight-bar sections.
+const MW = {
+  A: [CH.Dmin, CH.Bbmaj, CH.Fmaj, CH.Cmaj, CH.Dmin, CH.Gmin, CH.Amaj, CH.Dmin],
+  B: [CH.Dmin, CH.Gmin, CH.Cmaj, CH.Fmaj, CH.Bbmaj, CH.Gmin, CH.Amaj, CH.Amaj],
+  C: [CH.Fmaj, CH.Cmaj, CH.Dmin, CH.Bbmaj, CH.Fmaj, CH.Gmin, CH.Amaj, CH.Dmin],
+};
+const mw1 = [N.A4,0,N.D5,0,N.C5,0,  N.Bb4,0,N.A4,0,N.F4,0,  N.A4,0,N.C5,0,N.A4,0,  N.G4,0,N.E4,0,N.G4,0,
+             N.F4,0,N.A4,0,N.D5,0,  N.Bb4,0,N.A4,0,N.G4,0,  N.Cs5,0,N.A4,0,N.E4,0,  N.D5,0,0,0,0,0];
+const mw2 = [N.D5,0,N.F5,0,N.E5,0,  N.D5,0,N.Bb4,0,N.G4,0,  N.E4,0,N.G4,0,N.C5,0,  N.A4,0,N.F4,0,N.A4,0,
+             N.D5,0,N.Bb4,0,N.F4,0,  N.G4,0,N.Bb4,0,N.D5,0,  N.Cs5,0,N.E5,0,N.A4,0,  N.A4,0,0,0,0,0];
+const mw3 = [N.C5,0,N.A4,0,N.F4,0,  N.E4,0,N.G4,0,N.E4,0,  N.F4,0,N.A4,0,N.D5,0,  N.F4,0,N.D5,0,N.Bb4,0,
+             N.A4,0,N.C5,0,N.F5,0,  N.D5,0,N.Bb4,0,N.G4,0,  N.A4,0,N.Cs5,0,N.E5,0,  N.D5,0,0,0,0,0];
+const mw4 = [N.A4,0,0,0,N.D5,0,  0,0,0,0,0,0,  N.F4,0,0,0,N.A4,0,  0,0,0,0,0,0,
+             N.D5,0,0,0,N.C5,0,  0,0,0,0,0,0,  N.A4,0,0,0,0,0,  N.D5,0,0,0,0,0];
+const songWaltz = [
+  { prog: MW.A, mel: null, section: "intro" },
+  { prog: MW.A, mel: mw1,  section: "verse" },
+  { prog: MW.B, mel: mw2,  section: "turn" },
+  { prog: MW.C, mel: mw3,  section: "lift" },
+  { prog: MW.A, mel: mw1,  section: "verse2" },
+  { prog: MW.B, mel: mw2,  section: "turn2" },
+  { prog: MW.C, mel: mw3,  section: "lift2" },
+  { prog: MW.A, mel: mw4,  section: "outro" },
+].map((s) => sect({
+  ...s, song: "waltz", bpm: 108, meter: 6, style: "waltz", drums: "waltz", sus: 2.4,
+  voice: { chord: "guitar", lead: "flute", arp: "guitar" },
+  vel: { chord: 0.055, lead: 0.075, arp: 0.035 },
+}));
+
+// ---- "Sunrise Hymn" — slow drumless chorale in F: ORGAN pads, BELLS.
+const SH = { A: [CH.Fmaj, CH.Bbmaj, CH.Dmin, CH.Cmaj], B: [CH.Bbmaj, CH.Fmaj, CH.Gmin, CH.Cmaj],
+             C: [CH.Fmaj, CH.Cmaj, CH.Dmin, CH.Bbmaj], D: [CH.Gmin, CH.Cmaj, CH.Fmaj, CH.Fmaj] };
+const sh1 = [N.F4,0,0,0,N.A4,0,0,0,  N.Bb4,0,0,0,N.A4,0,0,0,  N.F4,0,0,0,N.D5,0,0,0,  N.C5,0,0,0,0,0,0,0];
+const sh2 = [N.Bb4,0,0,0,N.D5,0,0,0,  N.C5,0,0,0,N.A4,0,0,0,  N.Bb4,0,0,0,N.G4,0,0,0,  N.C5,0,0,0,0,0,0,0];
+const sh3 = [N.A4,0,0,0,N.C5,0,0,0,  N.G4,0,0,0,N.E4,0,0,0,  N.F4,0,0,0,N.A4,0,0,0,  N.D5,0,0,0,N.C5,0,0,0];
+const sh4 = [N.D5,0,0,0,N.Bb4,0,0,0,  N.C5,0,0,0,N.G4,0,0,0,  N.A4,0,0,0,N.F4,0,0,0,  N.F4,0,0,0,0,0,0,0];
+const sh5 = [N.C5,0,0,0,0,0,0,0,  N.A4,0,0,0,0,0,0,0,  N.F4,0,0,0,0,0,0,0,  N.F4,0,0,0,0,0,0,0];
+const songHymn = [
+  { prog: SH.A, mel: null, drums: "none",  section: "intro" },
+  { prog: SH.A, mel: sh1,  drums: "none",  section: "verse" },
+  { prog: SH.B, mel: sh2,  drums: "swell", section: "rise" },
+  { prog: SH.C, mel: sh3,  drums: "swell", section: "verse2" },
+  { prog: SH.D, mel: sh4,  drums: "swell", section: "turn" },
+  { prog: SH.A, mel: sh1,  drums: "swell", section: "verse3" },
+  { prog: SH.C, mel: sh3,  drums: "none",  section: "descent" },
+  { prog: SH.D, mel: sh5,  drums: "none",  section: "outro" },
+].map((s) => sect({
+  ...s, song: "hymn", bpm: 76, style: "pad", sus: 7.5,
+  voice: { chord: "organ", lead: "bell" }, vel: { chord: 0.03, lead: 0.055 },
+}));
+
+// ====================== LOBBY SONGS ======================
+
+// ---- "Still Water" — the original calm A-minor piece, now full length.
+const SW = { A: [CH.Amin, CH.Fmaj, CH.Cmaj, CH.Gmaj], B: [CH.Amin, CH.Dmin, CH.Fmaj, CH.Gmaj],
+             C: [CH.Fmaj, CH.Cmaj, CH.Gmaj, CH.Amin], D: [CH.Dmin, CH.Amin, CH.Fmaj, CH.Gmaj] };
+const sw1 = [N.A4,0,0,0,N.C5,0,N.E5,0,  N.F4,0,0,0,N.A4,0,N.C5,0,  N.G4,0,0,0,N.E4,0,N.G4,0,  N.D5,0,0,0,N.B4,0,N.G4,0];
+const sw2 = [N.E5,0,0,0,N.C5,0,N.A4,0,  N.D5,0,0,0,N.F4,0,N.A4,0,  N.C5,0,0,0,N.A4,0,N.F4,0,  N.B4,0,0,0,N.D5,0,0,0];
+const sw3 = [N.A4,0,N.C5,0,N.F5,0,0,0,  N.E5,0,0,0,N.C5,0,N.G4,0,  N.D5,0,N.B4,0,N.G4,0,N.B4,0,  N.A4,0,0,0,N.E4,0,0,0];
+const sw4 = [N.D5,0,0,0,N.A4,0,0,0,  N.C5,0,0,0,N.E4,0,0,0,  N.F4,0,0,0,N.A4,0,0,0,  N.G4,0,0,0,0,0,0,0];
+const sw5 = [N.E4,0,0,0,N.A4,0,0,0,  N.C5,0,0,0,N.A4,0,0,0,  N.G4,0,0,0,N.E4,0,0,0,  N.A4,0,0,0,0,0,0,0];
+const songStillWater = [
+  { prog: SW.A, mel: null, section: "intro" },
+  { prog: SW.A, mel: sw1,  section: "verse" },
+  { prog: SW.B, mel: sw2,  section: "verse2" },
+  { prog: SW.C, mel: sw3,  section: "lift" },
+  { prog: SW.A, mel: sw1,  section: "verse3" },
+  { prog: SW.D, mel: sw4,  section: "bridge" },
+  { prog: SW.B, mel: sw2,  section: "verse4" },
+  { prog: SW.C, mel: sw3,  section: "lift2" },
+  { prog: SW.A, mel: sw5,  section: "outro" },
+].map((s) => sect({
+  ...s, song: "stillwater", bpm: 84, style: "flow", drums: "swell", sus: 3.8,
+  vel: { chord: 0.035, lead: 0.075, arp: 0.04 },
+}));
+
+// ---- "Quiet Hours" — G major, BELLS over electric piano with a plucked
+// counter-line. Same instruments already used elsewhere, new colour.
+const QH = { A: [CH.Gmaj, CH.Emin, CH.Cmaj, CH.Dmaj], B: [CH.Emin, CH.Cmaj, CH.Gmaj, CH.Dmaj],
+             C: [CH.Cmaj, CH.Dmaj, CH.Emin, CH.Emin], D: [CH.Cmaj, CH.Gmaj, CH.Amin, CH.Dmaj] };
+const qh1 = [N.D5,0,0,0,N.B4,0,0,0,  N.E5,0,0,0,N.B4,0,0,0,  N.C5,0,0,0,N.E5,0,0,0,  N.D5,0,0,0,N.Fs5,0,0,0];
+const qh2 = [N.B4,0,0,0,N.G4,0,0,0,  N.C5,0,0,0,N.G4,0,0,0,  N.B4,0,0,0,N.D5,0,0,0,  N.A4,0,0,0,N.Fs4,0,0,0];
+const qh3 = [N.G4,0,0,0,N.C5,0,0,0,  N.A4,0,0,0,N.D5,0,0,0,  N.G5,0,0,0,N.E5,0,0,0,  N.B4,0,0,0,0,0,0,0];
+const qh4 = [N.E5,0,0,0,N.D5,0,0,0,  N.B4,0,0,0,N.G4,0,0,0,  N.A4,0,0,0,N.C5,0,0,0,  N.D5,0,0,0,0,0,0,0];
+const qh5 = [N.G4,0,0,0,N.B4,0,0,0,  N.D5,0,0,0,N.B4,0,0,0,  N.G4,0,0,0,0,0,0,0,  N.G4,0,0,0,0,0,0,0];
+const songQuietHours = [
+  { prog: QH.A, mel: null, section: "intro" },
+  { prog: QH.A, mel: qh1,  section: "verse" },
+  { prog: QH.B, mel: qh2,  section: "verse2" },
+  { prog: QH.C, mel: qh3,  section: "lift" },
+  { prog: QH.D, mel: qh4,  section: "turn" },
+  { prog: QH.A, mel: qh1,  section: "verse3" },
+  { prog: QH.B, mel: qh2,  section: "verse4" },
+  { prog: QH.A, mel: qh5,  section: "outro" },
+].map((s) => sect({
+  ...s, song: "quiethours", bpm: 80, style: "flow", drums: "swell", sus: 3.8,
+  voice: { chord: "keys", lead: "bell", arp: "pluck" },
+  vel: { chord: 0.035, lead: 0.055, arp: 0.04 },
+}));
+
+// ---- "Long Watch" — D minor, FLUTE over ORGAN pads. Slow and patient.
+const LW = { A: [CH.Dmin, CH.Bbmaj, CH.Fmaj, CH.Cmaj], B: [CH.Dmin, CH.Gmin, CH.Bbmaj, CH.Amaj],
+             C: [CH.Fmaj, CH.Cmaj, CH.Dmin, CH.Bbmaj], D: [CH.Gmin, CH.Amaj, CH.Dmin, CH.Dmin] };
+const lw1 = [N.D5,0,0,0,0,0,N.A4,0,  N.F4,0,0,0,0,0,N.D5,0,  N.C5,0,0,0,0,0,N.A4,0,  N.G4,0,0,0,0,0,N.E4,0];
+const lw2 = [N.F4,0,0,0,N.A4,0,0,0,  N.Bb4,0,0,0,0,0,N.G4,0,  N.D5,0,0,0,0,0,N.F5,0,  N.E5,0,0,0,N.Cs5,0,0,0];
+const lw3 = [N.A4,0,0,0,N.C5,0,0,0,  N.G4,0,0,0,N.E4,0,0,0,  N.D5,0,0,0,N.F5,0,0,0,  N.D5,0,0,0,0,0,0,0];
+const lw4 = [N.Bb4,0,0,0,N.D5,0,0,0,  N.Cs5,0,0,0,N.E5,0,0,0,  N.A4,0,0,0,N.F4,0,0,0,  N.D5,0,0,0,0,0,0,0];
+const lw5 = [N.A4,0,0,0,0,0,0,0,  N.F4,0,0,0,0,0,0,0,  N.D5,0,0,0,0,0,0,0,  N.D5,0,0,0,0,0,0,0];
+const songLongWatch = [
+  { prog: LW.A, mel: null, section: "intro" },
+  { prog: LW.A, mel: lw1,  section: "verse" },
+  { prog: LW.B, mel: lw2,  section: "turn" },
+  { prog: LW.C, mel: lw3,  section: "verse2" },
+  { prog: LW.D, mel: lw4,  section: "lift" },
+  { prog: LW.A, mel: lw1,  section: "verse3" },
+  { prog: LW.C, mel: lw3,  section: "descent" },
+  { prog: LW.A, mel: lw5,  section: "outro" },
+].map((s) => sect({
+  ...s, song: "longwatch", bpm: 72, style: "pad", drums: "none", sus: 7.5,
+  voice: { chord: "organ", lead: "flute" }, vel: { chord: 0.03, lead: 0.07 },
+}));
+
+// ====================== IN-ROUND SONGS ======================
+// Same instruments as always in a round: electric piano, warm bass and
+// the plucked counter-line. Eight-bar sections.
+
+// ---- "Iron Heart" — A minor, i–VI–III–VII.
+const IH = {
+  A: [CH.Amin, CH.Amin, CH.Fmaj, CH.Fmaj, CH.Cmaj, CH.Cmaj, CH.Gmaj, CH.Gmaj],
+  B: [CH.Amin, CH.Fmaj, CH.Cmaj, CH.Gmaj, CH.Amin, CH.Fmaj, CH.Gmaj, CH.Gmaj],
+  C: [CH.Dmin, CH.Dmin, CH.Amin, CH.Amin, CH.Fmaj, CH.Fmaj, CH.Gmaj, CH.Gmaj],
+};
+const ih1 = [N.A4,0,0,N.C5,0,0,N.E5,0,  N.D5,0,N.C5,0,0,0,N.A4,0,  N.F4,0,0,N.A4,0,0,N.C5,0,  N.A4,0,0,0,N.F4,0,0,0];
+const ih2 = [N.G4,0,0,N.C5,0,0,N.E5,0,  N.D5,0,N.C5,0,0,0,N.G4,0,  N.B4,0,0,N.D5,0,0,N.G5,0,  N.D5,0,0,0,N.B4,0,0,0];
+const ih3 = [N.E5,0,N.D5,0,N.C5,0,N.A4,0,  N.C5,0,N.A4,0,N.F4,0,N.A4,0,  N.G4,0,N.E4,0,N.C5,0,N.E5,0,  N.D5,0,N.B4,0,N.G4,0,N.B4,0];
+const ih4 = [N.A4,0,N.C5,0,N.E5,0,N.A5,0,  N.G5,0,N.E5,0,N.C5,0,N.A4,0,  N.B4,0,N.D5,0,N.G5,0,N.D5,0,  N.G4,0,0,0,0,0,0,0];
+const ih5 = [N.D5,0,0,N.F5,0,0,N.A5,0,  N.F5,0,N.D5,0,0,0,N.A4,0,  N.C5,0,0,N.E5,0,0,N.A5,0,  N.E5,0,N.C5,0,0,0,N.A4,0];
+const ih6 = [N.F4,0,0,N.A4,0,0,N.C5,0,  N.A4,0,N.F4,0,0,0,N.C5,0,  N.B4,0,0,N.D5,0,0,N.G5,0,  N.D5,0,0,0,N.B4,0,0,0];
+const songIronHeart = [
+  { prog: IH.A, mel: seq(ih1, ih2), drums: "full",  section: "a" },
+  { prog: IH.B, mel: seq(ih3, ih4), drums: "full",  section: "b" },
+  { prog: IH.A, mel: seq(ih1, ih2), drums: "light", section: "a2" },
+  { prog: IH.C, mel: seq(ih5, ih6), drums: "full",  section: "c" },
+  { prog: IH.B, mel: seq(ih3, ih4), drums: "full",  section: "b2" },
+  { prog: IH.A, mel: seq(ih1, ih2), drums: "full",  section: "a3" },
+  { prog: IH.C, mel: seq(ih5, ih6), drums: "full",  section: "outro" },
+].map((s) => sect({ ...s, song: "ironheart", bpm: 128, style: "drive", sus: 2.8 }));
+
+// ---- "Frontline" — E minor, faster and more frantic.
+const FR = {
+  A: [CH.Emin, CH.Emin, CH.Cmaj, CH.Cmaj, CH.Gmaj, CH.Gmaj, CH.Dmaj, CH.Dmaj],
+  B: [CH.Emin, CH.Cmaj, CH.Gmaj, CH.Dmaj, CH.Emin, CH.Cmaj, CH.Dmaj, CH.Dmaj],
+  C: [CH.Amin, CH.Amin, CH.Emin, CH.Emin, CH.Cmaj, CH.Cmaj, CH.Bmin, CH.Bmin],
+};
+const fr1 = [N.B4,0,0,N.E5,0,0,N.G5,0,  N.Fs5,0,N.E5,0,0,0,N.B4,0,  N.C5,0,0,N.E5,0,0,N.G5,0,  N.E5,0,0,0,N.C5,0,0,0];
+const fr2 = [N.G4,0,0,N.B4,0,0,N.D5,0,  N.B4,0,N.G4,0,0,0,N.D5,0,  N.A4,0,0,N.D5,0,0,N.Fs5,0,  N.D5,0,0,0,N.A4,0,0,0];
+const fr3 = [N.E5,0,N.Fs5,0,N.G5,0,N.B5,0,  N.A5,0,N.G5,0,N.E5,0,N.D5,0,  N.C5,0,N.E5,0,N.G5,0,N.E5,0,  N.B4,0,N.D5,0,N.Fs5,0,N.A4,0];
+const fr4 = [N.E5,0,0,0,N.B4,0,0,0,  N.G4,0,N.B4,0,N.E5,0,N.B4,0,  N.Fs5,0,0,0,N.D5,0,0,0,  N.A4,0,0,0,0,0,0,0];
+const fr5 = [N.A4,0,0,N.C5,0,0,N.E5,0,  N.C5,0,N.A4,0,0,0,N.E4,0,  N.B4,0,0,N.E5,0,0,N.G5,0,  N.E5,0,N.B4,0,0,0,N.G4,0];
+const fr6 = [N.C5,0,0,N.E5,0,0,N.G5,0,  N.E5,0,N.C5,0,0,0,N.G4,0,  N.Fs5,0,0,N.D5,0,0,N.B4,0,  N.Fs4,0,0,0,N.B4,0,0,0];
+const songFrontline = [
+  { prog: FR.A, mel: seq(fr1, fr2), drums: "full",  section: "a" },
+  { prog: FR.B, mel: seq(fr3, fr4), drums: "full",  section: "b" },
+  { prog: FR.A, mel: seq(fr1, fr2), drums: "light", section: "a2" },
+  { prog: FR.C, mel: seq(fr5, fr6), drums: "full",  section: "c" },
+  { prog: FR.B, mel: seq(fr3, fr4), drums: "full",  section: "b2" },
+  { prog: FR.A, mel: seq(fr1, fr2), drums: "full",  section: "a3" },
+  { prog: FR.C, mel: seq(fr5, fr6), drums: "full",  section: "outro" },
+].map((s) => sect({ ...s, song: "frontline", bpm: 140, style: "drive", sus: 2.8 }));
+
+// ---- "Stalker" — D minor, a slower stalking menace.
+const ST = {
+  A: [CH.Dmin, CH.Dmin, CH.Bbmaj, CH.Bbmaj, CH.Gmin, CH.Gmin, CH.Amaj, CH.Amaj],
+  B: [CH.Dmin, CH.Bbmaj, CH.Fmaj, CH.Cmaj, CH.Dmin, CH.Gmin, CH.Amaj, CH.Amaj],
+  C: [CH.Fmaj, CH.Fmaj, CH.Cmaj, CH.Cmaj, CH.Dmin, CH.Dmin, CH.Amaj, CH.Amaj],
+};
+const st1 = [N.D5,0,0,N.F5,0,0,N.A5,0,  N.F5,0,N.D5,0,0,0,N.A4,0,  N.D5,0,0,N.F5,0,0,N.Bb4,0,  N.D5,0,0,0,N.Bb4,0,0,0];
+const st2 = [N.G4,0,0,N.Bb4,0,0,N.D5,0,  N.Bb4,0,N.G4,0,0,0,N.D5,0,  N.Cs5,0,0,N.E5,0,0,N.A4,0,  N.Cs5,0,0,0,N.A4,0,0,0];
+const st3 = [N.A4,0,0,N.D5,0,0,N.F5,0,  N.E5,0,N.D5,0,0,0,N.A4,0,  N.C5,0,0,N.F5,0,0,N.A5,0,  N.G5,0,N.F5,0,0,0,N.C5,0];
+const st4 = [N.D5,0,0,N.A4,0,0,N.F4,0,  N.Bb4,0,N.D5,0,0,0,N.G4,0,  N.Cs5,0,0,N.A4,0,0,N.E5,0,  N.A4,0,0,0,0,0,0,0];
+const st5 = [N.C5,0,0,N.A4,0,0,N.F4,0,  N.A4,0,N.C5,0,0,0,N.F5,0,  N.E5,0,0,N.C5,0,0,N.G4,0,  N.C5,0,0,0,N.E5,0,0,0];
+const st6 = [N.F4,0,0,N.A4,0,0,N.D5,0,  N.A4,0,N.F4,0,0,0,N.D5,0,  N.Cs5,0,0,N.E5,0,0,N.A5,0,  N.E5,0,0,0,N.Cs5,0,0,0];
+const songStalker = [
+  { prog: ST.A, mel: seq(st1, st2), drums: "light", section: "a" },
+  { prog: ST.B, mel: seq(st3, st4), drums: "full",  section: "b" },
+  { prog: ST.A, mel: seq(st1, st2), drums: "light", section: "a2" },
+  { prog: ST.C, mel: seq(st5, st6), drums: "full",  section: "c" },
+  { prog: ST.B, mel: seq(st3, st4), drums: "full",  section: "b2" },
+  { prog: ST.A, mel: seq(st1, st2), drums: "light", section: "outro" },
+].map((s) => sect({ ...s, song: "stalker", bpm: 118, style: "drive", sus: 2.8 }));
+
 const TRACKS = {
-  // TITLE / menus — THREE separate songs in three different styles. Each
-  // one plays its sections through in order, then the menu moves to a
-  // different song, so the front end never sounds like one loop on
-  // repeat. `song` groups a song's sections together.
-  title: [
-    // ——— Song 1: "First Light" — warm C-major electric-piano song ———
-    { song: "firstlight", bpm: 92, drums: "swell", section: "intro",
-      chords: [C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0, C.Amin,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0],
-      bass:   [65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 110,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0],
-      mel:    [0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,329.63,392] },
-    { song: "firstlight", bpm: 92, drums: "light", section: "verse",
-      chords: [C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Gmaj,0,0,0,C.Gmaj,0,0,0, C.Amin,0,0,0,C.Amin,0,0,0, C.Fmaj,0,0,0,C.Fmaj,0,0,0],
-      bass:   [65.41,0,0,0,98,0,0,0, 98,0,0,0,146.83,0,0,0, 110,0,0,0,164.81,0,0,0, 87.31,0,0,0,130.81,0,0,0],
-      mel:    [329.63,0,392,0,0,0,523.25,0, 493.88,0,0,0,440,0,392,0, 329.63,0,0,0,392,0,440,0, 392,0,0,0,349.23,0,329.63,0] },
-    { song: "firstlight", bpm: 92, drums: "full", section: "chorus",
-      chords: [C.Amin,0,0,0,C.Amin,0,0,0, C.Fmaj,0,0,0,C.Fmaj,0,0,0, C.Cmaj,0,0,0,C.Cmaj,0,0,0, C.Gmaj,0,0,0,C.Gmaj,0,0,0],
-      bass:   [110,0,0,0,164.81,0,0,0, 87.31,0,0,0,130.81,0,0,0, 65.41,0,0,0,98,0,0,0, 98,0,0,0,146.83,0,0,0],
-      mel:    [440,0,523.25,0,659.25,0,587.33,523.25, 523.25,0,440,0,349.23,0,440,523.25, 392,0,523.25,0,659.25,0,587.33,0, 587.33,0,493.88,0,392,0,493.88,587.33],
-      arp:    [220,329.63,440,329.63,261.63,329.63,440,329.63, 174.61,261.63,349.23,261.63,220,261.63,349.23,261.63, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,392,293.66,246.94,293.66,392,293.66] },
-    { song: "firstlight", bpm: 92, drums: "swell", section: "outro",
-      chords: [C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
-      bass:   [65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
-      mel:    [392,0,0,0,329.63,0,0,0, 293.66,0,0,0,246.94,0,0,0, 261.63,0,0,0,220,0,0,0, 261.63,0,0,0,0,0,0,0] },
-
-    // ——— Song 2: "Moonlit Waltz" — a 3/4 folk waltz. Nylon-string
-    // GUITAR strums on beats 2 and 3 over a walking root, a FLUTE
-    // carrying the tune, brushes instead of sticks. 6 steps to the bar
-    // (3 beats × 2), which is what makes it lilt instead of march. ———
-    { song: "waltz", bpm: 150, meter: 6, drums: "waltz", section: "verse",
-      voice: { chord: "guitar", lead: "flute", arp: "guitar" },
-      vel:   { chord: 0.055, lead: 0.075, arp: 0.035 },
-      chords: [0,0,C.Dmin,0,C.Dmin,0,  0,0,C.Bbmaj,0,C.Bbmaj,0,  0,0,C.Fmaj,0,C.Fmaj,0,  0,0,C.Cmaj,0,C.Cmaj,0],
-      bass:   [73.42,0,0,0,0,0,  116.54,0,0,0,0,0,  87.31,0,0,0,0,0,  130.81,0,0,0,0,0],
-      mel:    [440,0,587.33,0,523.25,0,  466.16,0,440,0,349.23,0,  349.23,0,440,0,523.25,0,  392,0,329.63,0,0,0],
-      arp:    [0,293.66,0,349.23,0,440,  0,233.08,0,349.23,0,466.16,  0,261.63,0,349.23,0,440,  0,261.63,0,329.63,0,392] },
-    { song: "waltz", bpm: 150, meter: 6, drums: "waltz", section: "turn",
-      voice: { chord: "guitar", lead: "flute", arp: "guitar" },
-      vel:   { chord: 0.055, lead: 0.075, arp: 0.035 },
-      chords: [0,0,C.Gmin,0,C.Gmin,0,  0,0,C.Cmaj,0,C.Cmaj,0,  0,0,C.Fmaj,0,C.Fmaj,0,  0,0,C.Amaj,0,C.Amaj,0],
-      bass:   [98,0,0,0,0,0,  130.81,0,0,0,0,0,  87.31,0,0,0,0,0,  110,0,0,0,0,0],
-      mel:    [466.16,0,392,0,349.23,0,  392,0,523.25,0,392,0,  349.23,0,523.25,0,466.16,0,  440,0,554.37,0,440,0],
-      arp:    [0,293.66,0,392,0,466.16,  0,261.63,0,329.63,0,392,  0,261.63,0,349.23,0,440,  0,277.18,0,329.63,0,440] },
-
-    // ——— Song 3: "Sunrise Hymn" — a slow, drumless chorale in F major.
-    // Drawbar ORGAN holds the pads, BELLS carry the melody. Nothing but
-    // sustain and space, which is about as far from the other two as the
-    // front end can get. ———
-    { song: "hymn", bpm: 76, drums: "none", section: "verse",
-      voice: { chord: "organ", lead: "bell" },
-      vel:   { chord: 0.03, lead: 0.055 },
-      sus: 7.5,
-      chords: [C.Fmaj,0,0,0,0,0,0,0, C.Bbmaj,0,0,0,0,0,0,0, C.Dmin,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
-      bass:   [87.31,0,0,0,0,0,0,0, 116.54,0,0,0,0,0,0,0, 73.42,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
-      mel:    [349.23,0,0,0,440,0,0,0, 466.16,0,0,0,440,0,0,0, 349.23,0,0,0,587.33,0,0,0, 523.25,0,0,0,0,0,0,0] },
-    { song: "hymn", bpm: 76, drums: "swell", section: "rise",
-      voice: { chord: "organ", lead: "bell" },
-      vel:   { chord: 0.034, lead: 0.06 },
-      sus: 7.5,
-      chords: [C.Bbmaj,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Gmin,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0],
-      bass:   [116.54,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0],
-      mel:    [587.33,0,0,0,523.25,0,0,0, 440,0,0,0,349.23,0,0,0, 466.16,0,0,0,392,0,0,0, 523.25,0,0,0,349.23,0,0,0] },
-  ],
-  // LOBBY — calm anticipation: broken-chord electric piano over a slow
-  // Am–F–C–G, soft heartbeat underneath.
-  lobby: [
-    { bpm: 84, drums: "swell",
-      chords: [C.Amin,0,0,0,0,0,0,0, C.Fmaj,0,0,0,0,0,0,0, C.Cmaj,0,0,0,0,0,0,0, C.Gmaj,0,0,0,0,0,0,0],
-      bass:   [110,0,0,0,0,0,0,0, 87.31,0,0,0,0,0,0,0, 65.41,0,0,0,0,0,0,0, 98,0,0,0,0,0,0,0],
-      mel:    [220,0,261.63,0,329.63,0,440,0, 220,0,261.63,0,349.23,0,440,0, 196,0,261.63,0,329.63,0,392,0, 196,0,246.94,0,293.66,0,392,0] },
-  ],
-  // GAME — driving combat, but still real music: minor progressions, a
-  // bass groove, electric-piano stabs, a plucked counter-line, full kit.
-  game: [
-    { bpm: 128, drums: "full", // A minor: i–VI–III–VII
-      chords: [C.Amin,0,0,C.Amin,0,0,0,0, C.Fmaj,0,0,C.Fmaj,0,0,0,0, C.Cmaj,0,0,C.Cmaj,0,0,0,0, C.Gmaj,0,0,C.Gmaj,0,0,0,0],
-      bass:   [110,0,110,110,0,110,0,110, 87.31,0,87.31,87.31,0,87.31,0,87.31, 65.41,0,65.41,65.41,0,65.41,0,98, 98,0,98,98,0,98,0,98],
-      mel:    [440,0,0,523.25,0,493.88,0,440, 523.25,0,440,0,0,349.23,0,392, 659.25,0,0,587.33,0,523.25,0,392, 587.33,0,493.88,0,0,392,0,0],
-      arp:    [220,329.63,440,329.63,261.63,329.63,440,329.63, 174.61,261.63,349.23,261.63,220,261.63,349.23,261.63, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,392,293.66,246.94,293.66,392,293.66] },
-    { bpm: 140, drums: "full", // E minor: i–VI–III–VII, frantic
-      chords: [C.Emin,0,0,C.Emin,0,0,0,0, C.Cmaj,0,0,C.Cmaj,0,0,0,0, C.Gmaj,0,0,C.Gmaj,0,0,0,0, C.Dmaj,0,0,C.Dmaj,0,0,0,0],
-      bass:   [82.41,0,82.41,82.41,0,82.41,0,82.41, 65.41,0,65.41,65.41,0,65.41,0,65.41, 98,0,98,98,0,98,0,98, 73.42,0,73.42,73.42,0,73.42,0,73.42],
-      mel:    [493.88,0,659.25,0,587.33,0,493.88,0, 523.25,0,392,0,329.63,0,392,0, 587.33,0,493.88,0,392,0,493.88,0, 440,0,587.33,0,369.99,0,440,0],
-      arp:    [329.63,493.88,392,493.88,329.63,392,493.88,392, 261.63,392,329.63,392,261.63,329.63,392,329.63, 196,293.66,246.94,293.66,196,246.94,293.66,246.94, 293.66,440,369.99,440,293.66,369.99,440,369.99] },
-    { bpm: 118, drums: "light", // D minor: stalking menace i–VI–iv–V
-      chords: [C.Dmin,0,0,0,0,0,0,0, C.Bbmaj,0,0,0,0,0,0,0, C.Gmin,0,0,0,0,0,0,0, C.Amaj,0,0,0,0,0,0,0],
-      bass:   [73.42,0,0,0,73.42,0,0,0, 116.54,0,0,0,116.54,0,0,0, 98,0,0,0,98,0,0,0, 110,0,0,0,110,0,0,0],
-      mel:    [440,0,0,0,349.23,0,440,0, 587.33,0,0,0,466.16,0,0,0, 392,0,0,0,466.16,0,587.33,0, 554.37,0,0,0,440,0,0,0],
-      arp:    [220,0,293.66,0,349.23,0,293.66,0, 233.08,0,293.66,0,349.23,0,293.66,0, 196,0,233.08,0,293.66,0,233.08,0, 220,0,277.18,0,329.63,0,277.18,0] },
-  ],
+  title: [...songFirstLight, ...songWaltz, ...songHymn],
+  lobby: [...songStillWater, ...songQuietHours, ...songLongWatch],
+  game:  [...songIronHeart, ...songFrontline, ...songStalker],
 };
 
 // --- instrument voices (all routed to music.gain) ---
@@ -922,6 +1483,11 @@ function drumTom(when, freq = 150, v = 1) {
   o.start(when); o.stop(when + 0.18);
 }
 
+// Weight of each eighth in a 4/4 bar. Beat one hardest, beat three next,
+// the "ands" lightest — an even velocity across a bar is the giveaway
+// that nobody is holding the sticks.
+const ACCENT = [1, 0.6, 0.82, 0.66, 0.94, 0.6, 0.82, 0.7];
+
 function scheduleStep(step, when) {
   const tr = TRACKS[music.mode][music.trackIdx];
   const STEP = 60 / tr.bpm / 2;
@@ -930,6 +1496,12 @@ function scheduleStep(step, when) {
   // change metre without touching the scheduler.
   const meter = tr.meter ?? 8;
   const pos = step % meter;
+  // Where we are in the SECTION, not just the bar — so a kit can put a
+  // fill in the last bar and a figure can know it's the turnaround.
+  const total = tr.bass ? tr.bass.length : 0;
+  const bar = Math.floor(step / meter);
+  const fill = total > meter && step >= total - meter;
+  const dv = tr.drumV ?? 1;                        // per-section kit level
   // Which instrument plays what, and how hard. Defaults reproduce the
   // original electric-piano trio exactly, so older tracks are untouched.
   const V = tr.voice ?? {};
@@ -945,15 +1517,33 @@ function scheduleStep(step, when) {
     const v = vel.chord ?? 0.04;
     for (const n of ch) if (n) playVoice(chordVoice, when, n, dur, v);
   }
-  // Melody — the line that sings.
+  // Melody — the line that sings. If the track supplied `melDur` (see
+  // `phrase()`), every note lasts until the next one instead of a flat
+  // 3.4 steps: quick runs come out crisp, held notes actually hold.
   const m = tr.mel ? tr.mel[step % tr.mel.length] : 0;
-  if (m) playVoice(leadVoice, when, m, STEP * (tr.lead ?? 3.4), vel.lead ?? 0.1);
+  if (m) {
+    const d = tr.melDur ? tr.melDur[step % tr.melDur.length] : (tr.lead ?? 3.4);
+    playVoice(leadVoice, when, m, STEP * d, vel.lead ?? 0.1);
+  }
+  // A SECOND melodic line — counter-melody, harmony, or a doubling in a
+  // different timbre. Only tracks that define `mel2` have one, so every
+  // existing song is untouched.
+  const m2 = tr.mel2 ? tr.mel2[step % tr.mel2.length] : 0;
+  if (m2) {
+    const d = tr.mel2Dur ? tr.mel2Dur[step % tr.mel2Dur.length] : (tr.lead ?? 3.4);
+    playVoice(V.lead2 ?? leadVoice, when, m2, STEP * d, vel.lead2 ?? 0.05);
+  }
   // Bass — warm and round.
   const b = tr.bass ? tr.bass[step % tr.bass.length] : 0;
-  if (b) mBass(when, b, STEP * 1.5, vel.bass ?? 0.2);
-  // Counter-line.
+  if (b) mBass(when, b, STEP * (tr.bassDur ?? 1.5), vel.bass ?? 0.2);
+  // Counter-line. `groove` leans on the strong eighths and eases off the
+  // weak ones, which is the difference between a part being played and a
+  // part being clocked out.
   const a = tr.arp ? tr.arp[step % tr.arp.length] : 0;
-  if (a) playVoice(arpVoice, when, a, STEP * 0.95, vel.arp ?? 0.048);
+  if (a) {
+    const av = (vel.arp ?? 0.048) * (tr.groove ? ACCENT[pos % 8] : 1);
+    playVoice(arpVoice, when, a, STEP * (tr.arpDur ?? 0.95), av);
+  }
 
   // Drums.
   const kit = tr.drums ?? "none";
@@ -979,6 +1569,36 @@ function scheduleStep(step, when) {
     if (pos === 2 || pos === 6) drumSnare(when, 0.85);
     if (pos === 3 || pos === 7) drumSnare(when, 0.3);   // ghost roll
     if (pos === 7) drumTom(when, 165, 0.7);              // pickup
+  } else if (kit === "brush") {
+    // Title-theme kit. A soft kick, wire brushes on the backbeat, hats
+    // whispering the offbeats, and a push on the "&" of three every
+    // second bar so it breathes instead of marching.
+    if (pos === 0) drumKick(when, 0.7 * dv);
+    if (pos === 5 && bar % 2 === 1) drumKick(when, 0.42 * dv);
+    if (pos === 2) drumBrush(when, 0.6 * dv);
+    if (pos === 6) drumBrush(when, 0.9 * dv);
+    if (pos % 2 === 1) drumHat(when, false, 0.3 * dv);
+    if (fill && pos >= 5) drumTom(when, 190 - (pos - 5) * 28, 0.5 * dv);
+  } else if (kit === "push") {
+    // 3 + 3 + 2 — the bar leans forward, which is what a pre-chorus is
+    // for. The last bar hands over with a tom roll.
+    if (pos === 0 || pos === 3 || pos === 6) drumKick(when, (pos === 0 ? 0.95 : 0.66) * dv);
+    if (pos === 2 || pos === 6) drumSnare(when, 0.7 * dv);
+    if (pos % 2 === 1) drumHat(when, pos === 7, 0.5 * dv);
+    if (fill && pos >= 4) drumTom(when, 210 - (pos - 4) * 24, 0.65 * dv);
+  } else if (kit === "anthem") {
+    // The chorus kit: everything the full kit does, plus an open hat to
+    // open the section, a kick anticipating the bar line every second
+    // bar, and a proper fill on the way out.
+    if (step === 0) drumHat(when, true, 1.2 * dv);
+    if (pos === 0 || pos === 4) drumKick(when, dv);
+    if (pos === 7 && bar % 2 === 1) drumKick(when, 0.6 * dv);
+    if (pos === 2 || pos === 6) drumSnare(when, 0.92 * dv);
+    drumHat(when, pos === 7, (pos % 2 === 0 ? 0.95 : 0.6) * dv);
+    if (fill) {
+      if (pos === 4 || pos === 6) drumTom(when, pos === 4 ? 200 : 160, 0.8 * dv);
+      if (pos === 5 || pos === 7) drumSnare(when, 0.55 * dv);
+    }
   } else if (kit === "shuffle") {
     // Swung: the offbeat lands late (on the third 16th), which is the
     // whole feel. Approximated by putting the hat on 1 and 3 of each
@@ -989,12 +1609,11 @@ function scheduleStep(step, when) {
   }
 }
 
-// Where a mode begins. In-game picks any track; the menus pick a random
-// SONG and start at its first section (never mid-arrangement).
+// Where a mode begins: a random SONG, started at its first section so a
+// song is never joined halfway through its arrangement.
 function startIdx(mode) {
   const pool = TRACKS[mode] ?? [];
   if (!pool.length) return 0;
-  if (mode !== "title") return Math.floor(Math.random() * pool.length);
   const songs = [...new Set(pool.map((t) => t.song ?? 0))];
   const pick = songs[Math.floor(Math.random() * songs.length)];
   const i = pool.findIndex((t) => (t.song ?? 0) === pick);
@@ -1060,15 +1679,16 @@ export function startMusic(mode = "game") {
           music.step = 0;
           music.loops += 1;
           const pool = TRACKS[music.mode];
-          if (music.mode === "title") {
-            // Menus hold several SONGS, each split into sections. Walk
-            // the current song's sections in order; when it ends, move
-            // to a DIFFERENT song and start it from the top — a real
-            // arrangement followed by a real change of tune.
+          // EVERY mode now holds several SONGS, each split into sections.
+          // Walk the current song's sections in order; when the last one
+          // finishes, move to a DIFFERENT song and start it from the top.
+          // A song therefore plays as a whole arrangement — intro through
+          // outro — instead of one bar looping until you leave the screen.
+          {
             const cur = pool[music.trackIdx] ?? {};
             const nextIdx = music.trackIdx + 1;
             if (nextIdx < pool.length && (pool[nextIdx].song ?? 0) === (cur.song ?? 0)) {
-              music.trackIdx = nextIdx;
+              music.trackIdx = nextIdx;          // next section, same song
             } else {
               const songs = [...new Set(pool.map((t) => t.song ?? 0))];
               let pick = cur.song ?? 0;
@@ -1078,12 +1698,7 @@ export function startMusic(mode = "game") {
               const i = pool.findIndex((t) => (t.song ?? 0) === pick);
               music.trackIdx = i < 0 ? 0 : i;
             }
-          } else if (pool.length > 1 && music.loops >= 3) {
-            // In-game: shuffle to a DIFFERENT track every few loops.
             music.loops = 0;
-            let next = music.trackIdx;
-            while (next === music.trackIdx) next = Math.floor(Math.random() * pool.length);
-            music.trackIdx = next;
           }
         }
       }
