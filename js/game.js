@@ -455,12 +455,37 @@ export function onlineLobbyUpdate(lobby) {
     t.gone = false;
 
     if (p.dead && !t.dead) {
-      t.dead = true;
-      // The victim names its killer. If that's me, this is my kill —
-      // the only way my client learns about it, since damage is
-      // resolved on the victim's machine.
-      if (p.deadBy && S.myId && p.deadBy === S.myId) {
-        registerKill(S.myId, performance.now());
+      // A round REBUILDS every tank alive (dead:false). The per-player
+      // `dead` flag lives on the lobby node, and the controller clears it
+      // when it pushes the new round — but that clear and the round bump
+      // can reach us in EITHER order, and a snapshot from the instant
+      // before the clear still says dead:true. Applying it would kill the
+      // freshly spawned tank the moment the round starts and hand the
+      // other player an instant win (with the real reset only landing the
+      // round after). So only honour a `dead` flag that was raised DURING
+      // the current round — anything stamped before this round began is a
+      // leftover from the last one and is ignored.
+      const stamp = typeof p.deadAt === "number" ? p.deadAt : null;
+      let stale;
+      if (stamp != null) {
+        // Timestamped: stale iff it predates this round.
+        stale = stamp < (S.roundStartedAt ?? 0);
+      } else {
+        // No timestamp (an older client, or a flag that lost its stamp):
+        // treat a `dead` seen in the first moment of the round as a
+        // leftover, since a genuine kill can't happen that fast. After
+        // the opening grace window, honour it.
+        const sinceStart = (S.netClock ? S.netClock() : Date.now()) - (S.roundStartedAt ?? 0);
+        stale = sinceStart < 1500;
+      }
+      if (!stale) {
+        t.dead = true;
+        // The victim names its killer. If that's me, this is my kill —
+        // the only way my client learns about it, since damage is
+        // resolved on the victim's machine.
+        if (p.deadBy && S.myId && p.deadBy === S.myId) {
+          registerKill(S.myId, performance.now());
+        }
       }
     }
 
@@ -886,6 +911,14 @@ function startRound(seed) {
   }
 
   S.roundStartCount = S.tanks.filter((t) => !t.gone).length;
+  // When THIS round began, on our own clock. A `dead` flag on the lobby
+  // stamped before this is a leftover from the previous round (see the
+  // stale-dead guard in onlineLobbyUpdate).
+  S.roundStartedAt = S.netClock ? S.netClock() : Date.now();
+  // A fresh round is a clean slate for authoritative hits/deaths, so a
+  // re-delivered packet from last round can't apply now.
+  S.seenHits = {};
+  S.seenShots = {};
 }
 
 function refreshBotOwnership() {
@@ -3087,7 +3120,12 @@ function killTank(t) {
   addHitSparks(t.x, t.y, now);
   addHitSparks(t.x, t.y, now); // double shower — it's an explosion
   (S.mortarClouds ??= []).push({ x: t.x, y: t.y, born: now, seed: (Math.random() * 1e9) | 0 });
-  if (S.mode === "online" && t.local) S.sendDead?.(t.id, t.lastKillerId ?? null);
+  if (S.mode === "online" && t.local) {
+    // Stamp WHEN they died on the shared server clock, so peers can tell
+    // a real in-round death from a leftover flag when the next round
+    // starts (see the stale-dead guard in onlineLobbyUpdate).
+    S.sendDead?.(t.id, t.lastKillerId ?? null, S.netClock ? S.netClock() : Date.now());
+  }
 
   // If the tank that just died is the local human's, show a black
   // "Destroyed" message. It clears after 2 s (so they can spectate)

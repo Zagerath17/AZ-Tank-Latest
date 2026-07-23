@@ -797,6 +797,8 @@ function endMatchForAll() {
   const updates = { state: "waiting", round: null, gear: null };
   for (const [id] of entries) {
     updates[`players/${id}/dead`] = null;
+    updates[`players/${id}/deadBy`] = null;
+    updates[`players/${id}/deadAt`] = null;
     updates[`players/${id}/gun`] = null;
     updates[`players/${id}/shots`] = null;
     updates[`players/${id}/pos`] = null;
@@ -817,6 +819,8 @@ function returnToLobbySolo(entries) {
   const updates = { state: "waiting", round: null, gear: null };
   for (const [id] of entries) {
     updates[`players/${id}/dead`] = null;
+    updates[`players/${id}/deadBy`] = null;
+    updates[`players/${id}/deadAt`] = null;
     updates[`players/${id}/gun`] = null;
     updates[`players/${id}/shots`] = null;
     updates[`players/${id}/pos`] = null;
@@ -1085,9 +1089,12 @@ function beginOnlineGame(code, lobby) {
     // The victim names its killer so the KILLER's client can score the
     // streak — damage resolves on the victim's machine, so this is the
     // only way they'd ever learn about their own multi-kill.
-    sendDead: (id, byId) => {
+    sendDead: (id, byId, at) => {
       write(`players/${id}/dead`, true);
       if (byId) write(`players/${id}/deadBy`, byId);
+      // When the death happened (shared server clock). Lets peers ignore
+      // this flag once a later round has started.
+      write(`players/${id}/deadAt`, typeof at === "number" ? at : serverNow());
     },
     sendGear: (key, gear) => write(`gear/${key}`, gear),
     sendGearRemove: (key) => write(`gear/${key}`, null),
@@ -1105,6 +1112,8 @@ function beginOnlineGame(code, lobby) {
       const updates = { round: { n, seed }, gear: null };
       for (const pid of Object.keys(current.playersCache)) {
         updates[`players/${pid}/dead`] = null;
+        updates[`players/${pid}/deadBy`] = null;
+        updates[`players/${pid}/deadAt`] = null;
         updates[`players/${pid}/shots`] = null;
         updates[`players/${pid}/gun`] = null;
       }
