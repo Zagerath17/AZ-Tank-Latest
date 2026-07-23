@@ -41,11 +41,11 @@ const TANK_RAD = Math.hypot(TANK_HL, TANK_HW); // bounding radius (broadphase / 
 // the treads drawn on the tank itself (bands at ±R*0.62, R*0.42 across,
 // links every R*0.34), so what a tank leaves behind lines up with the
 // tracks on its own hull.
-const TRACK_LIFE = 6000;                 // ms a mark lasts before it's gone
+const TRACK_LIFE = 3000;                 // ms a mark lasts before it's gone
 const TRACK_STEP = TANK_R * 0.34;        // stamp spacing = the tank's tread-link pitch
-const TRACK_MAX = 2600;                  // hard cap, oldest dropped first (a full
+const TRACK_MAX = 1400;                  // hard cap, oldest dropped first (a full
                                          // 8-tank lobby driving flat out for the
-                                         // whole 6 s fits inside this)
+                                         // whole 3 s fits inside this)
 const TRACK_HALF = TANK_R * 0.62;        // tread centre, either side of the hull
 const TRACK_WIDTH = TANK_R * 0.42;       // how wide a tread sits on the ground
 const TRACK_CLEAT = TANK_R * 0.21;       // half a cleat bar, across the tread
@@ -1669,10 +1669,20 @@ function drawTracks(now) {
   const list = S.tracks;
   if (!list.length) return;
 
-  const BUCKETS = 10;
+  // Marks are grouped into this many opacity steps so the whole floor
+  // costs a fixed handful of strokes. 20 keeps every step under ~3/255
+  // levels, which is below what the eye can pick out — so the fade reads
+  // as continuous rather than stepping down in visible stages.
+  const BUCKETS = 20;
   const fadeOf = (k) => {
     const life = 1 - (now - k.born) / TRACK_LIFE;      // 1 fresh → 0 gone
-    return life <= 0 ? 0 : Math.min(1, life * 1.6);    // hold, then ease away
+    if (life <= 0) return 0;
+    if (life >= 1) return 1;
+    // Smoothstep. The previous curve held flat and then broke into a
+    // straight line, and that corner read as the fade "starting" all at
+    // once. This eases out of full strength and into nothing with no
+    // kink at either end, so a mark just quietly goes.
+    return life * life * (3 - 2 * life);
   };
   const bucketOf = (k) => {
     const b = Math.floor(fadeOf(k) * BUCKETS);
@@ -1701,7 +1711,7 @@ function drawTracks(now) {
       // there's nothing to double-blend and nothing to see.
       ctx.lineCap = "butt";
       ctx.lineJoin = "round";
-      ctx.strokeStyle = `rgba(0,0,0,${(0.39 * a).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(0,0,0,${(0.13 * a).toFixed(3)})`;
       ctx.lineWidth = bandW;
       for (let side = 0; side < 2; side++) {
         ctx.beginPath();
@@ -1718,7 +1728,7 @@ function drawTracks(now) {
       // The cleats that bit into it. These are isolated bars that never
       // touch each other, so they keep their rounded ends safely.
       ctx.lineCap = "round";
-      ctx.strokeStyle = `rgba(0,0,0,${(0.75 * a).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(0,0,0,${(0.25 * a).toFixed(3)})`;
       ctx.lineWidth = cleatW;
       ctx.beginPath();
       for (let k = i; k < j; k++) {
