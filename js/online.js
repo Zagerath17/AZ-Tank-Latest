@@ -799,6 +799,8 @@ function endMatchForAll() {
     updates[`players/${id}/dead`] = null;
     updates[`players/${id}/deadBy`] = null;
     updates[`players/${id}/deadAt`] = null;
+    updates[`players/${id}/outHits`] = null;
+    updates[`players/${id}/hits`] = null;
     updates[`players/${id}/gun`] = null;
     updates[`players/${id}/shots`] = null;
     updates[`players/${id}/pos`] = null;
@@ -821,6 +823,8 @@ function returnToLobbySolo(entries) {
     updates[`players/${id}/dead`] = null;
     updates[`players/${id}/deadBy`] = null;
     updates[`players/${id}/deadAt`] = null;
+    updates[`players/${id}/outHits`] = null;
+    updates[`players/${id}/hits`] = null;
     updates[`players/${id}/gun`] = null;
     updates[`players/${id}/shots`] = null;
     updates[`players/${id}/pos`] = null;
@@ -1115,6 +1119,11 @@ function beginOnlineGame(code, lobby) {
         updates[`players/${pid}/deadBy`] = null;
         updates[`players/${pid}/deadAt`] = null;
         updates[`players/${pid}/shots`] = null;
+        // Damage packets outlive a round (SHOT_TTL), so scrub them too —
+        // otherwise last round's hits are still on the wire when the new
+        // round spawns and can be replayed into a fresh tank.
+        updates[`players/${pid}/outHits`] = null;
+        updates[`players/${pid}/hits`] = null;
         updates[`players/${pid}/gun`] = null;
       }
       fb.update(current.lobbyRef, updates).catch(() => {});

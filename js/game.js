@@ -529,6 +529,8 @@ export function onlineLobbyUpdate(lobby) {
         for (const [key, sh] of Object.entries(p.shots)) {
           if (seen.has(key)) continue;
           seen.add(key);
+          // A shot from a round that's already over must not spawn now.
+          if (sh && sh.r != null && sh.r !== S.roundN) continue;
           spawnShot(t.id, sh);
         }
       }
@@ -557,6 +559,9 @@ export function onlineLobbyUpdate(lobby) {
         const victim = S.tanks.find((x) => x.id === h.to && x.local);
         if (!victim) continue; // addressed to someone else's machine
         seen.add(key);
+        // Damage from a round that's already finished must never land on
+        // this round's freshly spawned tank.
+        if (h.r != null && h.r !== S.roundN) continue;
         if (!victim.dead && !victim.gone) {
           victim.lastHitAt = performance.now();
           damageTank(victim, h.d ?? 1, h.by ?? t.id);
@@ -569,6 +574,7 @@ export function onlineLobbyUpdate(lobby) {
       for (const [key, h] of Object.entries(p.hits)) {
         if (mine.has(key)) continue;
         mine.add(key);
+        if (h.r != null && h.r !== S.roundN) continue; // stale round
         if (!t.dead && !t.gone) {
           t.lastHitAt = performance.now();
           damageTank(t, h.d ?? 1, h.by ?? null);
@@ -791,8 +797,19 @@ function startRound(seed) {
   S.mortarAims = [];
   S.beams = [];
   S.booms = [];
-  S.seenShots = {};
-  S.seenHits = {};
+  // NOTE: S.seenShots / S.seenHits are deliberately NOT cleared here.
+  //
+  // They remember which shot/hit packets have already been applied, keyed
+  // by a unique per-packet id. Those packets live on the wire for
+  // SHOT_TTL (7 s), but a round turns around in ROUND_PAUSE (2.6 s) plus
+  // the 3 s countdown — so when a new round starts, the PREVIOUS round's
+  // hits are still sitting in the lobby. Wiping the memory here made the
+  // client treat every one of them as brand new and replay all of last
+  // round's damage into the freshly spawned tank: it died the instant the
+  // round began and handed the other player the win. The round after
+  // that looked fine only because the packets had finally expired.
+  // The keys are unique, so remembering them across rounds is both
+  // correct and cheap.
   // Who owns the on-screen (touch) controls? There's only one pair of
   // sticks, so exactly one tank answers to them.
   //  • Local play → the first human seat (several people, one device).
@@ -915,10 +932,6 @@ function startRound(seed) {
   // stamped before this is a leftover from the previous round (see the
   // stale-dead guard in onlineLobbyUpdate).
   S.roundStartedAt = S.netClock ? S.netClock() : Date.now();
-  // A fresh round is a clean slate for authoritative hits/deaths, so a
-  // re-delivered packet from last round can't apply now.
-  S.seenHits = {};
-  S.seenShots = {};
 }
 
 function refreshBotOwnership() {
@@ -1689,7 +1702,9 @@ function sendTypedShot(t, payload, now) {
   // and take the whole game loop down with it.
   const key = Math.floor(now).toString(36) + Math.random().toString(36).slice(2, 8);
   (S.seenShots[t.id] ??= new Set()).add(key);
-  S.sendShot?.(t.id, key, payload);
+  // Stamp the round, so a peer never spawns last round's shots into the
+  // new one (packets outlive a round on the wire).
+  S.sendShot?.(t.id, key, { ...payload, r: S.roundN ?? 0 });
 }
 
 function clearWeapon(t, now) {
@@ -2985,7 +3000,10 @@ function applyHit(t, amount, byId, now = performance.now(), kind = "bullet") {
 function sendHitTo(victim, amount, byId, kind, now) {
   if (!S.sendHit) return;
   const key = Math.floor(now).toString(36) + Math.random().toString(36).slice(2, 8);
-  S.sendHit(victim.id, key, { d: amount, k: kind, by: byId });
+  // `r` stamps the ROUND this hit belongs to. Packets outlive a round on
+  // the wire, so the receiver drops anything from a round that's already
+  // over — damage can never leak across a round boundary.
+  S.sendHit(victim.id, key, { d: amount, k: kind, by: byId, r: S.roundN ?? 0 });
 }
 
 // Short-lived orange/white sparks thrown from a hit.
