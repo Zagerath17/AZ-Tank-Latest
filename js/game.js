@@ -1629,7 +1629,7 @@ function emitTracks(t, now) {
   const lx = t.x + sa * TRACK_HALF, ly = t.y - ca * TRACK_HALF;
   const rx = t.x - sa * TRACK_HALF, ry = t.y + ca * TRACK_HALF;
 
-  const lay = (cx, cy, kx, ky) => {
+  const lay = (cx, cy, kx, ky, sd) => {
     const px = t[kx], py = t[ky];
     if (px === undefined) { t[kx] = cx; t[ky] = cy; return; }
     const dx = cx - px, dy = cy - py;
@@ -1638,11 +1638,13 @@ function emitTracks(t, now) {
     // A jump this big is a respawn or a phase, not driving — pick the
     // trail up at the new spot instead of smearing a stripe across the map.
     if (d2 > CELL * CELL) { t[kx] = cx; t[ky] = cy; return; }
-    S.tracks.push({ born: now, x: cx, y: cy, px, py, nx, ny });
+    // `sd` marks which tread this came from, so the two can be drawn as
+    // separate continuous lines rather than a pile of loose segments.
+    S.tracks.push({ born: now, x: cx, y: cy, px, py, nx, ny, sd });
     t[kx] = cx; t[ky] = cy;
   };
-  lay(lx, ly, "trkPLx", "trkPLy");
-  lay(rx, ry, "trkPRx", "trkPRy");
+  lay(lx, ly, "trkPLx", "trkPLy", 0);
+  lay(rx, ry, "trkPRx", "trkPRy", 1);
 }
 
 // Age out marks (the list is oldest-first, so a single splice does it)
@@ -1678,7 +1680,6 @@ function drawTracks(now) {
   };
 
   ctx.save();
-  ctx.lineCap = "round";
   const bandW = TRACK_WIDTH;
   const cleatW = Math.max(1, TANK_R * 0.11);
 
@@ -1691,17 +1692,33 @@ function drawTracks(now) {
     const a = (b + 0.5) / BUCKETS;
     if (a > 0.001) {
       // The band the tread pressed flat.
-      ctx.strokeStyle = `rgba(0,0,0,${(0.26 * a).toFixed(3)})`;
+      //
+      // Each tread is stroked as ONE CONTINUOUS polyline with BUTT caps.
+      // Drawing it as separate round-capped segments meant every cap
+      // overhung its neighbour, and where two opacity groups met those
+      // overhangs blended twice and showed up as dark circles travelling
+      // along the trail as it faded. Butt caps butt exactly together, so
+      // there's nothing to double-blend and nothing to see.
+      ctx.lineCap = "butt";
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = `rgba(0,0,0,${(0.39 * a).toFixed(3)})`;
       ctx.lineWidth = bandW;
-      ctx.beginPath();
-      for (let k = i; k < j; k++) {
-        const m = list[k];
-        ctx.moveTo(m.px, m.py);
-        ctx.lineTo(m.x, m.y);
+      for (let side = 0; side < 2; side++) {
+        ctx.beginPath();
+        let lx = NaN, ly = NaN;
+        for (let k = i; k < j; k++) {
+          const m = list[k];
+          if (m.sd !== side) continue;
+          if (m.px !== lx || m.py !== ly) ctx.moveTo(m.px, m.py); // new run
+          ctx.lineTo(m.x, m.y);
+          lx = m.x; ly = m.y;
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
-      // The cleats that bit into it.
-      ctx.strokeStyle = `rgba(0,0,0,${(0.5 * a).toFixed(3)})`;
+      // The cleats that bit into it. These are isolated bars that never
+      // touch each other, so they keep their rounded ends safely.
+      ctx.lineCap = "round";
+      ctx.strokeStyle = `rgba(0,0,0,${(0.75 * a).toFixed(3)})`;
       ctx.lineWidth = cleatW;
       ctx.beginPath();
       for (let k = i; k < j; k++) {
