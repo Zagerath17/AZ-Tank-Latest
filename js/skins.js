@@ -126,9 +126,6 @@ export const DEFAULT_PATTERN = "solid";
 // Everything the shop lists, in catalogue order.
 export const SHOP_PATTERNS = Object.keys(PATTERNS);
 
-export function patternName(id) {
-  return (PATTERNS[id] ?? PATTERNS[DEFAULT_PATTERN]).name;
-}
 export function patternColors(id) {
   return (PATTERNS[id] ?? PATTERNS[DEFAULT_PATTERN]).colors ?? 1;
 }
@@ -145,10 +142,6 @@ export const SHOP_SKINS = Object.keys(SKINS).filter((id) => !SKINS[id].reserved)
 
 export function skinHex(id) {
   return (SKINS[id] ?? SKINS[DEFAULT_SKIN]).hex;
-}
-
-export function skinName(id) {
-  return (SKINS[id] ?? SKINS[DEFAULT_SKIN]).name;
 }
 
 export function skinFinish(id) {

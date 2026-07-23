@@ -78,18 +78,6 @@ export function getNoRequests() {
 export function isBlocked(key) {
   return !!blocks[key];
 }
-export function setBlocked(key, on) {
-  if (on) blocks[key] = true; else delete blocks[key];
-  try { localStorage.setItem(LS_BLOCKS, JSON.stringify(blocks)); } catch (e) {}
-  if (account) {
-    ensureFirebase()
-      .then((f) => f.set(f.ref(f.db, `users/${account.key}/blocks`), blocks))
-      .catch(() => {});
-  }
-}
-export function getBlocks() { return { ...blocks }; }
-
-
 export function setNoRequests(on) {
   localStorage.setItem(LS_NOREQ, on ? "1" : "0");
   if (account) {
@@ -701,15 +689,6 @@ export function getPattern() {
 export function getPatternColors() {
   return Array.isArray(account?.patColors) ? account.patColors.slice(0, 2) : [];
 }
-// A compact bundle the roster hands to the renderer: everything needed
-// to paint this player's tank.
-export function getLook() {
-  return {
-    color: getSkin(),
-    pattern: getPattern(),
-    patColors: getPatternColors(),
-  };
-}
 export function ownsPattern(id) {
   if (id === DEFAULT_PATTERN) return true;
   return !!account?.ownedPatterns?.[id];
@@ -907,6 +886,50 @@ function pumpBanner() {
   yes.onclick = () => { done(); onYes?.(); };
   no.onclick = () => { done(); onNo?.(); };
   const timer = setTimeout(done, 14000); // banners don't nag forever
+}
+
+export async function toggleInvitePanel() {
+  const panel = document.getElementById("lobby-social-list");
+  if (!panel.hidden) { panel.hidden = true; return; }
+  const info = lobbyInfo();
+  if (!account || !info) return;
+  panel.hidden = false;
+  panel.innerHTML = `<li class="hint">Loading friends…</li>`;
+  try {
+    const f = await ensureFirebase();
+    const fs = await f.get(f.ref(f.db, `users/${account.key}/friends`));
+    const keys = Object.keys(fs.val() ?? {});
+    const profiles = (await Promise.all(keys.map((k) => fetchProfile(f, k)))).filter(Boolean);
+    const invitable = profiles.filter((p) => p.status && p.status !== "offline" && p.lobby !== info.code);
+    if (!invitable.length) {
+      panel.innerHTML = `<li class="hint">No friends online right now.</li>`;
+      return;
+    }
+    const room = info.players < 4;
+    panel.innerHTML = invitable.map((p) => `
+      <li class="friend-row" style="${paintVar(p.color)}">
+        ${tankSVG(p.color)}
+        <span class="friend-name">${p.name}</span>
+        <button class="btn btn-small" data-invite="${p.key}" ${room && !p.dnd ? "" : "disabled"}>
+          ${!room ? "LOBBY FULL" : p.dnd ? "DND" : "INVITE"}
+        </button>
+      </li>`).join("");
+    panel.querySelectorAll("[data-invite]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          const f2 = await ensureFirebase();
+          await f2.set(f2.ref(f2.db, `users/${btn.dataset.invite}/invites/${account.key}`), {
+            code: lobbyInfo()?.code,
+            at: Date.now(),
+          });
+          toast("Invite sent.");
+          btn.disabled = true;
+        } catch (e) { toast("Couldn't send the invite."); }
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = `<li class="hint">Couldn't load friends.</li>`;
+  }
 }
 
 /* ---------- live listeners: requests, join asks, invites ---------- */
@@ -1207,50 +1230,6 @@ export async function sendInvite(friendKey, code, kind = null) {
 }
 
 /* ---------- host's in-lobby invite panel ---------- */
-
-export async function toggleInvitePanel() {
-  const panel = document.getElementById("lobby-social-list");
-  if (!panel.hidden) { panel.hidden = true; return; }
-  const info = lobbyInfo();
-  if (!account || !info) return;
-  panel.hidden = false;
-  panel.innerHTML = `<li class="hint">Loading friends…</li>`;
-  try {
-    const f = await ensureFirebase();
-    const fs = await f.get(f.ref(f.db, `users/${account.key}/friends`));
-    const keys = Object.keys(fs.val() ?? {});
-    const profiles = (await Promise.all(keys.map((k) => fetchProfile(f, k)))).filter(Boolean);
-    const invitable = profiles.filter((p) => p.status && p.status !== "offline" && p.lobby !== info.code);
-    if (!invitable.length) {
-      panel.innerHTML = `<li class="hint">No friends online right now.</li>`;
-      return;
-    }
-    const room = info.players < 4;
-    panel.innerHTML = invitable.map((p) => `
-      <li class="friend-row" style="${paintVar(p.color)}">
-        ${tankSVG(p.color)}
-        <span class="friend-name">${p.name}</span>
-        <button class="btn btn-small" data-invite="${p.key}" ${room && !p.dnd ? "" : "disabled"}>
-          ${!room ? "LOBBY FULL" : p.dnd ? "DND" : "INVITE"}
-        </button>
-      </li>`).join("");
-    panel.querySelectorAll("[data-invite]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          const f2 = await ensureFirebase();
-          await f2.set(f2.ref(f2.db, `users/${btn.dataset.invite}/invites/${account.key}`), {
-            code: lobbyInfo()?.code,
-            at: Date.now(),
-          });
-          toast("Invite sent.");
-          btn.disabled = true;
-        } catch (e) { toast("Couldn't send the invite."); }
-      });
-    });
-  } catch (e) {
-    panel.innerHTML = `<li class="hint">Couldn't load friends.</li>`;
-  }
-}
 
 /* ---------- init ---------- */
 

@@ -77,6 +77,12 @@ export async function ensureFirebase() {
     update: dbMod.update,
     remove: dbMod.remove,
     onValue: dbMod.onValue,
+    // Child-level listeners: they let the lobby subscription watch each
+    // child on its own instead of re-materialising the whole lobby every
+    // time any one field changes.
+    onChildAdded: dbMod.onChildAdded,
+    onChildChanged: dbMod.onChildChanged,
+    onChildRemoved: dbMod.onChildRemoved,
     onDisconnect: dbMod.onDisconnect,
     serverTimestamp: dbMod.serverTimestamp,
     query: dbMod.query,
@@ -263,38 +269,89 @@ export function lobbyInfo() {
   };
 }
 
-// Roster (humans, excluding me) for the per-player audio mixer.
-export function lobbyPeers() {
-  if (!current) return [];
-  const me = myId();
-  const entries = current.playersCache ?? [];
-  const resolved = current.resolvedCache ?? {};
-  return entries
-    .filter(([id, p]) => id !== me && !p.bot)
-    .map(([id, p]) => ({ id, name: p.name ?? "Player", color: resolved[id] ?? DEFAULT_SKIN, ukey: p.ukey ?? null }));
+// The player id this client uses for its couch Player 2. Distinct from
+// myId() so both tanks get their own lobby node + position stream.
+export function localGuestId() {
+  return `${myId()}~g`;
+}
+
+// ---- outbound write coalescing -------------------------------------
+// Every in-game stream (position, shots, hits, deaths) used to fire its
+// own Firebase call, so a single frame could open half a dozen separate
+// round trips — and sendDead alone made three. They're now queued by
+// full path and flushed as ONE atomic update at the end of the current
+// JS turn. Same data, same ordering (last write to a path wins, exactly
+// as before), a fraction of the round trips and overhead.
+//
+// The flush is a microtask, so it lands in the same tick the frame
+// produced it: nothing is delayed, it's only batched. Paths are resolved
+// (lobby code included) at queue time, so a queued packet still goes to
+// the right lobby even if the player leaves before it flushes.
+let txQueue = null;
+let txScheduled = false;
+
+function txFlush() {
+  txScheduled = false;
+  const q = txQueue;
+  txQueue = null;
+  if (!q || !fb) return;
+  try {
+    fb.update(fb.ref(fb.db), q).catch(() => {});
+  } catch (e) { /* dropped packet beats a freeze */ }
+}
+
+function txPush(fullPath, value) {
+  if (!fb) return;
+  (txQueue ??= {})[fullPath] = value;
+  if (!txScheduled) {
+    txScheduled = true;
+    queueMicrotask(txFlush);
+  }
+}
+
+// ---- deferred cleanup ----------------------------------------------
+// Transient records (shots, hits) need deleting once they're stale. That
+// used to mean one setTimeout AND one delete round trip per packet — in
+// a firefight, dozens of each. Now they go on a single sweep that batches
+// every due delete into the same coalesced update.
+let gcDue = [];
+let gcTimer = 0;
+
+function gcLater(fullPath, delay) {
+  gcDue.push({ path: fullPath, at: Date.now() + delay });
+  if (!gcTimer) gcTimer = setInterval(gcSweep, 1000);
+}
+
+function gcSweep() {
+  if (!gcDue.length) { clearInterval(gcTimer); gcTimer = 0; return; }
+  const now = Date.now();
+  const keep = [];
+  for (const e of gcDue) {
+    if (e.at <= now) txPush(e.path, null); // batched with everything else
+    else keep.push(e);
+  }
+  gcDue = keep;
+  if (!gcDue.length) { clearInterval(gcTimer); gcTimer = 0; }
+}
+
+function gcReset() {
+  gcDue = [];
+  if (gcTimer) { clearInterval(gcTimer); gcTimer = 0; }
 }
 
 // Fire-and-forget write helper used by the in-game streams.
 // Several lobby paths in one atomic update.
 function writeMany(map) {
   if (!current || !fb) return;
-  try {
-    const full = {};
-    for (const [k, v] of Object.entries(map)) full[`lobbies/${current.code}/${k}`] = v;
-    fb.update(fb.ref(fb.db), full).catch(() => {});
-  } catch (e) { /* dropped packet beats a freeze */ }
+  for (const [k, v] of Object.entries(map)) txPush(`lobbies/${current.code}/${k}`, v);
 }
 
 function write(path, value) {
   if (!current || !fb) return;
-  // try/catch as well as .catch(): an invalid path makes ref() throw
-  // SYNCHRONOUSLY, and a sync throw here would kill the caller's
-  // animation loop. A dropped packet is always better than a freeze.
-  try {
-    fb.set(fb.ref(fb.db, `lobbies/${current.code}/${path}`), value).catch(() => {});
-  } catch (e) {
-    console.warn("write skipped:", path, e?.message);
-  }
+  // Queued rather than sent immediately, so everything a frame produces
+  // leaves as one update. txFlush swallows errors the same way the old
+  // direct set() did — a dropped packet is always better than a freeze.
+  txPush(`lobbies/${current.code}/${path}`, value);
 }
 
 /* ---------- create / join ---------- */
@@ -355,12 +412,6 @@ export async function joinLobby(code) {
     });
   }
   await enterLobby(code, { ranked: !!lobby.ranked });
-}
-
-// The player id this client uses for its couch Player 2. Distinct from
-// myId() so both tanks get their own lobby node + position stream.
-export function localGuestId() {
-  return `${myId()}~g`;
 }
 
 // COUCH CO-OP join: seat BOTH players from this machine. Register the
@@ -435,22 +486,24 @@ async function enterLobby(code, opts = {}) {
   const disc = f.onDisconnect(playerRef);
   await disc.remove();
 
-  const unsub = f.onValue(
-    lobbyRef,
-    (snap) => handleSnapshot(code, snap),
-    () => { stopGame(); toast("Lost connection to the lobby."); exitToOnline(); },
-  );
-
+  // `current` is set BEFORE subscribing: child listeners replay existing
+  // data immediately on attach, and every callback checks `current`.
   current = {
-    code, lobbyRef, playerRef, disc, unsub,
+    code, lobbyRef, playerRef, disc, unsub: () => {},
     inGame: false, playersCache: {}, ranked: !!opts.ranked,
   };
+  current.unsub = subscribeLobby(f, code, () => {
+    stopGame();
+    toast("Lost connection to the lobby.");
+    exitToOnline();
+  });
   if (!opts.ranked) showScreen("screen-lobby");
 }
 
 function exitToOnline() {
   if (current) {
     try { current.unsub(); } catch { /* already gone */ }
+    gcReset();
     current = null;
   }
   showScreen("screen-online");
@@ -508,6 +561,7 @@ async function leaveLobby() {
   const dest = c?.ranked ? "screen-ranked" : "screen-online";
   if (!c) { showScreen(dest); return; }
 
+  gcReset();
   current = null;
   try { c.unsub(); } catch { /* already gone */ }
   showScreen(dest);
@@ -721,6 +775,160 @@ function renderSettings(lobby, isHost) {
 }
 
 /* ---------- snapshot routing ---------- */
+
+// A player node's HOT fields: the high-frequency in-match streams. Every
+// other field (name, colour, bot, gun, dead, joinedAt, elo, …) is COLD
+// and can change who's in the lobby, who hosts, or what the UI shows.
+const HOT_PLAYER_FIELDS = new Set(["pos", "shots", "outHits", "hits"]);
+
+// A compact fingerprint of everything on a player EXCEPT the hot streams.
+// Stored as a primitive string rather than comparing objects, because two
+// successive snapshots can hand back the same underlying object — and a
+// comparison that silently sees "no change" would classify a death or a
+// colour swap as hot and skip the prologue that acts on it. A string
+// snapshot can't alias, so that whole class of bug is gone.
+function coldSignature(p) {
+  if (!p) return "";
+  const parts = [];
+  for (const k of Object.keys(p).sort()) {
+    if (HOT_PLAYER_FIELDS.has(k)) continue;
+    const v = p[k];
+    parts.push(k + "\u0001" + (v !== null && typeof v === "object" ? JSON.stringify(v) : String(v)));
+  }
+  return parts.join("\u0002");
+}
+
+// Subscribe to a lobby WITHOUT re-reading the whole thing on every write.
+//
+// The old design put one onValue on `lobbies/{code}`, so a single
+// position write — and there are several per player per second — handed
+// us a freshly materialised copy of the entire lobby (every player, gear,
+// settings, chat, kill logs) and re-ran the full prologue over it.
+//
+// Instead we watch children individually and patch a local mirror:
+//   • children of `lobbies/{code}`  — everything except `players`
+//   • children of `.../players`     — one entry per player
+// so a position update only materialises that one player's node. No key
+// list is hardcoded anywhere: Firebase tells us which child changed, so a
+// lobby field added later is mirrored automatically.
+//
+// The mirror is then handed to the SAME handleSnapshot as before, so all
+// downstream behaviour is byte-for-byte what it was.
+function subscribeLobby(f, code, onError) {
+  const lobbyRef = f.ref(f.db, `lobbies/${code}`);
+  const playersRef = f.ref(f.db, `lobbies/${code}/players`);
+  const mirror = { players: {} };
+  const offs = [];
+
+  let pendingKind = null;   // "cold" | "hot"
+  let scheduled = false;
+  let seeded = false;       // initial load complete?
+
+  // Coalesce a burst into ONE delivery. This matters twice over: on join,
+  // Firebase replays a child event per existing field, and we must not
+  // hand downstream a half-built lobby; in-match, several players landing
+  // in the same tick become one pass instead of several. A microtask is
+  // the same JS turn, so nothing is actually deferred.
+  //
+  // Nothing is delivered at all until `seeded`: the value event below
+  // fires only once every child at this path has loaded, so gating on it
+  // guarantees the first snapshot downstream sees is complete — exactly
+  // the atomicity the single whole-lobby listener used to provide.
+  const deliver = (kind) => {
+    pendingKind = pendingKind === "cold" ? "cold" : kind; // cold wins
+    if (!seeded || scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      const kind2 = pendingKind;
+      pendingKind = null;
+      if (!current || current.code !== code) return;
+      deliverMirror(code, mirror, kind2);
+    });
+  };
+
+  // --- top-level children, except `players` (handled per-child below).
+  // `players` is skipped WITHOUT touching snap.val(), so the whole player
+  // map is never materialised here.
+  const topAdd = (snap) => {
+    if (snap.key === "players") return;
+    mirror[snap.key] = snap.val();
+    deliver("cold");
+  };
+  const topRemove = (snap) => {
+    if (snap.key === "players") return;
+    delete mirror[snap.key];
+    deliver("cold");
+  };
+  offs.push(f.onChildAdded(lobbyRef, topAdd, onError));
+  offs.push(f.onChildChanged(lobbyRef, topAdd, onError));
+  offs.push(f.onChildRemoved(lobbyRef, topRemove, onError));
+
+  // --- one player at a time.
+  // coldSigs remembers each player's non-stream fields, so a change can
+  // be classified without ever comparing two snapshot objects.
+  const coldSigs = Object.create(null);
+  offs.push(f.onChildAdded(playersRef, (snap) => {
+    const v = snap.val();
+    mirror.players[snap.key] = v;
+    coldSigs[snap.key] = coldSignature(v);
+    deliver("cold"); // someone arrived
+  }, onError));
+  offs.push(f.onChildRemoved(playersRef, (snap) => {
+    delete mirror.players[snap.key];
+    delete coldSigs[snap.key];
+    deliver("cold"); // someone left — host may migrate
+  }, onError));
+  offs.push(f.onChildChanged(playersRef, (snap) => {
+    const v = snap.val();
+    mirror.players[snap.key] = v;
+    const sig = coldSignature(v);
+    const hot = coldSigs[snap.key] === sig; // nothing but streams moved
+    coldSigs[snap.key] = sig;
+    deliver(hot ? "hot" : "cold");
+  }, onError));
+
+  // --- existence + load barrier. Fires often, but never calls val(), so
+  // there's nothing to materialise — it exists to keep the original
+  // "lobby closed" behaviour exactly as it was, and to signal when the
+  // initial load is complete (Firebase raises the value event only after
+  // every child at this path has arrived).
+  offs.push(f.onValue(lobbyRef, (snap) => {
+    if (!current || current.code !== code) return;
+    if (!snap.exists()) {
+      stopGame();
+      toast("Lobby closed.");
+      exitToOnline();
+      return;
+    }
+    if (!seeded) {
+      seeded = true;
+      deliver("cold"); // release the complete first snapshot
+    }
+  }, onError));
+
+  return () => { for (const off of offs) { try { off(); } catch { /* already gone */ } } };
+}
+
+// Hand the mirror downstream. A COLD update runs the full prologue
+// exactly as before. A HOT one — only positions/shots/hits moved — skips
+// straight to the in-match apply, because every branch in that prologue
+// is driven by cold state: host migration needs the player list to
+// change, cancellation and the screen transitions need `state` to change,
+// and the solo-return check needs a human to leave. If we're not
+// certainly mid-match, the full path runs regardless.
+function deliverMirror(code, mirror, kind) {
+  if (kind === "hot" && current.inGame && mirror.state === "starting") {
+    current.playersCache = mirror.players ?? {};
+    current.lastLobby = mirror;
+    onlineLobbyUpdate(mirror);
+    return;
+  }
+  handleSnapshot(code, {
+    exists: () => Object.keys(mirror).length > 1 || Object.keys(mirror.players).length > 0,
+    val: () => mirror,
+  });
+}
 
 function handleSnapshot(code, snap) {
   if (!current || current.code !== code) return;
@@ -1061,14 +1269,8 @@ function beginOnlineGame(code, lobby) {
     sendPos: (id, pos) => write(`players/${id}/pos`, pos),
     sendShot: (id, key, shot) => {
       write(`players/${id}/shots/${key}`, shot);
-      // Shots are transient — clean up after the bullet is long dead.
-      setTimeout(() => {
-        if (current && fb) {
-          try {
-            fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${id}/shots/${key}`)).catch(() => {});
-          } catch (e) { /* invalid key — nothing to clean */ }
-        }
-      }, SHOT_TTL);
+      // Shots are transient — swept once the bullet is long dead.
+      gcLater(`lobbies/${code}/players/${id}/shots/${key}`, SHOT_TTL);
     },
     // Shooter-authoritative hits: the SHOOTER decides a hit landed and
     // publishes it in ITS OWN node, addressed to the victim.
@@ -1082,13 +1284,7 @@ function beginOnlineGame(code, lobby) {
     // client only ever writes where it is unambiguously allowed to.
     sendHit: (victimId, key, hit) => {
       write(`players/${me}/outHits/${key}`, { ...hit, to: victimId });
-      setTimeout(() => {
-        if (current && fb) {
-          try {
-            fb.remove(fb.ref(fb.db, `lobbies/${code}/players/${me}/outHits/${key}`)).catch(() => {});
-          } catch (e) { /* invalid key — nothing to clean */ }
-        }
-      }, SHOT_TTL);
+      gcLater(`lobbies/${code}/players/${me}/outHits/${key}`, SHOT_TTL);
     },
     // The victim names its killer so the KILLER's client can score the
     // streak — damage resolves on the victim's machine, so this is the
@@ -1103,12 +1299,9 @@ function beginOnlineGame(code, lobby) {
     sendGear: (key, gear) => write(`gear/${key}`, gear),
     sendGearRemove: (key) => write(`gear/${key}`, null),
     sendPickup: (gearKey, pid, type) => {
-      if (!current || !fb) return;
       // One atomic update: the pickup vanishes and the gun appears.
-      fb.update(current.lobbyRef, {
-        [`gear/${gearKey}`]: null,
-        [`players/${pid}/gun`]: type,
-      }).catch(() => {});
+      // Queued, so it rides along with whatever else this frame sends.
+      writeMany({ [`gear/${gearKey}`]: null, [`players/${pid}/gun`]: type });
     },
     sendGun: (id, type) => write(`players/${id}/gun`, type),
     sendNextRound: (n, seed) => {

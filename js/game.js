@@ -36,6 +36,19 @@ const TANK_R = U * 0.27;             // base scale for the tank's size
 const TANK_HL = TANK_R * 0.95;       // hitbox half-LENGTH (along the barrel) — matches the drawn treads
 const TANK_HW = TANK_R * 0.83;       // hitbox half-WIDTH — matches the drawn treads
 const TANK_RAD = Math.hypot(TANK_HL, TANK_HW); // bounding radius (broadphase / AI planning)
+
+// Tread marks pressed into the floor. The geometry deliberately mirrors
+// the treads drawn on the tank itself (bands at ±R*0.62, R*0.42 across,
+// links every R*0.34), so what a tank leaves behind lines up with the
+// tracks on its own hull.
+const TRACK_LIFE = 6000;                 // ms a mark lasts before it's gone
+const TRACK_STEP = TANK_R * 0.34;        // stamp spacing = the tank's tread-link pitch
+const TRACK_MAX = 2600;                  // hard cap, oldest dropped first (a full
+                                         // 8-tank lobby driving flat out for the
+                                         // whole 6 s fits inside this)
+const TRACK_HALF = TANK_R * 0.62;        // tread centre, either side of the hull
+const TRACK_WIDTH = TANK_R * 0.42;       // how wide a tread sits on the ground
+const TRACK_CLEAT = TANK_R * 0.21;       // half a cleat bar, across the tread
 const MOVE_SPEED = U * 2.1;
 const REVERSE_SPEED = U * 1.45;
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
@@ -366,35 +379,6 @@ export function stopGame() {
   S = null;
 }
 
-export function isGameActive() {
-  return !!S;
-}
-
-// Test-only introspection: a lightweight snapshot of tank id/team/flags.
-// Never used by the app itself — lets the headless harness verify the
-// local-duo wiring (both my tanks local, enemies remote, override hex).
-export function __tanksForTest() {
-  return S ? S.tanks.map((t) => ({
-    id: t.id, team: S.teams ? (S.teams[t.id] ?? null) : null,
-    local: !!t.local, bot: t.bot ?? null,
-    colorHex: t.colorHex ?? null, patHex: t.patHex ?? null,
-    coopSeat: S.coopBinds?.[t.id] ?? null,
-  })) : null;
-}
-export function __frameForTest(now) { if (S) frame(now); }
-
-// Test-only: drive the damage path directly, exactly as a bullet impact
-// would. Lets the headless netcode harness prove that a SHOOTER's hit
-// actually reaches the wire (S.sendHit), not just that a victim can
-// apply one. Never used by the app itself.
-export function __applyHitForTest(victimId, amount = 1, byId = null) {
-  if (!S) return "no-state";
-  const t = S.tanks.find((x) => x.id === victimId);
-  if (!t) return "no-such-tank";
-  applyHit(t, amount, byId, performance.now(), "bullet");
-  return "called";
-}
-
 // My tanks' received-damage ledger (attacker → total), for reporting.
 export function getMatchStats() {
   return S ? { dmgBy: S.dmgBy ?? {}, killsBy: S.killsBy ?? {}, myId: S.myId } : null;
@@ -662,6 +646,7 @@ function begin(opts) {
     gearSeen: new Map(), // key -> first-seen time (for pop-in + chime)
     fades: [],    // dying projectiles, briefly ghosting out
     dust: [],     // little clouds kicked up behind driving tanks
+    tracks: [],   // tread marks pressed into the floor, oldest first
     gearNextAt: 0,
     gearSeq: 0,
     rockets: [],
@@ -752,6 +737,7 @@ function startRound(seed) {
   S.gearSeen.clear();
   S.fades = [];
   S.dust = [];
+  S.tracks = [];
   // 3-2-1 countdown: everyone frozen, arena blurred, then GO.
   S.freezeUntil = performance.now() + 3000;
   S.cdLast = 4; // last number we ticked for (4 = none yet)
@@ -1128,6 +1114,9 @@ function frame(now) {
     if (S.cdLast !== 0) { S.cdLast = 0; sfx.count(0); } // GO!
     stepShrink(now);
     stepTanks(now, dt);
+    // Tread marks are laid AFTER movement has settled for the frame, so a
+    // mark always lands where the tread finished up.
+    for (const t of S.tanks) emitTracks(t, now);
     stepFlameBurns(now); // arm the after-burn once the flame leaves a tank
     stepBurns(now);
     stepBullets(now, dt);
@@ -1183,8 +1172,11 @@ function frame(now) {
       const due = (changed && elapsed >= NET_SEND_MS) || (urgent) || elapsed >= NET_IDLE_MS;
       if (!due) continue;
       // Velocity from ACTUAL displacement (collisions included), px/s.
-      const vx = +(dx / (elapsed / 1000)).toFixed(1);
-      const vy = +(dy / (elapsed / 1000)).toFixed(1);
+      // Whole px/s: at the ~100 ms we ever extrapolate, a sub-1 px/s
+      // difference moves a tank by <0.1 px, so the extra decimal was
+      // bytes on every packet for nothing visible.
+      const vx = Math.round(dx / (elapsed / 1000));
+      const vy = Math.round(dy / (elapsed / 1000));
       t.netLast = { x: t.x, y: t.y, a: t.a, u: t.turret ?? t.a, at: snow };
       S.sendPos?.(t.id, {
         x: +t.x.toFixed(1), y: +t.y.toFixed(1),
@@ -1623,6 +1615,107 @@ function stepTanks(now, dt) {
 // by the local sim AND remote playback, so this effect (and any
 // future drive animation added here) shows identically to all
 // players. `back` is -1 driving forward, +1 reversing.
+// Tread marks. Driven purely by where each tread actually IS from frame
+// to frame, so it works identically for a locally driven tank, a bot, and
+// a remote tank being interpolated — no separate code path can drift.
+// A mark is laid every TRACK_STEP of tread travel, which is the same
+// pitch as the links drawn on the tank's own treads.
+function emitTracks(t, now) {
+  if (t.dead || t.gone) return;
+  const sa = Math.sin(t.a), ca = Math.cos(t.a);
+  // Contact point of each tread, and the across-tread direction shared by
+  // both (computed once — it only depends on the hull angle).
+  const nx = -sa * TRACK_CLEAT, ny = ca * TRACK_CLEAT;
+  const lx = t.x + sa * TRACK_HALF, ly = t.y - ca * TRACK_HALF;
+  const rx = t.x - sa * TRACK_HALF, ry = t.y + ca * TRACK_HALF;
+
+  const lay = (cx, cy, kx, ky) => {
+    const px = t[kx], py = t[ky];
+    if (px === undefined) { t[kx] = cx; t[ky] = cy; return; }
+    const dx = cx - px, dy = cy - py;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < TRACK_STEP * TRACK_STEP) return;          // hasn't moved far enough yet
+    // A jump this big is a respawn or a phase, not driving — pick the
+    // trail up at the new spot instead of smearing a stripe across the map.
+    if (d2 > CELL * CELL) { t[kx] = cx; t[ky] = cy; return; }
+    S.tracks.push({ born: now, x: cx, y: cy, px, py, nx, ny });
+    t[kx] = cx; t[ky] = cy;
+  };
+  lay(lx, ly, "trkPLx", "trkPLy");
+  lay(rx, ry, "trkPRx", "trkPRy");
+}
+
+// Age out marks (the list is oldest-first, so a single splice does it)
+// and hold the total under the cap. Called from the draw pass, like the
+// dust does, so marks keep fading during a countdown or an end-of-round
+// banner — any frame that paints also ages them.
+function stepTracks(now) {
+  const list = S.tracks;
+  if (!list.length) return;
+  let cut = 0;
+  while (cut < list.length && now - list[cut].born >= TRACK_LIFE) cut++;
+  if (cut) list.splice(0, cut);
+  if (list.length > TRACK_MAX) list.splice(0, list.length - TRACK_MAX);
+}
+
+// Paint the tread marks: a soft dark band per tread with darker cleat
+// bars stamped across it. Everything is stroked, and marks are grouped
+// into a handful of opacity bands so the whole floor costs a couple of
+// dozen stroke calls no matter how many marks are down.
+function drawTracks(now) {
+  stepTracks(now);
+  const list = S.tracks;
+  if (!list.length) return;
+
+  const BUCKETS = 10;
+  const fadeOf = (k) => {
+    const life = 1 - (now - k.born) / TRACK_LIFE;      // 1 fresh → 0 gone
+    return life <= 0 ? 0 : Math.min(1, life * 1.6);    // hold, then ease away
+  };
+  const bucketOf = (k) => {
+    const b = Math.floor(fadeOf(k) * BUCKETS);
+    return b >= BUCKETS ? BUCKETS - 1 : b < 0 ? 0 : b;
+  };
+
+  ctx.save();
+  ctx.lineCap = "round";
+  const bandW = TRACK_WIDTH;
+  const cleatW = Math.max(1, TANK_R * 0.11);
+
+  // The list is time-ordered, so equal-opacity marks are contiguous.
+  let i = 0;
+  while (i < list.length) {
+    const b = bucketOf(list[i]);
+    let j = i + 1;
+    while (j < list.length && bucketOf(list[j]) === b) j++;
+    const a = (b + 0.5) / BUCKETS;
+    if (a > 0.001) {
+      // The band the tread pressed flat.
+      ctx.strokeStyle = `rgba(0,0,0,${(0.26 * a).toFixed(3)})`;
+      ctx.lineWidth = bandW;
+      ctx.beginPath();
+      for (let k = i; k < j; k++) {
+        const m = list[k];
+        ctx.moveTo(m.px, m.py);
+        ctx.lineTo(m.x, m.y);
+      }
+      ctx.stroke();
+      // The cleats that bit into it.
+      ctx.strokeStyle = `rgba(0,0,0,${(0.5 * a).toFixed(3)})`;
+      ctx.lineWidth = cleatW;
+      ctx.beginPath();
+      for (let k = i; k < j; k++) {
+        const m = list[k];
+        ctx.moveTo(m.x - m.nx, m.y - m.ny);
+        ctx.lineTo(m.x + m.nx, m.y + m.ny);
+      }
+      ctx.stroke();
+    }
+    i = j;
+  }
+  ctx.restore();
+}
+
 function emitDriveDust(t, back, boosting, now) {
   // Boost pumps particles out at nearly double the rate.
   t.dustAt = now + (boosting ? 34 + Math.random() * 24 : 65 + Math.random() * 45);
@@ -3848,6 +3941,10 @@ function draw(now) {
   }
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, S.worldW, S.worldH);
+
+  // Tread marks go straight onto the floor — under the zone tint, under
+  // the walls, and under everything that moves.
+  drawTracks(now);
 
   // Ranked shrink: the dead ring is simply gone — plain white canvas
   // where it used to be. Nothing to draw; the walls there were already

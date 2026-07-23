@@ -474,15 +474,6 @@ export function tankSpriteCanvas(look, px = 44, seed = "s") {
   return c;
 }
 
-// Update a sprite canvas in place (e.g. the shop preview when the
-// player picks new colours) without recreating it.
-export function updateTankSprite(canvas, look, seed) {
-  if (!canvas) return;
-  canvas.__look = look ?? canvas.__look;
-  if (seed != null) canvas.__seed = String(seed);
-  if (!live.has(canvas)) { live.add(canvas); if (!rafOn) { rafOn = true; requestAnimationFrame(tick); } }
-}
-
 /* ---------- animated finish swatch (for the shop colour chips) ---------- */
 
 function paintSwatch(c, now) {
