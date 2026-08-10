@@ -130,9 +130,9 @@ export function botActions(t, world, dt, now) {
 
 function brain(t, now) {
   let B = t.ai;
-  if (!B || B.v !== 3) {
+  if (!B || B.v !== 4) {
     B = t.ai = {
-      v: 3,
+      v: 4,
       first: new Map(),     // stimulus -> when it was first sensed
       foes: new Map(),      // id -> lagged belief
       threats: [],
@@ -144,6 +144,9 @@ function brain(t, now) {
       driveA: t.a,          // smoothed heading actually being driven
       driveM: 0,
       lastDir: null,        // sticky steering slot
+      dodgeKey: null,       // the shot currently being evaded
+      dodgeA: 0,            // the ONE escape committed to for it
+      dodgeUntil: 0,
       aimErr: 0, aimErrAt: -1e9,
       lockId: null, lockAt: 0,
       shotAt: 0,
@@ -245,7 +248,7 @@ function sense(t, B, world, P, now) {
     const hit = interceptsMe(t, s, world, horizon, r);
     if (!hit) return;
     B.threats.push({
-      kind: "shot", x: s.x, y: s.y, vx: s.vx, vy: s.vy,
+      kind: "shot", key, x: s.x, y: s.y, vx: s.vx, vy: s.vy,
       t: hit.t, side: hit.side,
     });
   };
@@ -265,7 +268,7 @@ function sense(t, B, world, P, now) {
     if (!reacted(B, "beam:" + L.by, now, P.react * 1000)) continue;
     const p = nearestOnPath(t.x, t.y, L.pts);
     if (p && p.d < world.tankR * 3.5) {
-      B.threats.push({ kind: "beam", x: p.x, y: p.y, t: 0, side: 0 });
+      B.threats.push({ kind: "beam", key: "beam:" + L.by, x: p.x, y: p.y, t: 0, side: 0 });
     }
   }
   B.threats.sort((a, b) => a.t - b.t);
@@ -275,10 +278,18 @@ function sense(t, B, world, P, now) {
   // Steering can, rarely, argue itself into a corner. Rather than trust
   // it never happens, watch actual displacement: if the bot has been
   // asking to move and hasn't, force a committed break-out.
-  if (now - B.histAt > 700) {
+  // Checked over a short window and against what was actually ASKED
+  // for: a bot at full throttle that has travelled a fraction of a hull
+  // length is grinding on something, whatever the steering believes.
+  const window = 380;
+  if (now - B.histAt > window) {
     const moved = Math.hypot(t.x - B.histX, t.y - B.histY);
-    if (moved < world.tankR * 0.5 && B.driveM > 0.25 && now > B.stuckUntil) {
-      B.stuckUntil = now + 700;
+    const expect = (world.moveSpeed ?? 130) * P.speed * (window / 1000) * B.driveM;
+    if (B.driveM > 0.25 && moved < Math.min(world.tankR * 0.45, expect * 0.3) &&
+        now > B.stuckUntil) {
+      // Back out the way we came — that direction is known to be open,
+      // because we just drove down it.
+      B.stuckUntil = now + 600;
       B.stuckA = bestOpening(t, world, B.driveA + Math.PI);
     }
     B.histX = t.x; B.histY = t.y; B.histAt = now;
@@ -428,14 +439,34 @@ function navigate(t, B, world, P, now, gun) {
   const open = new Array(DIRS).fill(1);
 
   // --- how far can we actually go each way? --------------------------
-  // HALF is the hull's real half-width. world.tankR is the BOUNDING
-  // radius (corner to centre), about 50% fatter — probing with that made
-  // every maze corridor read as shut, and the bot crept everywhere.
-  const HALF = R * 0.66;
+  // TWO probes, because "will I fit" and "can I get through" are
+  // different questions.
+  //
+  // HALF is the hull's true half-width, and it answers the first: probe
+  // any fatter and every maze corridor reads as shut and the bot creeps
+  // everywhere.
+  //
+  // But a tank is a RECTANGLE that turns. Steering is continuously
+  // easing onto new headings, so it is always rotating a little, and
+  // rotating needs the half-DIAGONAL — the full bounding radius, half
+  // as much again as the half-width. A gap between those two figures
+  // looks passable to the thin probe and jams the tank solid. That is
+  // exactly the gap a dropped wall leaves beside a maze wall, which is
+  // why bots kept driving into them.
+  //
+  // So SQUEEZE probes with the width the tank needs in order to turn,
+  // and anywhere the two disagree is a constriction it should not
+  // commit to. Nothing is vetoed outright — a bot that must reverse out
+  // of a dead end still can.
+  const HALF = R * 0.66;                  // true hull half-width
+  const SQUEEZE = R * 0.95;               // width needed to turn in
   const probe = R * 2.4;
+  const squeeze = new Array(DIRS).fill(1);
   for (let i = 0; i < DIRS; i++) {
     const d = clearance(t, world, RAY[i], probe, HALF);
     open[i] = d / probe;                       // 0 = blocked at the nose
+    const dS = clearance(t, world, RAY[i], probe, SQUEEZE);
+    squeeze[i] = dS / probe;
   }
 
   // --- interest: toward the goal -------------------------------------
@@ -447,16 +478,34 @@ function navigate(t, B, world, P, now, gun) {
       const al = Math.cos(angDiff(RAY[i].a, goalA));
       score[i] += Math.max(0, al) * 1.6;
     }
-    // Driving forwards is faster than reversing, so a heading the hull is
-    // already pointing is better on the merits — not merely tidier. This
-    // is what stops a bot spending the whole fight moonwalking.
-    score[i] += Math.cos(angDiff(RAY[i].a, t.a)) * 0.9;
+    // What a heading COSTS is the turning it takes to get on it — and
+    // the game reverses automatically when the stick points behind, so
+    // straight back is as cheap as straight ahead. The expensive
+    // direction is SIDEWAYS: that is the one needing a full 90° swing.
+    //
+    // This term used to be a plain cosine, which scored reverse at −0.9
+    // — actively punishing the free option. A bot that wanted to go
+    // backwards therefore span the whole tank round to face that way
+    // instead of simply reversing into it. That spin, repeated as the
+    // situation kept changing, is the "dance" this used to do under
+    // fire. Magnitude is what matters; the small extra term keeps a mild
+    // preference for leading with the nose.
+    const along = Math.cos(angDiff(RAY[i].a, t.a));
+    score[i] += Math.abs(along) * 0.9 + Math.max(0, along) * 0.18;
     // Openness is a MULTIPLIER on desire, not a veto: a direction that
     // is merely tight stays available, one that is solid stops being
     // attractive. This is what keeps a bot off walls without ever
     // leaving it with nowhere legal to go.
     score[i] *= 0.25 + 0.75 * open[i];
     if (open[i] < 0.18) score[i] -= (0.18 - open[i]) * 8;
+    // A way that is open to a thin probe but shut to a turning one is a
+    // slot too tight to use. Weighted by how INVITING it looks, because
+    // the trap is specifically a direction that reads wide open and
+    // isn't — brushing past a wall on a route that continues fine
+    // scores a small difference and is left alone. In open ground both
+    // probes agree and this costs nothing at all.
+    const pinch = Math.max(0, open[i] - squeeze[i]) * open[i];
+    if (pinch > 0.10) score[i] -= (pinch - 0.10) * 6;
   }
 
   // --- keep out of each other ----------------------------------------
@@ -487,33 +536,40 @@ function navigate(t, B, world, P, now, gun) {
     }
   }
 
-  // --- evasion --------------------------------------------------------
-  // Directions are rewarded by how far the shot would miss if taken —
-  // which naturally favours stepping ACROSS the line of fire rather than
-  // running down it. Skill scales how hard this pulls.
+  // --- evasion: ONE committed weave ------------------------------------
+  //
+  // The old version re-scored all 24 directions against every incoming
+  // shot on every think tick. Two problems, and together they produced
+  // the dance:
+  //
+  //   1. Stepping left and stepping right across a line of fire are
+  //      almost exactly as good as each other. Whichever was fractionally
+  //      ahead flipped from tick to tick as the bullet closed, so the bot
+  //      alternated — a shimmy, on the spot, instead of an evasion.
+  //   2. It assumed any heading could be taken instantly. A tank has to
+  //      SWING onto a sideways heading first, so the dodge it scored
+  //      highest was often one it could not physically complete in time.
+  //
+  // Both are fixed by deciding ONCE and then doing it. A weave is picked
+  // when a shot first becomes a threat — the cheaper of the two ways off
+  // its line, judged on room and on how much turning it needs — and then
+  // held until that shot is gone. Committing is what makes it read as
+  // dodging rather than as flinching.
   if (B.threats.length) {
-    const spd = (world.moveSpeed ?? 130) * P.speed;
-    for (const th of B.threats) {
-      if (th.kind === "beam") {
-        const away = Math.atan2(t.y - th.y, t.x - th.x);
-        for (let i = 0; i < DIRS; i++) {
-          score[i] += Math.max(0, Math.cos(angDiff(RAY[i].a, away))) * 3 * P.dodge;
-        }
-        continue;
-      }
-      const lead = Math.min(P.look, Math.max(0.1, th.t));
-      const ex = th.x + th.vx * lead, ey = th.y + th.vy * lead;
-      const urgency = 1 - Math.min(1, th.t / Math.max(0.15, P.look));
-      for (let i = 0; i < DIRS; i++) {
-        const fx = t.x + RAY[i].cx * spd * lead;
-        const fy = t.y + RAY[i].cy * spd * lead;
-        const miss = segDist(fx, fy, th.x, th.y, ex, ey);
-        const safe = Math.min(1, miss / (R * 3));
-        // Only worth taking if we can actually get there.
-        score[i] += safe * open[i] * 4.5 * P.dodge * (0.4 + urgency);
-        if (safe < 0.35) score[i] -= (0.35 - safe) * 5 * P.dodge * urgency;
-      }
+    const th = B.threats[0];                    // the one arriving first
+    if (B.dodgeKey !== th.key || now > B.dodgeUntil) {
+      B.dodgeKey = th.key;
+      B.dodgeUntil = now + 520;
+      B.dodgeA = pickWeave(t, world, P, th, open, squeeze, B.dodgeA, B.dodgeKey != null);
     }
+    const urgency = 1 - Math.min(1, th.t / Math.max(0.15, P.look));
+    const w = 3.6 * P.dodge * (0.55 + urgency);
+    for (let i = 0; i < DIRS; i++) {
+      const c = Math.cos(angDiff(RAY[i].a, B.dodgeA));
+      if (c > 0) score[i] += c * c * open[i] * w;
+    }
+  } else {
+    B.dodgeKey = null;
   }
 
   // --- sticky choice ---------------------------------------------------
@@ -554,6 +610,59 @@ function navigate(t, B, world, P, now, gun) {
   return { a, mag, forced: false };
 }
 
+// Which way to step off a line of fire. Called ONCE per threat; the
+// answer is then committed to, which is what stops the shimmy.
+//
+// The two candidates are the perpendiculars to the shot's path, because
+// lateral movement buys the most miss distance per metre travelled —
+// running away down the line barely helps, since the bullet is faster.
+// Between them, what decides it is:
+//
+//   • room, using the turning-width probe, so a bot never commits to a
+//     dodge into a slot it cannot enter;
+//   • TURN COST — sideways is the one direction a tank cannot take
+//     without a 90° swing, so the perpendicular nearer to the hull's
+//     current axis (forwards OR backwards, since reverse is free) gets
+//     there sooner and is worth more;
+//   • which side of the line we are already on, because continuing off
+//     that way is a shorter trip than crossing in front of the shot.
+function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev) {
+  const slotOf = (a) => {
+    const n = ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    return Math.round(n / (Math.PI * 2) * DIRS) % DIRS;
+  };
+
+  // A beam has no travel time — the only answer is to be off the line,
+  // so the candidates are the two ways directly away from it.
+  const base = th.kind === "beam"
+    ? Math.atan2(t.y - th.y, t.x - th.x)
+    : Math.atan2(th.vy, th.vx) + Math.PI / 2;
+  const cands = th.kind === "beam" ? [base, base + Math.PI] : [base, base + Math.PI];
+
+  let best = base, bv = -Infinity;
+  for (let k = 0; k < cands.length; k++) {
+    const a = cands[k];
+    const i = slotOf(a);
+    // Reverse is free, so the cost of a heading is how far it is from
+    // the hull's AXIS, not from its nose.
+    const turnCost = 1 - Math.abs(Math.cos(angDiff(a, t.a)));
+    const side = k === 0 ? 1 : -1;
+    // Keep sliding the SAME way if it's still working. Shots from one
+    // place arrive one after another, and picking a fresh side for each
+    // turns a slide into an alternation — which is the dance again, just
+    // at a slower tempo. A sustained run across the line is both harder
+    // to lead and what a person would actually do.
+    const carry = hadPrev ? Math.max(0, Math.cos(angDiff(a, prevA))) * 1.1 : 0;
+    const v = open[i] * 2.4
+            + squeeze[i] * 1.2                 // must be usable, not just open
+            - turnCost * 1.6
+            + carry
+            + (th.side === side ? 0.5 : 0);    // carry on off the side we're on
+    if (v > bv) { bv = v; best = a; }
+  }
+  return best;
+}
+
 // Distance we can travel a given way before something solid stops us.
 function clearance(t, world, ray, maxD, halfW) {
   let d = maxD;
@@ -565,8 +674,9 @@ function clearance(t, world, ray, maxD, halfW) {
   }
   for (const w of world.walls ?? []) {
     if ((w.hp ?? 1) <= 0) continue;
-    if (segHitsBox(t.x, t.y, x2, y2, w, halfW)) {
-      const dd = Math.max(0, Math.hypot(w.x - t.x, w.y - t.y) - Math.max(w.hx, w.hy) - halfW);
+    const f = segHitsBox(t.x, t.y, x2, y2, w, halfW);
+    if (f != null) {
+      const dd = f * maxD;          // exact entry distance, not a guess
       if (dd < d) d = dd;
     }
   }
@@ -578,7 +688,9 @@ function clearance(t, world, ray, maxD, halfW) {
 function bestOpening(t, world, prefer) {
   let bi = 0, bv = -Infinity;
   for (let i = 0; i < DIRS; i++) {
-    const c = clearance(t, world, RAY[i], world.tankR * 3, world.tankR * 0.66);
+    // The turning width, not the hull width: an escape route the tank
+    // cannot rotate along is how it got stuck in the first place.
+    const c = clearance(t, world, RAY[i], world.tankR * 3, world.tankR * 0.95);
     const v = c + Math.cos(angDiff(RAY[i].a, prefer)) * world.tankR;
     if (v > bv) { bv = v; bi = i; }
   }
@@ -705,7 +817,18 @@ function gunnery(t, B, world, P, now) {
   // Lead the target by as much of the intercept solution as this tier
   // can work out.
   const speed = shotSpeed(t.weapon, world);
-  const sol = intercept(t.x, t.y, target.x, target.y, target.vx * P.lead, target.vy * P.lead, speed);
+  // Solve the intercept PROPERLY, then blend toward the target's
+  // current position by the tier's skill. Scaling the velocity before
+  // solving (what this used to do) is not a weaker version of the same
+  // answer — the solution is non-linear in velocity, so a half-speed
+  // target gives a systematically wrong bearing rather than a partly
+  // corrected one. Solving first and easing off afterwards means a
+  // weaker bot under-leads honestly and a strong one is exact.
+  const full = intercept(t.x, t.y, target.x, target.y, target.vx, target.vy, speed);
+  const sol = {
+    x: target.x + (full.x - target.x) * P.lead,
+    y: target.y + (full.y - target.y) * P.lead,
+  };
   if (now - B.aimErrAt > 500) {
     B.aimErrAt = now;
     B.aimErr = (Math.random() - 0.5) * 2 * P.aimErr;
@@ -979,6 +1102,17 @@ function raySlab(ox, oy, dx, dy, maxD, x1, y1, x2, y2) {
 
 // Segment vs an oriented box (a wall someone placed): rotate into the
 // box's frame and it becomes segment-vs-AABB.
+// Where along the segment a padded slab is first touched, as a
+// fraction 0..1, or null if it is missed entirely. Liang–Barsky in the
+// slab's own frame.
+//
+// This used to return only a boolean, and clearance() then guessed the
+// distance from the slab's centre minus its LARGEST half-extent. For a
+// wall — long and thin — that guess is wrong by most of its length in
+// one direction and pessimistic in the other, so bots both walked into
+// walls they thought were far away and refused gaps that were open.
+// The exact entry point was already being computed here; it was simply
+// discarded.
 function segHitsBox(x1, y1, x2, y2, w, pad) {
   const c = Math.cos(-w.a), s = Math.sin(-w.a);
   const ax = x1 - w.x, ay = y1 - w.y;
@@ -995,8 +1129,9 @@ function segHitsBox(x1, y1, x2, y2, w, pad) {
     else { if (r < t0) return false; if (r < t1) t1 = r; }
     return true;
   };
-  return clip(-dx, p1x + hx) && clip(dx, hx - p1x) &&
-         clip(-dy, p1y + hy) && clip(dy, hy - p1y);
+  const hit = clip(-dx, p1x + hx) && clip(dx, hx - p1x) &&
+              clip(-dy, p1y + hy) && clip(dy, hy - p1y);
+  return hit ? t0 : null;
 }
 
 // Is the straight run between two points free of maze AND placed walls?

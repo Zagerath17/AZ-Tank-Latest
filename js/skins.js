@@ -232,17 +232,30 @@ export function freeBotSkin(taken) {
 // price list plus metadata.
 export const PATTERNS = {
   solid: { name: "Solid", cost: 0, colors: 1 },
+  // --- cheap and graphic: read instantly, simple to draw -------------
+  checker: { name: "Checker", cost: 35, colors: 2 },
   splotchy: { name: "Splotchy", cost: 40, colors: 2 },
   twoTone: { name: "Two Tone", cost: 40, colors: 2 },
   stripes: { name: "Racing Stripes", cost: 45, colors: 2 },
+  hazard: { name: "Hazard", cost: 50, colors: 2 },
+  chevron: { name: "Chevron", cost: 55, colors: 2 },
+  // --- mid: proper motifs with some structure to them ----------------
   camo: { name: "Camo", cost: 60, colors: 2 },
   hexScale: { name: "Hex Scale", cost: 65, colors: 2 },
+  plaid: { name: "Plaid", cost: 65, colors: 2 },
   flames: { name: "Flames", cost: 70, colors: 2 },
+  splatter: { name: "Splatter", cost: 70, colors: 2 },
   modernCamo: { name: "Modern Camo", cost: 80, colors: 2 },
+  carbon: { name: "Carbon Fibre", cost: 80, colors: 2 },
   circuit: { name: "Circuit", cost: 85, colors: 2 },
+  // --- dear: fiddly, layered, or just very showy ---------------------
   tiger: { name: "Tiger", cost: 90, colors: 2 },
+  scales: { name: "Scales", cost: 90, colors: 2 },
   lightning: { name: "Lightning", cost: 100, colors: 2 },
+  topo: { name: "Topographic", cost: 100, colors: 2 },
+  shatter: { name: "Shatter", cost: 115, colors: 2 },
   galaxy: { name: "Galaxy", cost: 120, colors: 2 },
+  aurora: { name: "Aurora", cost: 135, colors: 2 },
 };
 
 export const DEFAULT_PATTERN = "solid";

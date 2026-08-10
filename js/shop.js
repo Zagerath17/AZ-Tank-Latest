@@ -175,6 +175,47 @@ function patternChip(id) {
         linear-gradient(${dark}, ${dark}) 70% 20% / 8% 55% no-repeat, ${light};`;
     case "tiger":
       return `background: repeating-linear-gradient(92deg, ${light} 0 14%, ${dark} 14% 20%, ${light} 20% 30%);`;
+    case "checker":
+      return `background:
+        conic-gradient(${dark} 90deg, ${light} 90deg 180deg, ${dark} 180deg 270deg, ${light} 270deg)
+        0 0 / 50% 50%;`;
+    case "hazard":
+      return `background: repeating-linear-gradient(135deg, ${dark} 0 18%, ${light} 18% 36%);`;
+    case "chevron":
+      return `background:
+        repeating-linear-gradient(115deg, ${dark} 0 8%, transparent 8% 22%),
+        repeating-linear-gradient(65deg, ${dark} 0 8%, transparent 8% 22%), ${light};`;
+    case "plaid":
+      return `background:
+        repeating-linear-gradient(90deg, ${dark} 0 9%, transparent 9% 30%),
+        repeating-linear-gradient(0deg, ${dark} 0 9%, transparent 9% 30%), ${light};`;
+    case "splatter":
+      return `background:
+        radial-gradient(circle at 32% 34%, ${dark} 20%, transparent 21%),
+        radial-gradient(circle at 66% 62%, ${dark} 16%, transparent 17%),
+        radial-gradient(circle at 78% 26%, ${dark} 8%, transparent 9%),
+        radial-gradient(circle at 22% 72%, ${dark} 7%, transparent 8%), ${light};`;
+    case "carbon":
+      return `background:
+        linear-gradient(45deg, ${dark} 25%, transparent 25% 75%, ${dark} 75%) 0 0 / 30% 30%,
+        linear-gradient(45deg, ${dark} 25%, transparent 25% 75%, ${dark} 75%) 15% 15% / 30% 30%, ${light};`;
+    case "scales":
+      return `background:
+        radial-gradient(circle at 50% 0, transparent 40%, ${dark} 41% 52%, transparent 53%) 0 0 / 34% 26%,
+        radial-gradient(circle at 50% 0, transparent 40%, ${dark} 41% 52%, transparent 53%) 17% 13% / 34% 26%, ${light};`;
+    case "topo":
+      return `background:
+        radial-gradient(circle at 40% 45%, transparent 14%, ${dark} 15% 19%, transparent 20% 32%, ${dark} 33% 37%, transparent 38%),
+        radial-gradient(circle at 74% 68%, transparent 10%, ${dark} 11% 15%, transparent 16%), ${light};`;
+    case "shatter":
+      return `background:
+        conic-gradient(from 10deg at 45% 50%, ${dark} 0 22deg, ${light} 22deg 58deg,
+          ${dark} 58deg 92deg, ${light} 92deg 150deg, ${dark} 150deg 195deg,
+          ${light} 195deg 250deg, ${dark} 250deg 300deg, ${light} 300deg);`;
+    case "aurora":
+      return `background:
+        linear-gradient(170deg, transparent 20%, ${dark} 34% 42%, transparent 56%),
+        linear-gradient(190deg, transparent 40%, ${dark} 58% 66%, transparent 78%), ${light};`;
     case "galaxy":
       return `background:
         radial-gradient(circle at 50% 50%, #fff 4%, transparent 6%),

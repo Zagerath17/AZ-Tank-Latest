@@ -18,7 +18,7 @@
 
 import { PALETTE } from "./palette.js";
 import { skinFinish } from "./skins.js";
-import { materialFill, materialDetail, isMaterial, paintMaterialChip } from "./material.js";
+import { materialFill, paintMaterial, isMaterial, paintMaterialChip } from "./material.js";
 
 // The only patterns whose look changes over time. Everything else —
 // paint included — is static, so a preview of it never needs a frame.
@@ -52,16 +52,17 @@ function paintHexToRGBA(hex, alpha) {
 // The fill for a paint id: a plain hex for ordinary colours, or the
 // material's static shading for a special. `now` is gone on purpose —
 // nothing about a colour depends on the clock any more.
-function hullPaint(ctx, color, R, hexOv) {
+function hullPaint(ctx, color, R, hexOv, ang = 0) {
   const hex = hexOv ?? HULL[color] ?? HULL.red;
-  return materialFill(ctx, hex, skinFinish(color), R);
+  return materialFill(ctx, hex, skinFinish(color), R, ang);
 }
 
 // The material's structure (brushing, horizon, facets), drawn inside
 // whatever clip the caller has already set.
-function hullDetail(ctx, color, R, hexOv) {
+// One drawImage of a pre-shaded material tile.
+function hullMaterial(ctx, color, R, hexOv, ang = 0) {
   const hex = hexOv ?? HULL[color] ?? HULL.red;
-  materialDetail(ctx, hex, skinFinish(color), R);
+  return paintMaterial(ctx, hex, skinFinish(color), R, ang);
 }
 
 /* ---------- pattern helpers (mirror game.js) ---------- */
@@ -80,8 +81,8 @@ function patRng(seed) {
   };
 }
 
-function drawPattern(ctx, id, col, R, now, seedId, hexOv) {
-  const paint = hullPaint(ctx, col, R, hexOv);
+function drawPattern(ctx, id, col, R, now, seedId, hexOv, ang = 0) {
+  const paint = hullPaint(ctx, col, R, hexOv, ang);
   const colHex = hexOv ?? HULL[col] ?? HULL.red;
   ctx.fillStyle = paint;
   ctx.strokeStyle = paint;
@@ -269,6 +270,245 @@ function drawPattern(ctx, id, col, R, now, seedId, hexOv) {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
+
+  } else if (id === "checker") {
+    // Hard geometric squares. The simplest of the new set and priced
+    // that way — bold at a glance, nothing clever going on.
+    const cols = 6, rows = 4;
+    const cw = W / cols, ch = H / rows;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if ((r + c) % 2 === 0) ctx.fillRect(L + c * cw, T + r * ch, cw + 0.5, ch + 0.5);
+      }
+    }
+
+  } else if (id === "hazard") {
+    // Industrial caution barring: heavy diagonals with a clean band top
+    // and bottom, so it reads as machinery rather than as racing.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    const step = R * 0.42;
+    for (let x = L - H; x < L + W + H; x += step * 2) {
+      ctx.beginPath();
+      ctx.moveTo(x, T); ctx.lineTo(x + step, T);
+      ctx.lineTo(x + step + H, T + H); ctx.lineTo(x + H, T + H);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.fillRect(L, T, W, H * 0.14);
+    ctx.fillRect(L, T + H * 0.86, W, H * 0.14);
+    ctx.restore();
+
+  } else if (id === "chevron") {
+    // Nested arrowheads pointing down the barrel — directional, so the
+    // tank reads as aimed even when it's sitting still.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    ctx.lineWidth = R * 0.15;
+    ctx.lineJoin = "miter";
+    for (let i = 0; i < 5; i++) {
+      const x = L + W * 0.08 + i * R * 0.36;
+      ctx.beginPath();
+      ctx.moveTo(x, T + H * 0.06);
+      ctx.lineTo(x + R * 0.30, T + H * 0.5);
+      ctx.lineTo(x, T + H * 0.94);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+  } else if (id === "plaid") {
+    // Woven tartan: bands both ways, and where they cross the overlap
+    // doubles up — which is what makes real cloth read as woven rather
+    // than as a grid drawn on top.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    ctx.globalAlpha = 0.55;
+    for (let i = 0; i < 5; i++) {
+      const x = L + (i + 0.5) * (W / 5);
+      ctx.fillRect(x - R * 0.13, T, R * 0.26, H);
+      ctx.fillRect(x - R * 0.30, T, R * 0.05, H);
+    }
+    for (let i = 0; i < 3; i++) {
+      const y = T + (i + 0.5) * (H / 3);
+      ctx.fillRect(L, y - R * 0.13, W, R * 0.26);
+      ctx.fillRect(L, y - R * 0.30, W, R * 0.05);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+  } else if (id === "splatter") {
+    // Thrown paint: a few hard-edged blots, each with a short tail of
+    // droplets flung off it. Deliberately sharp, so it never gets
+    // confused with the soft blobs of Splotchy.
+    const rng = patRng(seedId + "splat");
+    for (let i = 0; i < 5; i++) {
+      const bx = L + rng() * W, by = T + rng() * H;
+      const br = R * (0.12 + rng() * 0.16);
+      ctx.beginPath();
+      const lobes = 8;
+      for (let k = 0; k <= lobes; k++) {
+        const a2 = (k / lobes) * Math.PI * 2;
+        const rad = br * (0.65 + rng() * 0.7);
+        const px = bx + Math.cos(a2) * rad, py = by + Math.sin(a2) * rad;
+        if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath(); ctx.fill();
+      const dir = rng() * Math.PI * 2;
+      for (let d = 1; d <= 4; d++) {
+        const dd = br * (1.3 + d * 0.75);
+        ctx.beginPath();
+        ctx.arc(bx + Math.cos(dir) * dd, by + Math.sin(dir) * dd,
+                br * (0.30 - d * 0.05), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+  } else if (id === "carbon") {
+    // Carbon-fibre twill: pairs of tows crossing over and under in a
+    // 2×2 basket. The alternating direction per cell is the weave.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    const cell = R * 0.30;
+    for (let y = T; y < T + H; y += cell) {
+      for (let x = L; x < L + W; x += cell) {
+        const gx = Math.round((x - L) / cell), gy = Math.round((y - T) / cell);
+        if ((gx + gy) % 2) continue;
+        ctx.globalAlpha = 0.75;
+        ctx.fillRect(x, y, cell * 0.94, cell * 0.44);
+        ctx.globalAlpha = 0.45;
+        ctx.fillRect(x, y + cell * 0.5, cell * 0.44, cell * 0.44);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+  } else if (id === "scales") {
+    // Overlapping reptile scales: rounded, layered front-to-back and
+    // offset row to row, so each row tucks under the one ahead.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    const sw = R * 0.36, sh = R * 0.30;
+    let row = 0;
+    for (let y = T - sh; y < T + H + sh; y += sh * 0.62, row++) {
+      const off = (row % 2) * sw * 0.5;
+      for (let x = L - sw; x < L + W + sw; x += sw) {
+        ctx.beginPath();
+        ctx.moveTo(x + off, y);
+        ctx.quadraticCurveTo(x + off + sw * 0.5, y + sh * 1.35, x + off + sw, y);
+        ctx.closePath();
+        ctx.globalAlpha = 0.42 + (row % 2) * 0.2;
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+  } else if (id === "topo") {
+    // Survey-map contour lines: nested rings around a couple of peaks,
+    // each ring a fixed height step. Thin, technical, unmistakable.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    ctx.lineWidth = Math.max(0.8, R * 0.045);
+    const rng = patRng(seedId + "topo");
+    const peaks = [
+      { x: L + W * 0.30, y: T + H * 0.42 },
+      { x: L + W * 0.72, y: T + H * 0.60 },
+    ];
+    for (const pk of peaks) {
+      for (let k = 1; k <= 7; k++) {
+        const rad = k * R * 0.17;
+        ctx.beginPath();
+        const steps = 22;
+        for (let i2 = 0; i2 <= steps; i2++) {
+          const a2 = (i2 / steps) * Math.PI * 2;
+          const wob = 1 + Math.sin(a2 * 3 + k) * 0.13 + Math.sin(a2 * 5 - k * 2) * 0.07;
+          const px = pk.x + Math.cos(a2) * rad * wob * 1.25;
+          const py = pk.y + Math.sin(a2) * rad * wob;
+          if (i2 === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+    rng();
+    ctx.restore();
+
+  } else if (id === "shatter") {
+    // Cracked glass: shards radiating from an impact point, with the
+    // fracture lines drawn over them. Angular and irregular — the
+    // opposite of every soft pattern in the list.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    const rng = patRng(seedId + "shatter");
+    const hx2 = L + W * 0.42, hy2 = T + H * 0.5;
+    const n = 11;
+    const rad = [];
+    for (let i = 0; i <= n; i++) rad.push(R * (0.8 + rng() * 1.5));
+    for (let i = 0; i < n; i++) {
+      const a0 = (i / n) * Math.PI * 2, a1 = ((i + 1) / n) * Math.PI * 2;
+      if (i % 2) continue;                       // alternate shards filled
+      ctx.beginPath();
+      ctx.moveTo(hx2, hy2);
+      ctx.lineTo(hx2 + Math.cos(a0) * rad[i], hy2 + Math.sin(a0) * rad[i]);
+      ctx.lineTo(hx2 + Math.cos(a1) * rad[i + 1], hy2 + Math.sin(a1) * rad[i + 1]);
+      ctx.closePath();
+      ctx.globalAlpha = 0.55;
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = Math.max(0.8, R * 0.05);
+    for (let i = 0; i < n; i++) {
+      const a0 = (i / n) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(hx2, hy2);
+      ctx.lineTo(hx2 + Math.cos(a0) * rad[i], hy2 + Math.sin(a0) * rad[i]);
+      ctx.stroke();
+    }
+    for (let ring = 1; ring <= 2; ring++) {
+      ctx.beginPath();
+      for (let i = 0; i <= n; i++) {
+        const a0 = (i % n / n) * Math.PI * 2;
+        const rr2 = rad[i % n] * (ring === 1 ? 0.42 : 0.74);
+        const px = hx2 + Math.cos(a0) * rr2, py = hy2 + Math.sin(a0) * rr2;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath(); ctx.stroke();
+    }
+    ctx.restore();
+
+  } else if (id === "aurora") {
+    // Ribbons of light: several curtains sweeping across the hull, each
+    // fading out at its top and bottom edge. The most involved of the
+    // set, and the most expensive.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    const rng = patRng(seedId + "aurora");
+    for (let b = 0; b < 5; b++) {
+      const phase = rng() * Math.PI * 2;
+      const amp = H * (0.14 + rng() * 0.16);
+      const yBase = T + H * (0.18 + rng() * 0.64);
+      const thick = R * (0.14 + rng() * 0.22);
+      const g2 = ctx.createLinearGradient(0, yBase - amp - thick, 0, yBase + amp + thick);
+      g2.addColorStop(0, paintHexToRGBA(colHex, 0));
+      g2.addColorStop(0.5, paintHexToRGBA(colHex, 0.85));
+      g2.addColorStop(1, paintHexToRGBA(colHex, 0));
+      ctx.fillStyle = g2;
+      ctx.beginPath();
+      const steps = 16;
+      for (let i2 = 0; i2 <= steps; i2++) {
+        const x = L + (i2 / steps) * W;
+        const y = yBase + Math.sin(phase + (i2 / steps) * Math.PI * 2.2) * amp;
+        if (i2 === 0) ctx.moveTo(x, y - thick); else ctx.lineTo(x, y - thick);
+      }
+      for (let i2 = steps; i2 >= 0; i2--) {
+        const x = L + (i2 / steps) * W;
+        const y = yBase + Math.sin(phase + (i2 / steps) * Math.PI * 2.2) * amp;
+        ctx.lineTo(x, y + thick);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = paint;
+    ctx.restore();
   }
 }
 
@@ -294,8 +534,12 @@ function drawSpriteTank(ctx, look, R, now, seed) {
 
   ctx.save();
   // The game draws with the barrel along +x; a preview reads best with
-  // the barrel UP, so rotate −90°.
-  ctx.rotate(-Math.PI / 2);
+  // the barrel UP, so rotate −90°. That rotation is this sprite's WORLD
+  // angle, and the material has to be told about it — the reflection is
+  // anchored to the world, so a preview that didn't pass it would light
+  // the tank from a different side than the arena does.
+  const ang = -Math.PI / 2;
+  ctx.rotate(ang);
 
   // Treads.
   ctx.fillStyle = "#2a303c";
@@ -312,14 +556,17 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   ctx.stroke();
 
   // Hull base + material structure + pattern overlay.
-  ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv);
-  rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
-  if (isMaterial(skinFinish(bodyColor)) || (pat && pc[0] && pc[1])) {
+  const bodyIsMaterial = isMaterial(skinFinish(bodyColor));
+  if (bodyIsMaterial || (pat && pc[0] && pc[1])) {
     ctx.save();
     ctx.beginPath(); rrPath(ctx, -R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24); ctx.clip();
-    hullDetail(ctx, bodyColor, R, baseHexOv);
-    if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
+    if (bodyIsMaterial) hullMaterial(ctx, bodyColor, R, baseHexOv, ang);
+    else { ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv, ang); ctx.fillRect(-R*1.2,-R*1.2,R*2.4,R*2.4); }
+    if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv, ang);
     ctx.restore();
+  } else {
+    ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv, ang);
+    rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
   }
 
   // Nose chevron etch.
@@ -368,10 +615,9 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   ctx.save();
   outline(0);
   ctx.clip();
-  ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv);
-  ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
-  hullDetail(ctx, bodyColor, R, baseHexOv);
-  if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
+  if (isMaterial(skinFinish(bodyColor))) hullMaterial(ctx, bodyColor, R, baseHexOv, ang);
+  else { ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv, ang); ctx.fillRect(-R*1.2,-R*1.2,R*2.4,R*2.4); }
+  if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv, ang);
   const bev = ctx.createLinearGradient(0, -R * 0.55, 0, R * 0.55);
   bev.addColorStop(0, "rgba(255,255,255,0.26)");
   bev.addColorStop(0.5, "rgba(255,255,255,0)");

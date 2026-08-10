@@ -140,13 +140,28 @@ Kills pay **tags** (💀), and tags are the only currency. What you can
 - **Ruby** needs the entire rest of the catalogue behind it.
 
 The materials aren't colours with an effect painted on top: the tank is
-made of the stuff, shaded the way the real material responds to light
-(`js/material.js`). None of it animates — a mirror horizon on silver, a
-warm broad specular on gold, cut facets with dispersion on diamond and
-ruby — and the shop chip shows exactly what the hull will wear.
+made of the stuff, shaded with real physically-based rendering
+(`js/material.js`) — a surface normal derived from the hull's own
+signed distance field, a Cook-Torrance microfacet BRDF with GGX
+distribution and Schlick Fresnel, the measured specular reflectance of
+each metal, and a procedural environment sampled by the reflection
+vector. Metals carry their colour in their specular and have no diffuse
+at all, which is why gold's highlight is gold; the gems have cut facets
+that flash in turn as the stone rotates.
+
+None of it is animated. Every material is baked once per orientation
+into a cached tile, so a parked tank is perfectly still and a turning
+one sweeps its reflection exactly as real metal does — and painting a
+tank costs a single image draw rather than the hundred-odd canvas
+operations the old imitation needed.
 
 **Patterns** are pure economy: no gates and no prerequisites, just a
-price. A two-tone pattern is worn with any two colours you own.
+price. A two-tone pattern is worn with any two colours you own. There
+are 22, from Checker at 35 tags up to Aurora at 135 — the cheap ones are
+bold and graphic (Checker, Hazard, Chevron), the middle of the range
+carries proper motifs (Camo, Plaid, Splatter, Carbon Fibre, Circuit),
+and the dear end is the fiddly, layered work (Scales, Topographic,
+Shatter, Galaxy, Aurora).
 
 ## How online lobbies work
 
@@ -258,3 +273,27 @@ a brick wall a player drops is a new dead end they route around, and mud
 is a toll they'll pay only if going round costs more. Neither is known
 instantly — a wall dropped in a bot's face still catches it out for a
 reaction time first.
+
+Two things about how a tank actually moves shape the navigation:
+
+- **A tank is a rectangle that turns.** Fitting down a corridor needs
+  its half-width; getting through a gap while still steering needs its
+  half-*diagonal*, half as much again. Anything between those two looks
+  passable and isn't, which is exactly the slot a dropped wall leaves
+  beside a maze wall. Bots probe with both widths and won't commit to a
+  gap they can't turn in.
+- **Reverse is free.** The hull swings to whichever end is nearer, so
+  straight back costs no more than straight ahead — it's *sideways*
+  that needs a 90° swing. Bots weigh headings on that basis, which is
+  why they reverse out of trouble instead of turning around in it.
+
+Aiming solves the intercept properly and then eases off by skill,
+rather than solving against a scaled-down velocity — the solution is
+non-linear in velocity, so the old way gave weaker tiers a
+systematically wrong bearing instead of a partly corrected one.
+
+Evasion is decided once and then committed to. A shot arriving picks one
+weave — the cheaper of the two ways across its line, judged on room and
+on turning cost — and the bot holds it until the shot is gone, carrying
+on the same way when more fire follows. Re-deciding every frame is what
+makes a bot shimmy on the spot instead of dodging.
