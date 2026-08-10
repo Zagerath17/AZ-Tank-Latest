@@ -48,7 +48,7 @@ function setQueueUI(state, extra = "") {
     if (status) {
       status.textContent = extra ||
         (getAccount()
-          ? `Two tanks, first to ${WIN_TARGET} round wins. You'll be paired with whoever's been waiting longest.`
+          ? `Two tanks, first to ${WIN_TARGET} round wins.`
           : "Log in from the title screen to play 1v1.");
     }
   } else {
@@ -120,7 +120,7 @@ async function matchmakerTick(f, acc) {
     .sort((a, b) => (a[1].at - b[1].at) || (a[0] < b[0] ? -1 : 1));
 
   const waiting = q.filter(([, v]) => !v.match);
-  setQueueUI("queued", `Searching… ${waiting.length} in the queue`);
+  setQueueUI("queued", "Searching…");   // no head-count — it isn't the player's business
   if (!waiting.length || waiting[0][0] !== acc.key) return; // not my job
 
   // Sweep up anyone whose tab died mid-search.

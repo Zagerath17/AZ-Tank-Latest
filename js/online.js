@@ -1256,7 +1256,12 @@ function renderLobby(code, lobby) {
     write(`players/${me}/color`, resolved[me]);
   }
 
-  document.getElementById("lobby-players").innerHTML = COLORS.map((slotColor, i) => {
+  // Seats are capped by MAX_PLAYERS, not by the 4-entry COLORS list the
+  // local (couch) game uses. Empty seats just need a tint to preview, so
+  // they borrow the free primaries.
+  const SEAT_TINTS = ["red", "green", "blue", "yellow", "orange", "cyan", "pink", "lime"];
+  const seats = Array.from({ length: MAX_PLAYERS }, (_, i) => SEAT_TINTS[i % SEAT_TINTS.length]);
+  document.getElementById("lobby-players").innerHTML = seats.map((slotColor, i) => {
     const entry = entries[i];
     if (!entry) {
       return `<li class="lobby-row empty">${tankSVG(slotColor)}<span>Waiting for a tank…</span></li>`;
