@@ -118,7 +118,7 @@ body {
   /* Content screens: cap width and center so forms/lists/boards sit
      in a tidy column rather than stretching edge-to-edge. */
   #screen-online.is-active,
-  #screen-ranked.is-active,
+  #screen-duel.is-active,
   #screen-social.is-active,
   #screen-settings.is-active,
   #screen-local.is-active {
@@ -903,33 +903,13 @@ body {
 .lobby-popover { margin-bottom: 10px; outline: 2px solid rgba(255,255,255,.15); border-radius: 12px; }
 .dnd-row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--red, #ff5147); justify-self: start; }
 
-.rank-badge { vertical-align: -3px; margin-right: 2px; }
-.rank-mybadge {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 1.05rem;
-  margin: 6px 0 14px;
+/* ---- 1v1 screen ---- */
+.duel-card {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  max-width: 520px; margin: 0 auto; text-align: center;
 }
-.board-title { margin: 18px 0 8px; opacity: .85; }
-.board-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-}
-.board-pos {
-  width: 44px;
-  font-family: "Black Ops One", system-ui;
-  opacity: .7;
-}
-.board-name { flex: 1; font-weight: 600; }
-.board-elo { font-variant-numeric: tabular-nums; opacity: .85; }
-.board-me {
-  outline: 2px solid var(--red, #ff5147);
-  outline-offset: -2px;
-  border-radius: 10px;
-}
+.duel-blurb { color: #9aa3b2; line-height: 1.5; margin: 0; }
+.duel-blurb b { color: #e7ecf5; }
 
 /* ---- notice banner: drops from the top, works on every screen ---- */
 .notice {
@@ -1206,42 +1186,6 @@ body {
   }
 }
 
-/* ---- 2v2 duo (team party) panel on the Ranked screen ---- */
-#duo-panel {
-  margin: 8px 0 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--rivet);
-  border-radius: 10px;
-  background: rgba(255,255,255,.03);
-}
-.duo-code {
-  margin: 0 0 6px;
-  font-family: "Black Ops One", system-ui;
-  letter-spacing: .06em;
-  color: #cfe6ff;
-}
-.duo-members { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
-.duo-member {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border: 1px solid var(--rivet);
-  border-radius: 999px;
-  background: rgba(255,255,255,.04);
-}
-.duo-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.duo-input {
-  width: 7.5ch;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--rivet);
-  background: #161a22;
-  color: var(--chalk);
-  font-family: "Chakra Petch", system-ui;
-  letter-spacing: .12em;
-}
-#ranked-queue:disabled { opacity: .45; cursor: not-allowed; }
 
 .btn-link {
   background: none;
@@ -1257,7 +1201,7 @@ body {
 .btn-link:hover { color: #a9caff; }
 .btn-link:disabled { opacity: .5; cursor: default; }
 
-/* ---- ranked results scoreboard ---- */
+/* ---- post-match scoreboard ---- */
 .results-body { width: min(94vw, 560px); margin: 4px auto 14px; }
 .res-winner {
   text-align: center;
@@ -1290,7 +1234,7 @@ body {
   color: #808896;
   border-bottom: 1px solid var(--rivet);
 }
-.res-head span:not(:first-child), .res-row .res-stat, .res-row .res-elo { text-align: center; }
+.res-head span:not(:first-child), .res-row .res-stat { text-align: center; }
 .res-rows { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 .res-row {
   border-radius: 8px;
@@ -1301,23 +1245,11 @@ body {
 .res-row.team-0 { border-left-color: #4a9eff; }
 .res-row.team-1 { border-left-color: #ff6a4d; }
 .res-name { display: flex; align-items: center; gap: 6px; font-family: "Chakra Petch", system-ui; font-weight: 600; }
-.res-stat b, .res-elo { font-family: "Black Ops One", system-ui; font-size: 1.05rem; }
-.res-stat em, .res-elo em { display: block; font-size: .55rem; font-style: normal; color: #808896; letter-spacing: .08em; }
-.res-elo.elo-up { color: #4bd08a; }
-.res-elo.elo-down { color: #ff6a4d; }
-
-/* duo seats + invite picker */
-.duo-invite-btn { border-style: dashed; opacity: .85; }
-.duo-invite-list {
-  list-style: none;
-  margin: 8px 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 200px;
-  overflow-y: auto;
-}
+.res-stat b { font-family: "Black Ops One", system-ui; font-size: 1.05rem; }
+.res-stat em { display: block; font-size: .55rem; font-style: normal; color: #808896; letter-spacing: .08em; }
+/* Tags earned is the only thing a match pays out, so it gets the
+   winner's green rather than sitting grey with the other stats. */
+.res-tags b { color: #4bd08a; }
 
 /* account settings modal */
 .acct-modal {
@@ -1448,19 +1380,28 @@ body {
 }
 .shop-group { margin-bottom: 18px; }
 .shop-group.locked { opacity: .72; }
-/* The elite (top-50) group gets a ruby accent so it reads as a prize
-   rather than just another rank shelf. */
-.shop-group-elite {
-  border: 1px solid rgba(224, 17, 95, .38);
+/* The materials shelf is the end of every chain, so it gets a warm
+   metallic frame rather than sitting flush with the colour shelves. */
+.shop-group-material {
+  border: 1px solid rgba(212, 175, 55, .34);
   border-radius: 12px;
   padding: 10px 12px 4px;
   background:
-    radial-gradient(120% 80% at 50% -10%, rgba(224, 17, 95, .14), transparent 70%),
-    rgba(224, 17, 95, .04);
+    radial-gradient(120% 80% at 50% -10%, rgba(212, 175, 55, .12), transparent 70%),
+    rgba(212, 175, 55, .035);
 }
-.shop-group-elite .shop-group-head span:first-child {
-  color: #ff5b8f;
-  text-shadow: 0 0 12px rgba(224, 17, 95, .5);
+.shop-group-material .shop-group-head span:first-child {
+  color: #e8c96a;
+  text-shadow: 0 0 12px rgba(212, 175, 55, .4);
+}
+/* What a locked tile is still waiting on. */
+.shop-need {
+  display: block;
+  margin-top: 2px;
+  font-size: .56rem;
+  line-height: 1.25;
+  letter-spacing: .02em;
+  color: #8b93a3;
 }
 .shop-group-head {
   display: flex;
@@ -1681,12 +1622,7 @@ body {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25), 0 1px 2px rgba(0, 0, 0, .5);
 }
 
-/* Couch co-op: the two ways to fill the empty duo seat sit stacked. */
-.duo-empty-seat { display: flex; flex-direction: column; gap: 6px; }
-.duo-couch-btn { border-style: dashed; opacity: .85; }
-
-
-/* ---------- second local player HUD (ranked 2v2 couch co-op) -------- */
+/* ---------- extra local player HUD (offline couch seats) ---------- */
 /* Sits just above Player 1's readout in the bottom-left, deliberately
    smaller so it never competes with your own health. */
 /* Additional local players stack UPWARD from just above the P1 health
@@ -1743,13 +1679,3 @@ body {
   display: block;
 }
 .arena-wrap.has-touch .p2-hud { bottom: calc(var(--tp-size) + 44px); }
-
-/* Ranked couch-join hint (replaces the old couch button). */
-.duo-join-hint {
-  font-size: .72rem;
-  color: #9fb6dd;
-  letter-spacing: .02em;
-  text-align: center;
-  padding: 2px 4px;
-  opacity: .9;
-}

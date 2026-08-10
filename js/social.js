@@ -20,15 +20,16 @@
 // ================================================================
 
 import { toast, tankSVG, showScreen, onEnter, onLeave, paintVar } from "./main.js";
-import { SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors, isEliteSkin } from "./skins.js";
+import {
+  SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors,
+  isFreeSkin, skinUnlocked, lockReason,
+} from "./skins.js";
 
-// Season reset marker. Any account whose stored wipeVersion is lower
-// gets its ratings, currency and purchases cleared exactly once on its
-// next sign-in. Raise this number to run a fresh wipe in future.
-const WIPE_VERSION = 2;
-// Everyone restarts the ladder from here.
-const WIPE_ELO = 500;
-import { ensureFirebase, joinLobby, lobbyInfo } from "./online.js";
+// Reset marker. Any account whose stored wipeVersion is lower gets its
+// currency and purchases cleared exactly once on its next sign-in.
+// Raise this number to run a fresh wipe in future.
+const WIPE_VERSION = 3;
+import { ensureFirebase, joinLobby, lobbyInfo, MAX_PLAYERS } from "./online.js";
 import { sfx } from "./audio.js";
 
 const LS_NAME = "tank.account.v1";
@@ -111,42 +112,33 @@ function openAccountPanel() {
   // Dev tools: hidden entirely unless this account is on the roster,
   // so a normal player never sees (or can reach) any of it.
   const devWrap = document.getElementById("acct-dev");
-  const paintDevElo = () => {
-    const a = document.getElementById("dev-elo1");
-    const b = document.getElementById("dev-elo2");
+  const paintDev = () => {
     const tg = document.getElementById("dev-tags");
-    if (a) a.textContent = devElo("1v1") ?? "—";
-    if (b) b.textContent = devElo("2v2") ?? "—";
     if (tg) tg.textContent = devTags();
   };
   if (devWrap) {
     devWrap.hidden = !isDev();
-    if (isDev()) paintDevElo();
+    if (isDev()) paintDev();
   }
-  const onDevElo = async (e) => {
-    const eloBtn = e.target.closest("[data-dev-elo]");
+  // Tags are the only balance left to nudge — there are no ratings any
+  // more, so the dev panel is just a shop-testing convenience.
+  const onDevTags = async (e) => {
     const tagBtn = e.target.closest("[data-dev-tags]");
-    if ((!eloBtn && !tagBtn) || !isDev()) return;
-    const btn = eloBtn ?? tagBtn;
-    btn.disabled = true;
+    if (!tagBtn || !isDev()) return;
+    tagBtn.disabled = true;
     try {
-      if (eloBtn) {
-        await devAdjustElo(eloBtn.dataset.devElo, +eloBtn.dataset.delta);
-        msg.textContent = "Elo updated.";
-      } else {
-        await devAdjustTags(+tagBtn.dataset.delta);
-        msg.textContent = "Tags updated.";
-      }
-      paintDevElo();
+      await devAdjustTags(+tagBtn.dataset.delta);
+      msg.textContent = "Tags updated.";
+      paintDev();
       msg.style.color = "#4bd08a";
     } catch (err) {
       msg.style.color = "#ff6a4d";
       msg.textContent = err?.message ?? "Couldn't apply that change.";
     } finally {
-      btn.disabled = false;
+      tagBtn.disabled = false;
     }
   };
-  devWrap?.addEventListener("click", onDevElo);
+  devWrap?.addEventListener("click", onDevTags);
 
   const close = () => { modal.hidden = true; cleanup(); };
   const onSave = async () => {
@@ -223,7 +215,7 @@ function openAccountPanel() {
       await deleteAccount(passEl.value);
       close();
       toast(`Account "${gone}" deleted — everything's gone for good.`, 6000);
-      showScreen("screen-title");
+      showScreen("screen-menu");
     } catch (e) {
       msg.style.color = "#ff6a4d";
       msg.textContent = authErrorText(e);
@@ -243,7 +235,7 @@ function openAccountPanel() {
   delCancel?.addEventListener("click", onDelCancel);
   delGo?.addEventListener("click", onDelGo);
   function cleanup() {
-    devWrap?.removeEventListener("click", onDevElo);
+    devWrap?.removeEventListener("click", onDevTags);
     saveBtn.removeEventListener("click", onSave);
     resetBtn.removeEventListener("click", onReset);
     logoutBtn.removeEventListener("click", onLogout);
@@ -337,8 +329,10 @@ async function adoptProfile(uid, wantName = null, email = null) {
   if ((prof.wipeVersion ?? 0) < WIPE_VERSION) {
     try {
       await f.update(f.ref(f.db, `users/${key}`), {
-        elo1: WIPE_ELO,
-        elo2v2: WIPE_ELO,
+        // Ratings are gone entirely; clear the old fields so no stale
+        // ladder data is left lying around on the account.
+        elo1: null,
+        elo2v2: null,
         tags: 0,
         owned: null,
         ownedPatterns: null,
@@ -350,14 +344,13 @@ async function adoptProfile(uid, wantName = null, email = null) {
       });
       prof = {
         ...prof,
-        elo1: WIPE_ELO, elo2v2: WIPE_ELO, tags: 0,
+        elo1: null, elo2v2: null, tags: 0,
         owned: null, ownedPatterns: null,
         color: DEFAULT_SKIN, pattern: DEFAULT_PATTERN, patColors: null,
         dev: null,
         wipeVersion: WIPE_VERSION,
       };
-      // Also clear the locally cached leaderboard standing so Ruby's
-      // gate re-evaluates against the fresh ladder.
+      // The old leaderboard cache has nothing left to gate — drop it.
       try { localStorage.removeItem("tank.boardPos.v1"); } catch { /* ignore */ }
     } catch { /* rules blocked it — try again next sign-in */ }
   }
@@ -376,8 +369,6 @@ async function adoptProfile(uid, wantName = null, email = null) {
     pattern: PATTERNS[prof.pattern] ? prof.pattern : DEFAULT_PATTERN,
     patColors: Array.isArray(prof.patColors) ? prof.patColors.slice(0, 2) : [],
     ownedPatterns: { ...(prof.ownedPatterns ?? {}), [DEFAULT_PATTERN]: true },
-    elo1: prof.elo1 ?? null,
-    elo2v2: prof.elo2v2 ?? null,
   };
   localStorage.setItem(LS_NAME, JSON.stringify(account));
   // Their cloud-saved preferences come back with them.
@@ -428,8 +419,6 @@ export async function changeUsername(newName) {
   const updates = {
     [`users/${account.key}/name`]: name,
     [`names/${nameKey}`]: account.key,
-    [`leaderboard/elo1/${account.key}/name`]: name,
-    [`leaderboard/elo2v2/${account.key}/name`]: name,
   };
   await f.update(f.ref(f.db), updates);
   account = { ...account, name };
@@ -497,27 +486,11 @@ export async function deleteAccount(password) {
   const key = account.key;
   const uid = account.uid ?? user.uid;
 
-  // 2. Step out of anything live so no lobby/team is left holding a
-  //    seat for a player who no longer exists.
-  try {
-    const duoSnap = await f.get(f.ref(f.db, "duos"));
-    const duos = duoSnap.val() ?? {};
-    for (const [code, d] of Object.entries(duos)) {
-      if (!d?.members?.[key]) continue;
-      // Leader leaving dissolves the team; otherwise just free my seat.
-      if (d.leader === key) await f.remove(f.ref(f.db, `duos/${code}`));
-      else await f.remove(f.ref(f.db, `duos/${code}/members/${key}`));
-    }
-  } catch (e) { /* best-effort */ }
-
-  // 3. Gather every remaining path that mentions me.
+  // 2. Gather every path that mentions me.
   const updates = {};
-  updates[`users/${key}`] = null;              // profile, elo, records, invites…
+  updates[`users/${key}`] = null;              // profile, records, invites…
   updates[`uids/${uid}`] = null;               // the uid → account mapping
-  updates[`leaderboard/elo1/${key}`] = null;   // public mirrors
-  updates[`leaderboard/elo2v2/${key}`] = null;
   updates[`queue/1v1/${key}`] = null;          // any pending search
-  updates[`queue/2v2/${key}`] = null;
 
   // Friends' links back to me — otherwise they'd keep a ghost in
   // their list forever.
@@ -632,29 +605,6 @@ export function setStatus(status, lobbyCode = null) {
 
 /* ---------- dev tools ---------- */
 
-// Nudge one of MY OWN ratings by ±100. Dev-only, and it only ever
-// writes this account's own rows — no other player is touched.
-export async function devAdjustElo(mode, delta) {
-  if (!account?.dev) throw new Error("Not a dev account.");
-  const field = mode === "2v2" ? "elo2v2" : "elo1";
-  const f = await ensureFirebase();
-  const cur = (await f.get(f.ref(f.db, `users/${account.key}/${field}`))).val();
-  const next = Math.max(0, Math.round((cur ?? 500) + delta));
-  await f.update(f.ref(f.db), {
-    [`users/${account.key}/${field}`]: next,
-    // Keep the public mirror in step, or the leaderboard would lie.
-    [`leaderboard/${field}/${account.key}`]: { name: account.name ?? account.key, elo: next },
-  });
-  account[field] = next;
-  localStorage.setItem(LS_NAME, JSON.stringify(account));
-  return next;
-}
-
-export function devElo(mode) {
-  const field = mode === "2v2" ? "elo2v2" : "elo1";
-  return account?.[field] ?? null;
-}
-
 // Nudge MY OWN tag balance by ±10. Dev-only, and it only ever writes
 // this account's own row. Devs earn/spend tags like anyone else now;
 // this is just a convenience to top up or drain the balance for testing.
@@ -707,13 +657,10 @@ export function getTags() {
   return account?.tags ?? 0;
 }
 
-// A skin is owned if it's a FREE default (no cost, no rank gate — red and
-// the three extra primaries) or has been explicitly bought.
-function isFreeSkin(id) {
-  const s = SKINS[id];
-  return !!s && !s.reserved && (s.cost ?? 0) === 0 && s.tier == null;
-}
-
+// A skin is owned if it costs nothing (red and the three extra
+// primaries) or has been explicitly bought. Free paint being owned from
+// the start is what makes Dark Red buyable on day one and what lets
+// Bronze ask only for the six primaries you actually pay for.
 export function ownsSkin(id) {
   if (id === DEFAULT_SKIN || isFreeSkin(id)) return true;
   return !!account?.owned?.[id];
@@ -723,16 +670,6 @@ export function ownedSkins() {
   const free = {};
   for (const id of Object.keys(SKINS)) if (isFreeSkin(id)) free[id] = true;
   return { ...free, ...(account?.owned ?? {}), [DEFAULT_SKIN]: true };
-}
-
-// The rating the shop gates on: your BEST of the two ladders, so a
-// rank you've reached in either mode unlocks its paint.
-export function bestElo() {
-  if (!account) return null;
-  const a = account.elo1;
-  const b = account.elo2v2;
-  if (a == null && b == null) return null;
-  return Math.max(a ?? -Infinity, b ?? -Infinity);
 }
 
 // Wear paint you already own.
@@ -746,18 +683,17 @@ export async function equipSkin(id) {
   await f.set(f.ref(f.db, `users/${account.key}/color`), id);
 }
 
-// Buy paint. The rank gate and the price are both checked here, not
+// Buy paint. The unlock chain and the price are both checked here, not
 // just in the UI — the button being enabled is never the authority.
-export async function buySkin(id, opts = {}) {
+export async function buySkin(id) {
   if (!account) throw new Error("Log in to use the shop.");
   const skin = SKINS[id];
   if (!skin || skin.reserved) throw new Error("That paint doesn't exist.");
   if (ownsSkin(id)) throw new Error("You already own that.");
-  // Elite paint (Ruby) is leaderboard-gated. The shop verifies standing
-  // live and passes eliteOk; refuse any path that didn't, so a stale or
-  // skipped check can't quietly sell it.
-  if (isEliteSkin(id) && !opts.eliteOk) {
-    throw new Error(`${skin.name} is for the world top 50 only.`);
+  // Everything this colour stands on has to be owned first. Checked
+  // against live ownership, so a stale render can't sell a locked tile.
+  if (!skinUnlocked(id, ownsSkin)) {
+    throw new Error(lockReason(id, ownsSkin) || `${skin.name} is still locked.`);
   }
   const cost = skin.cost ?? 0;
   const f = await ensureFirebase();
@@ -807,7 +743,8 @@ export async function equipPattern(id, colors = []) {
   });
 }
 
-// Buy a pattern. Rank gate + price checked here, not just in the UI.
+// Buy a pattern. Patterns have no gates — price is the only check,
+// and it's re-read live here rather than trusted from the UI.
 export async function buyPattern(id) {
   if (!account) throw new Error("Log in to use the shop.");
   const pat = PATTERNS[id];
@@ -830,7 +767,7 @@ export async function buyPattern(id) {
   return account.tags;
 }
 
-// Award tags for ranked kills. Called once per ranked match, with the
+// Award tags for kills. Called once per 1v1 match, with the
 // number of enemy tanks this player destroyed.
 export async function awardTags(kills) {
   const n = Math.max(0, Math.floor(kills ?? 0));
@@ -905,7 +842,7 @@ export async function toggleInvitePanel() {
       panel.innerHTML = `<li class="hint">No friends online right now.</li>`;
       return;
     }
-    const room = info.players < 4;
+    const room = info.players < MAX_PLAYERS;
     panel.innerHTML = invitable.map((p) => `
       <li class="friend-row" style="${paintVar(p.color)}">
         ${tankSVG(p.color)}
@@ -980,7 +917,7 @@ function startListening() {
         // handshake on their side.
         showBanner(`${who} wants to join your lobby`, "ACCEPT", () => {
           if (!lobbyInfo()) { toast("You're not in a lobby any more."); return; }
-          if (lobbyInfo().players >= 4) { toast("Your lobby is full."); return; }
+          if (lobbyInfo().players >= MAX_PLAYERS) { toast("Your lobby is full."); return; }
           fb2.set(fb2.ref(fb2.db, `users/${from}/invites/${account.key}`), {
             code: lobbyInfo().code,
             at: Date.now(),
@@ -1002,24 +939,10 @@ function startListening() {
       }
       fb2.get(fb2.ref(fb2.db, `users/${from}/name`)).then((s) => {
         const who = s.val() ?? from;
-        if (data.kind === "duo") {
-          // A 2v2 team invite — accepting seats you in their duo. The
-          // invite is consumed either way so it can't re-fire later.
-          const consume = () =>
-            fb2.remove(fb2.ref(fb2.db, `users/${account.key}/invites/${from}`)).catch(() => {});
-          showBanner(`${who} invited you to their 2v2 team`, "JOIN", async () => {
-            consume();
-            try {
-              const m = await import("./ranked.js");
-              await m.joinDuo(String(data.code));
-              showScreen("screen-ranked");
-              m.showRanked2v2?.();
-            } catch (e) {
-              toast(e?.message ?? "Couldn't join that team.");
-            }
-          }, consume);
-          return;
-        }
+        // Team invites belonged to 2v2, which no longer exists. An old
+        // one still sitting in the database is silently dropped rather
+        // than offered.
+        if (data.kind === "duo") return;
         showBanner(`${who} invited you to lobby ${data.code}`, "JOIN", async () => {
           try {
             await joinLobby(String(data.code));
@@ -1209,7 +1132,7 @@ async function searchPlayer() {
 
 /* ---------- shared invite helpers ---------- */
 
-// Online, non-DND friends — for invite pickers (lobby and 2v2 duo).
+// Online, non-DND friends — for the lobby invite picker.
 export async function getInvitableFriends() {
   if (!account) return [];
   const f = await ensureFirebase();
@@ -1219,8 +1142,8 @@ export async function getInvitableFriends() {
   return profiles.filter((p) => p.status && p.status !== "offline");
 }
 
-// Drop an invite in a friend's inbox. kind: undefined = lobby, "duo" =
-// a 2v2 team seat. `code` is the lobby/duo code to join on accept.
+// Drop an invite in a friend's inbox. `code` is the lobby code to join
+// on accept.
 export async function sendInvite(friendKey, code, kind = null) {
   if (!account) throw new Error("Log in first.");
   const f = await ensureFirebase();

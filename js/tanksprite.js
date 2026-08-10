@@ -1,19 +1,28 @@
 // ================================================================
-// tanksprite.js — an animated, canvas-drawn tank that matches EXACTLY
-// what you drive in-game: the metallic/reflective/shiny paint finishes
-// AND the two-tone patterns, both animated. Used everywhere a tank
-// preview appears outside the arena — the shop, the head-to-head card,
-// the in-game scoreboard, and the results screen — so a gold tank
-// shimmers gold in all of them, not just on the battlefield.
+// tanksprite.js — a canvas-drawn tank that matches EXACTLY what you
+// drive in-game: the material paints AND the two-tone patterns. Used
+// everywhere a tank preview appears outside the arena — the shop, the
+// head-to-head card, the in-game scoreboard, and the results screen —
+// so a gold tank is the same gold in all of them.
 //
-// The drawing here mirrors drawTank() in game.js. It's a separate copy
-// (parameterised by a passed-in ctx) rather than a shared import
-// because game.js's versions are bound to the arena canvas; keeping a
-// self-contained renderer avoids entangling the two canvases.
+// PAINT DOESN'T MOVE. The materials are shaded statically (material.js
+// is shared with the arena renderer, so there is only one definition of
+// what gold looks like). Only the two ANIMATED patterns — lightning and
+// galaxy — need a frame loop, and a sprite that wears neither is drawn
+// once and left alone.
+//
+// The tank geometry here mirrors drawTank() in game.js: a separate copy
+// (parameterised by a passed-in ctx) rather than a shared import,
+// because game.js's version is bound to the arena canvas.
 // ================================================================
 
 import { PALETTE } from "./palette.js";
 import { skinFinish } from "./skins.js";
+import { materialFill, materialDetail, isMaterial, paintMaterialChip } from "./material.js";
+
+// The only patterns whose look changes over time. Everything else —
+// paint included — is static, so a preview of it never needs a frame.
+const ANIMATED_PATTERNS = new Set(["lightning", "galaxy"]);
 
 const HULL = PALETTE;
 
@@ -38,61 +47,21 @@ function paintHexToRGBA(hex, alpha) {
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
-/* ---------- animated paint finish (mirrors game.js hullPaint) ---------- */
+/* ---------- paint (shared with the arena via material.js) ---------- */
 
-function hullPaint(ctx, color, R, now, hexOv) {
+// The fill for a paint id: a plain hex for ordinary colours, or the
+// material's static shading for a special. `now` is gone on purpose —
+// nothing about a colour depends on the clock any more.
+function hullPaint(ctx, color, R, hexOv) {
   const hex = hexOv ?? HULL[color] ?? HULL.red;
-  const finish = skinFinish(color);
-  if (finish === "flat") return hex;
+  return materialFill(ctx, hex, skinFinish(color), R);
+}
 
-  const drift = Math.sin(now / 5200 * Math.PI * 2);
-  const off = drift * R * 1.1;
-  const g = ctx.createLinearGradient(-R + off, -R * 1.2, R + off, R * 1.2);
-  const lit = (f) => mix(hex, "#ffffff", f);
-  const dim = (f) => mix(hex, "#0b0d12", f);
-
-  if (finish === "metallic") {
-    g.addColorStop(0.00, dim(0.55)); g.addColorStop(0.12, lit(0.55));
-    g.addColorStop(0.20, dim(0.42)); g.addColorStop(0.34, lit(0.85));
-    g.addColorStop(0.42, hex); g.addColorStop(0.55, dim(0.55));
-    g.addColorStop(0.66, lit(0.70)); g.addColorStop(0.78, dim(0.36));
-    g.addColorStop(0.90, lit(0.50)); g.addColorStop(1.00, dim(0.58));
-  } else if (finish === "reflective") {
-    g.addColorStop(0.00, dim(0.70)); g.addColorStop(0.38, dim(0.52));
-    g.addColorStop(0.44, lit(0.65)); g.addColorStop(0.48, "#ffffff");
-    g.addColorStop(0.52, "#ffffff"); g.addColorStop(0.56, lit(0.55));
-    g.addColorStop(0.60, dim(0.42)); g.addColorStop(0.82, dim(0.30));
-    g.addColorStop(1.00, dim(0.66));
-  } else if (finish === "shiny") {
-    g.addColorStop(0.00, dim(0.50)); g.addColorStop(0.24, hex);
-    g.addColorStop(0.42, lit(0.85)); g.addColorStop(0.49, "#ffffff");
-    g.addColorStop(0.53, "#fffef7"); g.addColorStop(0.60, lit(0.75));
-    g.addColorStop(0.78, hex); g.addColorStop(1.00, dim(0.52));
-  } else if (finish === "ruby") {
-    // RUBY — top-50 exclusive. Cut gemstone: deep crimson body, sharp
-    // facet edges, three fire-glints, and an inner fire that pulses on
-    // its own slow cycle. (Mirrors game.js hullPaint.)
-    const fire = 0.5 + 0.5 * Math.sin(now / 900);
-    const hot = mix(hex, "#ffd9a0", 0.30 + 0.28 * fire);
-    const deep = mix(hex, "#3a0010", 0.55);
-    g.addColorStop(0.00, deep); g.addColorStop(0.09, lit(0.28));
-    g.addColorStop(0.15, dim(0.62)); g.addColorStop(0.19, "#ffffff");
-    g.addColorStop(0.24, hot); g.addColorStop(0.33, deep);
-    g.addColorStop(0.40, lit(0.50)); g.addColorStop(0.47, "#fff2f5");
-    g.addColorStop(0.52, hot); g.addColorStop(0.60, hex);
-    g.addColorStop(0.66, dim(0.58)); g.addColorStop(0.71, "#ffffff");
-    g.addColorStop(0.77, lit(0.38)); g.addColorStop(0.87, deep);
-    g.addColorStop(1.00, lit(0.20 + 0.20 * fire));
-  } else { // shinyReflective — diamond
-    g.addColorStop(0.00, dim(0.55)); g.addColorStop(0.14, lit(0.55));
-    g.addColorStop(0.22, dim(0.50)); g.addColorStop(0.26, "#ffffff");
-    g.addColorStop(0.30, lit(0.30)); g.addColorStop(0.42, hex);
-    g.addColorStop(0.50, "#eaf7ff"); g.addColorStop(0.56, lit(0.45));
-    g.addColorStop(0.64, dim(0.48)); g.addColorStop(0.68, "#ffffff");
-    g.addColorStop(0.74, lit(0.35)); g.addColorStop(0.88, dim(0.42));
-    g.addColorStop(1.00, lit(0.25));
-  }
-  return g;
+// The material's structure (brushing, horizon, facets), drawn inside
+// whatever clip the caller has already set.
+function hullDetail(ctx, color, R, hexOv) {
+  const hex = hexOv ?? HULL[color] ?? HULL.red;
+  materialDetail(ctx, hex, skinFinish(color), R);
 }
 
 /* ---------- pattern helpers (mirror game.js) ---------- */
@@ -112,7 +81,7 @@ function patRng(seed) {
 }
 
 function drawPattern(ctx, id, col, R, now, seedId, hexOv) {
-  const paint = hullPaint(ctx, col, R, now, hexOv);
+  const paint = hullPaint(ctx, col, R, hexOv);
   const colHex = hexOv ?? HULL[col] ?? HULL.red;
   ctx.fillStyle = paint;
   ctx.strokeStyle = paint;
@@ -314,9 +283,8 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   const pat = look?.pattern && look.pattern !== "solid" ? look.pattern : null;
   const pc = Array.isArray(look?.patColors) ? look.patColors : [];
   const bodyColor = pat && pc[0] ? pc[0] : color;
-  // 2v2 team paint: the lobby may hand us explicit HEXES that override
-  // the skin's own colours (so a clashing enemy team is recoloured on
-  // our screen). Same contract as the arena renderer: colorHex is the
+  // A caller may hand us explicit HEXES that override the skin's own
+  // colours. Same contract as the arena renderer: colorHex is the
   // solid/base override, patHex = [base, overlay] for a pattern.
   const patOv = Array.isArray(look?.patHex) ? look.patHex : null;
   const baseHexOv = pat ? (patOv ? patOv[0] : undefined) : (look?.colorHex || undefined);
@@ -343,13 +311,14 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   }
   ctx.stroke();
 
-  // Hull base + pattern overlay.
-  ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
+  // Hull base + material structure + pattern overlay.
+  ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
-  if (pat && pc[0] && pc[1]) {
+  if (isMaterial(skinFinish(bodyColor)) || (pat && pc[0] && pc[1])) {
     ctx.save();
     ctx.beginPath(); rrPath(ctx, -R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24); ctx.clip();
-    drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
+    hullDetail(ctx, bodyColor, R, baseHexOv);
+    if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
     ctx.restore();
   }
 
@@ -399,8 +368,9 @@ function drawSpriteTank(ctx, look, R, now, seed) {
   ctx.save();
   outline(0);
   ctx.clip();
-  ctx.fillStyle = hullPaint(ctx, bodyColor, R, now, baseHexOv);
+  ctx.fillStyle = hullPaint(ctx, bodyColor, R, baseHexOv);
   ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
+  hullDetail(ctx, bodyColor, R, baseHexOv);
   if (pat && pc[0] && pc[1]) drawPattern(ctx, pat, pc[1], R, now, seed, overlayHexOv);
   const bev = ctx.createLinearGradient(0, -R * 0.55, 0, R * 0.55);
   bev.addColorStop(0, "rgba(255,255,255,0.26)");
@@ -446,9 +416,10 @@ function paintCanvas(c, now) {
   ctx.restore();
 }
 
-// Create an animated <canvas> tank sprite. `look` = { color, pattern,
-// patColors }. `px` is the CSS size in pixels. It self-animates while
-// attached to the DOM and stops when removed.
+// Create a <canvas> tank sprite. `look` = { color, pattern, patColors }.
+// `px` is the CSS size in pixels. Paint is static, so the sprite only
+// joins the frame loop when it wears one of the two animated patterns;
+// otherwise it is drawn once and costs nothing thereafter.
 export function tankSpriteCanvas(look, px = 44, seed = "s") {
   const c = document.createElement("canvas");
   c.className = "tank tank-canvas";
@@ -463,36 +434,34 @@ export function tankSpriteCanvas(look, px = 44, seed = "s") {
   c.__R = px * 0.34;         // tank radius within the box
   c.__look = look ?? { color: "red" };
   c.__seed = String(seed);
-  // Paint once immediately so it's never blank before the first frame.
   paintCanvas(c, performance.now());
-  // Register for animation on the next microtask (once it's in the DOM).
-  const start = () => {
-    live.add(c);
-    if (!rafOn) { rafOn = true; requestAnimationFrame(tick); }
-  };
-  queueMicrotask(start);
+  // Nothing about the paint moves, so only an animated PATTERN earns a
+  // frame loop. A shop full of gold and ruby tanks now sits perfectly
+  // still, which is the point.
+  if (ANIMATED_PATTERNS.has(c.__look?.pattern)) {
+    queueMicrotask(() => {
+      live.add(c);
+      if (!rafOn) { rafOn = true; requestAnimationFrame(tick); }
+    });
+  }
   return c;
 }
 
-/* ---------- animated finish swatch (for the shop colour chips) ---------- */
+/* ---------- finish swatch (for the shop colour chips) ---------- */
 
-function paintSwatch(c, now) {
+function paintSwatch(c) {
   const ctx = c.__ctx, dpr = c.__dpr, size = c.__size;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, size, size);
   ctx.save();
   ctx.translate(size / 2, size / 2);
-  // A rounded-square chip filled with the animated finish for this paint.
-  const R = size * 0.5;
-  ctx.beginPath();
-  rrPath(ctx, -R * 0.9, -R * 0.9, R * 1.8, R * 1.8, R * 0.42);
-  ctx.fillStyle = hullPaint(ctx, c.__color, R, now);
-  ctx.fill();
+  // The same fill and structure the tank itself will wear, on a chip.
+  paintMaterialChip(ctx, HULL[c.__color] ?? HULL.red, skinFinish(c.__color), size * 0.5);
   ctx.restore();
 }
 
-// A small animated chip showing a paint's finish (metal shimmer). For
-// flat paints this is a static fill — no rAF needed.
+// A small chip showing a paint's material. Drawn once and never
+// touched again — no rAF anywhere in the shop.
 export function finishSwatchCanvas(colorId, px = 40) {
   const c = document.createElement("canvas");
   c.className = "shop-chip shop-chip-canvas";
@@ -505,26 +474,6 @@ export function finishSwatchCanvas(colorId, px = 40) {
   c.__dpr = dpr;
   c.__size = px;
   c.__color = colorId;
-  paintSwatch(c, performance.now());
-  // Only animate metals; flat paints never change.
-  if (skinFinish(colorId) !== "flat") {
-    c.__isSwatch = true;
-    queueMicrotask(() => {
-      liveSwatch.add(c);
-      if (!swatchRaf) { swatchRaf = true; requestAnimationFrame(tickSwatch); }
-    });
-  }
+  paintSwatch(c);
   return c;
-}
-
-const liveSwatch = new Set();
-let swatchRaf = false;
-function tickSwatch() {
-  const now = performance.now();
-  for (const c of [...liveSwatch]) {
-    if (!c.isConnected) { liveSwatch.delete(c); continue; }
-    paintSwatch(c, now);
-  }
-  if (liveSwatch.size) requestAnimationFrame(tickSwatch);
-  else swatchRaf = false;
 }

@@ -1,6 +1,6 @@
 // ================================================================
-// weapons.js — the AZ-Tank pickup weapons: laser, machine gun,
-// homing rocket, big cannon.
+// weapons.js — the pickup weapons: laser, machine gun, homing
+// rocket, big cannon.
 //
 // This module owns the pure parts: per-weapon barrel geometry (the
 // drawn sprite and the hitbox are the SAME rectangle), ray casting
@@ -184,7 +184,7 @@ export const MG = {
 
 export const ROCKET = {
   speed: 0.72,        // ~10% faster than a driving tank — outrunnable-ish
-  straightMs: 1750,   // flies straight (bouncing) this long, like AZ Tank
+  straightMs: 1750,   // flies straight (bouncing) this long
   seekTurn: 12.0,     // rad/s once seeking — U-turns fit inside a corridor
   r: 1.4,
   lifeMs: 8000,       // 8 s fuse, then it detonates harmlessly

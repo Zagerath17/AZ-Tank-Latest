@@ -26,7 +26,7 @@
         <div class="tank-row" id="menu-tanks" aria-hidden="true"></div>
       </div>
       <nav class="menu-grid">
-        <button class="btn btn-big" data-go="screen-ranked">Ranked</button>
+        <button class="btn btn-big" data-go="screen-duel">1v1</button>
         <button class="btn btn-big" data-go="screen-online">Custom</button>
         <button class="btn btn-big" data-go="screen-local">Local</button>
         <button class="btn btn-big" data-go="screen-shop">Shop</button>
@@ -34,7 +34,7 @@
         <button class="btn btn-big" data-go="screen-settings">Settings</button>
         <button class="btn btn-big" id="menu-login" type="button">👤 Log in</button>
       </nav>
-      <p class="foot">v9.7</p>
+      <p class="foot">v9.2.5</p>
     </section>
 
     <!-- ============ OFFLINE ============ -->
@@ -107,7 +107,7 @@
       </div>
     </section>
 
-    <!-- ============ RANKED RESULTS ============ -->
+    <!-- ============ MATCH RESULTS ============ -->
     <section class="screen screen-center" id="screen-results" aria-label="Match results">
       <h2>Match Results</h2>
       <div class="results-body" id="results-body"></div>
@@ -121,29 +121,21 @@
       <p class="hint vs-wait">Syncing players…</p>
     </section>
 
-    <!-- ============ RANKED ============ -->
-    <section class="screen" id="screen-ranked" aria-label="Ranked">
+    <!-- ============ 1v1 ============ -->
+    <section class="screen screen-center" id="screen-duel" aria-label="1v1">
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
-        <h2>Ranked</h2>
+        <h2>1v1</h2>
       </header>
-      <div class="settings-tabs">
-        <button class="btn tab-btn is-on" id="ranked-tab-1v1" type="button">1v1</button>
-        <button class="btn tab-btn" id="ranked-tab-2v2" type="button">2v2</button>
+      <div class="duel-card">
+        <p class="duel-blurb">
+          One opponent, first to <b>3</b> round wins. The queue is
+          first-come, first-served — you're paired with whoever has been
+          waiting longest. Every kill pays a 💀 tag into the Shop.
+        </p>
+        <button class="btn btn-big btn-go" id="duel-queue" type="button">FIND MATCH</button>
+        <p class="hint" id="duel-status"></p>
       </div>
-      <div id="duo-panel" hidden>
-        <div class="duo-members" id="duo-members"></div>
-        <ul class="duo-invite-list" id="duo-invite-list" hidden></ul>
-        <div class="duo-actions">
-          <button class="btn" id="duo-leave" type="button" hidden>LEAVE TEAM</button>
-        </div>
-      </div>
-      <p class="rank-mybadge" id="ranked-mybadge">Loading…</p>
-      <button class="btn btn-big btn-go" id="ranked-queue" type="button">FIND MATCH</button>
-      <p class="hint" id="ranked-status"></p>
-      <h3 class="board-title">Top 50 worldwide</h3>
-      <ol class="lobby-list" id="ranked-board"><li class="hint">Loading…</li></ol>
-      <li class="board-row board-me" id="ranked-me" hidden></li>
     </section>
 
     <!-- ============ SOCIAL ============ -->
@@ -349,10 +341,8 @@
       <div class="arena-wrap">
         <canvas id="arena"></canvas>
         <span class="multikill" id="multikill" hidden></span>
-        <!-- Second local player (ranked 2v2 couch co-op): their own
-             health and ability readout, so they aren't flying blind. -->
-        <!-- Additional local players (couch co-op / local seats): one
-             stacked readout each, built in game.js. -->
+        <!-- Additional local players (offline couch seats): one stacked
+             health/ability readout each, built in game.js. -->
         <div class="p2-hud" id="p2-hud" hidden></div>
         <div class="loadout-hud" id="loadout-hud" hidden>
           <div class="loadout-slot" data-fire="off" data-cat="offense">
@@ -411,16 +401,6 @@
       <div class="acct-dev" id="acct-dev" hidden>
         <p class="acct-dev-head">⚙ DEV TOOLS</p>
         <div class="dev-row">
-          <span class="dev-label">1v1 Elo <b id="dev-elo1">—</b></span>
-          <button class="btn btn-small" data-dev-elo="1v1" data-delta="-100" type="button">−100</button>
-          <button class="btn btn-small" data-dev-elo="1v1" data-delta="100" type="button">+100</button>
-        </div>
-        <div class="dev-row">
-          <span class="dev-label">2v2 Elo <b id="dev-elo2">—</b></span>
-          <button class="btn btn-small" data-dev-elo="2v2" data-delta="-100" type="button">−100</button>
-          <button class="btn btn-small" data-dev-elo="2v2" data-delta="100" type="button">+100</button>
-        </div>
-        <div class="dev-row">
           <span class="dev-label">Tags <b id="dev-tags">—</b></span>
           <button class="btn btn-small" data-dev-tags data-delta="-10" type="button">−10</button>
           <button class="btn btn-small" data-dev-tags data-delta="10" type="button">+10</button>
@@ -430,9 +410,10 @@
         <button class="btn acct-danger-btn" id="acct-delete" type="button">DELETE ACCOUNT</button>
         <div id="acct-delete-confirm" hidden>
           <p class="acct-warn">
-            <b>This cannot be undone.</b> Your username, email, rating,
-            match records, and friends list are erased for good, and the
-            username is freed for someone else.
+            <b>This cannot be undone.</b> Your username, email, tags,
+            everything you've bought, your match records and your friends
+            list are erased for good, and the username is freed for
+            someone else.
           </p>
           <label class="acct-label" for="acct-pass">Enter your password to confirm</label>
           <input type="password" id="acct-pass" autocomplete="current-password"

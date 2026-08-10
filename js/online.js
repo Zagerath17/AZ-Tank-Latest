@@ -24,22 +24,22 @@
 // ================================================================
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG, paintVar } from "./main.js";
-import { SKINS, BOT_SKINS, DEFAULT_SKIN, skinHex } from "./skins.js";
-import { resolveTeamPaint } from "./teamcolor.js";
+import { SKINS, BOT_SKINS, DEFAULT_SKIN } from "./skins.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats, GEAR_CAP_LIMIT } from "./game.js";
 import * as social from "./social.js";
-import { rankBadge, applyMatchResult } from "./ranked.js";
 import { showVersus, recordResult } from "./versus.js";
-import { showRankedResults } from "./results.js";
+import { showMatchResults } from "./results.js";
 import { startChat, stopChat, updateChatColors } from "./chat.js";
 import { AI_LEVELS } from "./ai.js";
 
 const FB_VERSION = "10.12.2";
-// Custom lobbies hold up to eight tanks. (Ranked still matchmakes to
-// 2 or 4 — this is just the ceiling.)
-const MAX_PLAYERS = 8;
+// A custom lobby holds up to eight tanks (bots count). 1v1 matchmaking
+// makes a lobby of 2; this is the ceiling for everything else, and
+// social.js gates its invites on the same number so the two can't
+// drift apart.
+export const MAX_PLAYERS = 8;
 const SHOT_TTL = 7000; // ms before a shot record is cleaned up
 
 let fb = null;      // firebase handle bundle
@@ -215,18 +215,9 @@ function sortPlayers(players) {
   );
 }
 
-async function myEloOrNull(f, field) {
-  const acc = social.getAccount();
-  if (!acc) return null;
-  try {
-    const s = await f.get(f.ref(f.db, `users/${acc.key}/${field}`));
-    return s.exists() ? s.val() : 500;
-  } catch (e) { return null; }
-}
-
-// Ranked lobbies are made by the matchmaker, never by hand: the
-// maker becomes host, everyone auto-starts once assembled.
-export async function createRankedLobby(mode, expect, teams = null, teamLeaders = null) {
+// Matchmade lobbies are made by the 1v1 matchmaker, never by hand: the
+// maker becomes host, and the match auto-starts once everyone's in.
+export async function createMatchLobby(expect) {
   const f = await ensureFirebase();
   for (let attempt = 0; attempt < 25; attempt++) {
     const code = String(Math.floor(1000 + Math.random() * 9000));
@@ -237,11 +228,8 @@ export async function createRankedLobby(mode, expect, teams = null, teamLeaders 
       createdAt: f.serverTimestamp(),
       hostId: myId(),
       state: "waiting",
-      ranked: true,
-      rankedMode: mode, // "1v1" | "2v2"
+      matched: true,   // came from the queue, not from a shared code
       expect,
-      teams: teams ?? null, // 2v2: { [ukey]: 0|1 }
-      teamLeaders: teamLeaders ?? null, // 2v2: { 0: ukey, 1: ukey }
       players: { [myId()]: {
         joinedAt: f.serverTimestamp(),
         name: social.getAccount()?.name ?? null,
@@ -249,11 +237,9 @@ export async function createRankedLobby(mode, expect, teams = null, teamLeaders 
         color: social.getSkin(), // the paint you bought and equipped
         pattern: social.getPattern(),
         patColors: social.getPatternColors(),
-        e1: await myEloOrNull(f, "elo1"),
-        e2: await myEloOrNull(f, "elo2v2"),
       } },
     });
-    await enterLobby(code, { ranked: true });
+    await enterLobby(code, { matched: true });
     return code;
   }
   throw new Error("Couldn't find a free lobby code.");
@@ -267,12 +253,6 @@ export function lobbyInfo() {
     players: Object.keys(current.playersCache ?? {}).length,
     isHost: !!current.isHost,
   };
-}
-
-// The player id this client uses for its couch Player 2. Distinct from
-// myId() so both tanks get their own lobby node + position stream.
-export function localGuestId() {
-  return `${myId()}~g`;
 }
 
 // ---- outbound write coalescing -------------------------------------
@@ -379,8 +359,6 @@ async function createLobby() {
         color: social.getSkin(), // the paint you bought and equipped
         pattern: social.getPattern(),
         patColors: social.getPatternColors(),
-        e1: await myEloOrNull(f, "elo1"),
-        e2: await myEloOrNull(f, "elo2v2"),
       } },
     });
     await enterLobby(code);
@@ -407,74 +385,19 @@ export async function joinLobby(code) {
       color: social.getSkin(), // the paint you bought and equipped
       pattern: social.getPattern(),
       patColors: social.getPatternColors(),
-      e1: await myEloOrNull(f, "elo1"),
-      e2: await myEloOrNull(f, "elo2v2"),
     });
   }
-  await enterLobby(code, { ranked: !!lobby.ranked });
-}
-
-// COUCH CO-OP join: seat BOTH players from this machine. Register the
-// account normally, then add a second player entry for the guest with
-// the synthetic guest ukey (so the teams map places it on our team and
-// it never resolves to a real account for Elo). Both entries stream
-// their own position from this one client.
-export async function joinLobbyAsLocalDuo(code, guestUkey, acc) {
-  const f = await ensureFirebase();
-  const snap = await f.get(f.ref(f.db, `lobbies/${code}`));
-  if (!snap.exists()) throw new Error("No lobby with that code.");
-  const lobby = snap.val();
-  if (lobby.state !== "waiting") throw new Error("That match has already started.");
-
-  const gid = localGuestId();
-  const e2 = await myEloOrNull(f, "elo2v2");
-  const updates = {};
-  if (!(lobby.players ?? {})[myId()]) {
-    updates[`lobbies/${code}/players/${myId()}`] = {
-      joinedAt: f.serverTimestamp(),
-      name: social.getAccount()?.name ?? null,
-      ukey: social.getAccount()?.key ?? null,
-      color: social.getSkin(),
-      pattern: social.getPattern(),
-      patColors: social.getPatternColors(),
-      e1: await myEloOrNull(f, "elo1"),
-      e2,
-    };
-  }
-  updates[`lobbies/${code}/players/${gid}`] = {
-    joinedAt: f.serverTimestamp(),
-    name: "Player 2",
-    ukey: guestUkey,          // synthetic — never a real account
-    guest: true,
-    // Colour/pattern are resolved by team paint anyway (guest = host
-    // 20% darker); store the host's so any raw reader shows the team.
-    color: social.getSkin(),
-    pattern: social.getPattern(),
-    patColors: social.getPatternColors(),
-    e1: null,
-    e2,
-  };
-  await f.update(f.ref(f.db), updates);
-  // Couch co-op only ever happens in ranked 2v2, so this is a ranked
-  // entry — never show the custom lobby screen here either.
-  await enterLobby(code, { ranked: true });
-  // Clean the GUEST entry up too if this tab dies (enterLobby already
-  // set that up for the account's own node).
-  try {
-    const gDisc = f.onDisconnect(f.ref(f.db, `lobbies/${code}/players/${gid}`));
-    await gDisc.remove();
-    if (current) current.guestDisc = gDisc;
-  } catch (e) { /* best-effort */ }
+  await enterLobby(code, { matched: !!lobby.matched });
 }
 
 /* ---------- lobby lifecycle ---------- */
 
-// `opts.ranked` — a matchmade lobby must NOT drop you on the custom
-// lobby screen. That's the bug where queuing for 2v2 dumped you into
-// what looked like a custom lobby sitting with the enemy team: this is
-// the same plumbing both flows share, and it always showed the lobby
-// UI. Ranked instead stays put (the ranked screen already reads
-// "match found") until the snapshot handler moves everyone to the
+// `opts.matched` — a lobby that came out of the 1v1 queue must NOT drop
+// you on the custom lobby screen. Both flows share this plumbing, and
+// it used to show the lobby UI unconditionally, so being matchmade
+// dumped you into what looked like a custom lobby sitting with your
+// opponent. A matchmade lobby instead stays put (the 1v1 screen already
+// reads "match found") until the snapshot handler moves everyone to the
 // versus card and then into the match.
 async function enterLobby(code, opts = {}) {
   const f = await ensureFirebase();
@@ -490,14 +413,14 @@ async function enterLobby(code, opts = {}) {
   // data immediately on attach, and every callback checks `current`.
   current = {
     code, lobbyRef, playerRef, disc, unsub: () => {},
-    inGame: false, playersCache: {}, ranked: !!opts.ranked,
+    inGame: false, playersCache: {}, matched: !!opts.matched,
   };
   current.unsub = subscribeLobby(f, code, () => {
     stopGame();
     toast("Lost connection to the lobby.");
     exitToOnline();
   });
-  if (!opts.ranked) showScreen("screen-lobby");
+  if (!opts.matched) showScreen("screen-lobby");
 }
 
 function exitToOnline() {
@@ -516,49 +439,40 @@ async function leaveLobby() {
   if (current?.versusCountdown) clearInterval(current.versusCountdown);
   const c = current;
 
-  // ABORT PENALTY: bailing on a live ranked match books a maximum loss
-  // — a 0:3 scoreline for me. In 1v1 the opponent's own client turns my
-  // exit into their 3:0 win; in 2v2 my three tablemates keep playing
-  // (the abandoned player is now in a 1v2) and I'm dropped from their
-  // final tally. Computed BEFORE I remove myself, best-effort.
-  if (c && c.ranked && !c.rankedSettled && c.inGame && c.rankedInfo) {
-    c.rankedSettled = true;
+  // ABANDONING A 1v1: there's no rating to dock any more, but walking
+  // out is still a loss, so the head-to-head record books it as 0:3 and
+  // my damage/kill ledger is published so the player who stayed sees a
+  // complete results screen rather than half a match. Computed BEFORE I
+  // remove myself, best-effort.
+  if (c && c.matched && !c.matchSettled && c.inGame && c.matchInfo) {
+    c.matchSettled = true;
     const acc = social.getAccount();
-    const me = acc ? c.rankedInfo.find((r) => r.key === acc.key) : null;
+    const me = acc ? c.matchInfo.find((r) => r.key === acc.key) : null;
     if (me) {
       const abortStats = getMatchStats(); // grab before stopGame() clears S
-      const merged = c.rankedInfo.map((r) => ({
+      const merged = c.matchInfo.map((r) => ({
         ...r,
-        score: c.rMode === "1v1"
-          ? (r.key === acc.key ? 0 : 3)
-          : ((r.team ?? 0) === (me.team ?? 0) ? 0 : 3), // my team lost 0:3
+        score: r.key === acc.key ? 0 : 3,
       }));
-      Promise.allSettled([
-        applyMatchResult(c.rMode, merged),
-        recordResult(c.rMode, merged.map((m) => ({ id: m.id, key: m.key, score: m.score, team: m.team }))),
-      ]).then(async ([res]) => {
-        // Publish my abort result + damage/kill ledger so the players
-        // who stay and finish still see my contribution and my loss.
-        try {
-          const f = await ensureFirebase();
-          const stats = abortStats;
-          const updates = {};
-          const r = res?.value;
-          if (r) updates[`lobbies/${c.code}/results/${r.key}`] =
-            { name: r.name, before: r.before, after: r.after, delta: r.delta, team: me.team ?? null };
-          if (stats) {
-            updates[`lobbies/${c.code}/damageLog/${stats.myId}`] = stats.dmgBy ?? {};
-            updates[`lobbies/${c.code}/killLog/${stats.myId}`] = stats.killsBy ?? {};
-          }
-          if (Object.keys(updates).length) await f.update(f.ref(f.db), updates);
-        } catch (e) { /* best-effort */ }
-      });
-      toast("Abandoned a ranked match — counted as a loss.", 5000);
+      recordResult(merged.map((m) => ({ id: m.id, key: m.key, score: m.score })))
+        .catch(() => {})
+        .then(async () => {
+          try {
+            const f = await ensureFirebase();
+            const stats = abortStats;
+            if (!stats) return;
+            await f.update(f.ref(f.db), {
+              [`lobbies/${c.code}/damageLog/${stats.myId}`]: stats.dmgBy ?? {},
+              [`lobbies/${c.code}/killLog/${stats.myId}`]: stats.killsBy ?? {},
+            });
+          } catch (e) { /* best-effort */ }
+        });
+      toast("Abandoned a 1v1 — counted as a loss.", 5000);
     }
   }
 
   stopGame(); // no-op if we weren't mid-match
-  const dest = c?.ranked ? "screen-ranked" : "screen-online";
+  const dest = c?.matched ? "screen-duel" : "screen-online";
   if (!c) { showScreen(dest); return; }
 
   gcReset();
@@ -705,8 +619,8 @@ function settingsToOpts(lobby) {
 function renderSettings(lobby, isHost) {
   const panel = document.getElementById("lobby-settings");
   if (!panel) return;
-  // Ranked lobbies are fixed by the ladder — no knobs.
-  panel.hidden = !isHost || !!lobby.ranked;
+  // Matchmade lobbies use fixed competitive rules — no knobs.
+  panel.hidden = !isHost || !!lobby.matched;
   if (panel.hidden) return;
   const s = readSettings(lobby);
 
@@ -955,7 +869,7 @@ function handleSnapshot(code, snap) {
   if (lobby.state === "cancelled") {
     toast("A player never arrived — match cancelled. Queue again!");
     leaveLobby();
-    showScreen("screen-ranked");
+    showScreen("screen-duel");
     return;
   }
 
@@ -975,11 +889,11 @@ function handleSnapshot(code, snap) {
     } else if (!current.inGame && current.versusShown) {
       maybeBeginFromReady(code, lobby);
     } else if (current.inGame) {
-      if (humans.length === 1 && humans[0][0] === me && !lobby.ranked) {
+      if (humans.length === 1 && humans[0][0] === me && !lobby.matched) {
         // Casual: alone with bots → back to the lobby.
         returnToLobbySolo(entries);
       } else {
-        // Ranked stays in-match even when the last opponent bails —
+        // A matchmade 1v1 stays in-match even when the opponent bails —
         // onlineLobbyUpdate turns that into an automatic 3:0 win and
         // the results screen follows.
         onlineLobbyUpdate(lobby);
@@ -1054,8 +968,7 @@ function enterVersus(code, lobby) {
     pattern: p.bot ? "solid" : (p.pattern ?? "solid"),
     patColors: p.bot ? [] : (Array.isArray(p.patColors) ? p.patColors : []),
   }));
-  showVersus(roster, me, lobby.rankedMode ?? "1v1",
-    lobby.teams ?? null, current?.playersCache ?? [], !!lobby.ranked);
+  showVersus(roster, me, current?.playersCache ?? [], !!lobby.matched);
   showScreen("screen-versus");
 
   // Announce readiness (informational — the shared clock, not this
@@ -1123,148 +1036,76 @@ function beginOnlineGame(code, lobby) {
   current.inGame = true;
   social.setStatus("round");
 
-  const rMode = lobby.rankedMode ?? "1v1";
-  // 2v2: the lobby carries teams { ukey: 0|1 } — remap to player ids.
-  const teamsById = lobby.ranked && rMode === "2v2" && lobby.teams
-    ? Object.fromEntries(entries
-        .filter(([, p]) => p.ukey != null && lobby.teams[p.ukey] != null)
-        .map(([id, p]) => [id, lobby.teams[p.ukey]]))
-    : null;
-
-  // 2v2 TEAM PAINT. The host (team leader) chooses the colour + pattern
-  // for the whole team; the second seat wears it 20% darker. And if the
-  // enemy team's paint would clash with ours, we recolour THEM on our
-  // own screen (they do the same to us), so the two sides never look
-  // alike. Everything below is client-relative, anchored on MY team.
-  if (teamsById && lobby.teamLeaders) {
-    const leaders = lobby.teamLeaders; // { 0: ukey, 1: ukey }
-    // Map a team → its leader's lobby-entry.
-    const leaderEntryFor = (team) =>
-      entries.find(([, q]) => q.ukey === leaders[team]) ?? null;
-    // Build the resolver input (one row per player), using each team's
-    // LEADER paint (teammates inherit it).
-    const paintEntries = entries.map(([id, p]) => {
-      const team = teamsById[id] ?? 0;
-      const lead = leaderEntryFor(team);
-      const lp = lead ? lead[1] : p;
-      const leaderPatColors = Array.isArray(lp.patColors) ? lp.patColors : [];
-      const patId = lp.pattern && lp.pattern !== "solid" ? lp.pattern : null;
-      return {
-        id, team,
-        leader: p.ukey != null && leaders[team] === p.ukey,
-        baseHex: skinHex(lp.color ?? DEFAULT_SKIN),
-        patId,
-        patHexes: patId ? leaderPatColors.map((c) => skinHex(c)) : null,
-      };
-    });
-    const myTeam = teamsById[me] ?? 0;
-    const paint = resolveTeamPaint(paintEntries, myTeam);
-    // Fold the result back into the roster: each member shows the
-    // LEADER's colour + pattern IDs (finish + shape) with the resolved
-    // HEXES (darkened / shifted) overlaid.
-    for (const r of roster) {
-      const team = teamsById[r.id];
-      if (team == null) continue;
-      const lead = leaderEntryFor(team);
-      const lp = lead ? lead[1] : null;
-      if (lp) {
-        r.color = lp.color ?? r.color;              // finish
-        r.pattern = lp.pattern ?? "solid";          // shape
-        r.patColors = Array.isArray(lp.patColors) ? lp.patColors : [];
-      }
-      const paints = paint[r.id];
-      if (paints) {
-        r.colorHex = paints.baseHex;
-        r.patHex = paints.patHexes ?? null;
-      }
-    }
-  }
-
-  const rankedInfo = lobby.ranked
+  // Everyone in a matchmade lobby is on their own — there are no teams
+  // any more, so nothing here has to resolve team paint or work out
+  // whose side someone is on.
+  const matchInfo = lobby.matched
     ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
         id,
         key: p.ukey ?? null,
         name: p.name ?? p.ukey ?? "Player",
-        elo: (rMode === "1v1" ? p.e1 : p.e2) ?? 500,
-        team: teamsById ? (teamsById[id] ?? 0) : null,
       }))
     : null;
 
-  // Remember the ranked context so an abort (leaving mid-match) can
-  // book the penalty. rankedSettled flips true the moment the result
-  // is decided normally, so leaveLobby won't double-charge.
+  // Remember the match context so leaving mid-fight can still book the
+  // loss. matchSettled flips true the moment the result is decided
+  // normally, so leaveLobby won't double-book it.
   if (current) {
-    current.ranked = !!lobby.ranked;
-    current.rMode = rMode;
-    current.rankedInfo = rankedInfo;
-    current.rankedSettled = false;
+    current.matched = !!lobby.matched;
+    current.matchInfo = matchInfo;
+    current.matchSettled = false;
   }
 
   const setOpts = settingsToOpts(lobby);
   startOnlineGame({
-    ranked: !!lobby.ranked,
+    duel: !!lobby.matched,
     serverNow, // shared match clock (device clock + Firebase offset)
-    // Custom lobbies honour the host's panel; ranked ignores it.
-    sizePool: lobby.ranked ? null : setOpts.sizePool,
-    gearPool: lobby.ranked ? null : setOpts.gearPool,
-    gearMax: lobby.ranked ? null : setOpts.gearMax,
-    zone: lobby.ranked ? undefined : setOpts.zone,
-    zonePeriod: lobby.ranked ? undefined : setOpts.zonePeriod,
-    teams: teamsById,
-    winTarget: lobby.ranked ? 3 : null, // both ladders: first to 3
-    casualPlayers: !lobby.ranked ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
+    // Custom lobbies honour the host's panel; a matchmade 1v1 uses the
+    // fixed competitive rules and ignores it.
+    sizePool: lobby.matched ? null : setOpts.sizePool,
+    gearPool: lobby.matched ? null : setOpts.gearPool,
+    gearMax: lobby.matched ? null : setOpts.gearMax,
+    zone: lobby.matched ? undefined : setOpts.zone,
+    zonePeriod: lobby.matched ? undefined : setOpts.zonePeriod,
+    winTarget: lobby.matched ? 3 : null, // 1v1: first to 3
+    casualPlayers: !lobby.matched ? entries.slice(0, MAX_PLAYERS).map(([id, p]) => ({
       id, key: p.ukey ?? null,
     })) : null,
-    onRankedEnd: (placements, myStats = null) => {
-      // Everyone computes identically and writes only their OWN elo.
-      if (!rankedInfo) return;
-      if (current) current.rankedSettled = true; // decided — no abort charge
+    onDuelEnd: (placements, myStats = null) => {
+      if (!matchInfo) return;
+      if (current) current.matchSettled = true; // decided normally
+      const look = (id) => roster.find((r) => r.id === id) ?? {};
       const merged = placements.map((pl) => ({
-        ...(rankedInfo.find((r) => r.id === pl.id) ?? { key: null, elo: 1000, team: null }),
-        color: (roster.find((r) => r.id === pl.id) ?? {}).color ?? DEFAULT_SKIN,
-        pattern: (roster.find((r) => r.id === pl.id) ?? {}).pattern ?? "solid",
-        patColors: (roster.find((r) => r.id === pl.id) ?? {}).patColors ?? [],
-        // Team-paint overrides, so a recoloured enemy team shows the
-        // same colours on the results screen as it did in the match.
-        colorHex: (roster.find((r) => r.id === pl.id) ?? {}).colorHex ?? null,
-        patHex: (roster.find((r) => r.id === pl.id) ?? {}).patHex ?? null,
+        ...(matchInfo.find((r) => r.id === pl.id) ?? { key: null }),
+        color: look(pl.id).color ?? DEFAULT_SKIN,
+        pattern: look(pl.id).pattern ?? "solid",
+        patColors: look(pl.id).patColors ?? [],
         score: pl.score,
       }));
       const savedCode = code;
       const myKey = social.getAccount()?.key ?? null;
       (async () => {
-        const [myRes] = await Promise.allSettled([
-          applyMatchResult(rMode, merged),
-          recordResult(rMode, merged.map((m) => ({ id: m.id, key: m.key, score: m.score, team: m.team }))),
-        ]);
-        // Publish my Elo change + my damage/kill ledger so every
-        // finisher's results screen can total the match up.
+        await recordResult(merged.map((m) => ({ id: m.id, key: m.key, score: m.score })))
+          .catch(() => {});
+        // Publish my damage/kill ledger so every finisher's results
+        // screen can total the match up — a kill is only ever known on
+        // the victim's own client.
         try {
           const f = await ensureFirebase();
-          const meRow = merged.find((m) => m.key === myKey);
-          const updates = {};
-          const r = myRes?.value;
-          if (r && meRow) {
-            updates[`lobbies/${savedCode}/results/${r.key}`] =
-              { name: r.name, before: r.before, after: r.after, delta: r.delta, team: meRow.team ?? null };
-          }
           if (myStats) {
-            updates[`lobbies/${savedCode}/damageLog/${myStats.myId}`] = myStats.dmgBy ?? {};
-            updates[`lobbies/${savedCode}/killLog/${myStats.myId}`] = myStats.killsBy ?? {};
+            await f.update(f.ref(f.db), {
+              [`lobbies/${savedCode}/damageLog/${myStats.myId}`]: myStats.dmgBy ?? {},
+              [`lobbies/${savedCode}/killLog/${myStats.myId}`]: myStats.killsBy ?? {},
+            });
           }
-          if (Object.keys(updates).length) await f.update(f.ref(f.db), updates);
         } catch (e) { /* results are best-effort */ }
-        showRankedResults(savedCode, rMode, merged, myKey,
-          () => { leaveLobby(); showScreen("screen-ranked"); });
+        showMatchResults(savedCode, merged, myKey,
+          () => { leaveLobby(); showScreen("screen-duel"); });
       })();
     },
     roundN: lobby.round.n,
     seed: lobby.round.seed,
     myId: me,
-    // Couch co-op: the second local tank this client also drives (its
-    // player id is me+"~g"), or null. Marks that tank local so Player
-    // 2's input moves it and its position streams from here.
-    localGuest: (lobby.players ?? {})[`${me}~g`] ? `${me}~g` : null,
     roster,
     sendPos: (id, pos) => write(`players/${id}/pos`, pos),
     sendShot: (id, key, shot) => {
@@ -1322,10 +1163,10 @@ function beginOnlineGame(code, lobby) {
       fb.update(current.lobbyRef, updates).catch(() => {});
     },
     onExit: () => {
-      // Ranked: exiting is an ABORT — always leave (host included), so
+      // 1v1: exiting is an ABANDON — always leave (host included), so
       // the penalty path in leaveLobby runs. Casual: the host resets
       // the lobby for everyone; others just leave.
-      if (!lobby.ranked && current?.isHost) endMatchForAll();
+      if (!lobby.matched && current?.isHost) endMatchForAll();
       else leaveLobby();
     },
   });
@@ -1346,11 +1187,11 @@ function renderLobby(code, lobby) {
   social.setStatus("lobby", code);
 
   // Host with room (and an account) can beckon friends in — but
-  // ranked lobbies are matchmade: no invites, no bots, auto-start.
+  // matchmade lobbies: no invites, no bots, auto-start.
   const socialBtn = document.getElementById("lobby-social");
-  socialBtn.hidden = !(isHost && social.getAccount()) || !!lobby.ranked;
+  socialBtn.hidden = !(isHost && social.getAccount()) || !!lobby.matched;
   renderSettings(lobby, isHost);
-  if (lobby.ranked) {
+  if (lobby.matched) {
     document.getElementById("lobby-start").hidden = true;
     if (isHost && lobby.state === "waiting") {
       const count = Object.keys(lobby.players ?? {}).length;
@@ -1359,9 +1200,9 @@ function renderLobby(code, lobby) {
         startMatch().catch(() => {}); // strict size — no short-handed starts
       } else if (age > 40000) {
         write("state", "cancelled"); // a no-show — everyone re-queues
-      } else if (!current.rankedTimer) {
-        current.rankedTimer = setTimeout(() => {
-          current.rankedTimer = 0;
+      } else if (!current.matchTimer) {
+        current.matchTimer = setTimeout(() => {
+          current.matchTimer = 0;
           if (current?.lastLobby) renderLobby(current.code, current.lastLobby);
         }, 4000);
       }
@@ -1390,18 +1231,18 @@ function renderLobby(code, lobby) {
 
   // My color choice lost a conflict (or was never set)? Adopt the
   // resolved one so the database matches what everyone sees.
-  // Spin up casual text chat once (not in ranked lobbies).
-  if (!lobby.ranked && !current.chatOn) {
+  // Spin up casual text chat once (not in matchmade lobbies).
+  if (!lobby.matched && !current.chatOn) {
     current.chatOn = true;
     startChat(code, resolved[me]);
   }
   // Keep the chat panel visible only for casual lobbies.
   const chatWrap = document.getElementById("lobby-chat");
-  if (chatWrap) chatWrap.hidden = !!lobby.ranked;
+  if (chatWrap) chatWrap.hidden = !!lobby.matched;
 
   // Feed every player's CURRENT color to the chat so old lines recolor
   // live when someone changes paint.
-  if (!lobby.ranked) {
+  if (!lobby.matched) {
     const colorMap = {};
     for (const [id, p] of entries) colorMap[id] = resolved[id] ?? p.color ?? DEFAULT_SKIN;
     updateChatColors(colorMap);
@@ -1409,7 +1250,7 @@ function renderLobby(code, lobby) {
 
   const mine = entries.find(([id]) => id === me);
   // Keep the color our outgoing chat lines are stamped with in sync.
-  if (!lobby.ranked) window.__myLobbyColor = resolved[me] ?? window.__myLobbyColor;
+  if (!lobby.matched) window.__myLobbyColor = resolved[me] ?? window.__myLobbyColor;
   if (mine && !mine[1].bot && mine[1].color !== resolved[me]) {
     if (mine[1].color) toast(`That paint was taken — you're ${COLOR_NAMES[resolved[me]]} now.`);
     write(`players/${me}/color`, resolved[me]);
@@ -1442,12 +1283,7 @@ function renderLobby(code, lobby) {
     return `
       <li class="lobby-row" style="${paintVar(color)}">
         ${tankSVG(color)}
-        <span class="lobby-name">${(() => {
-          // 4-player ranked lobbies show the 4p rating; everywhere
-          // else (casual + 1v1) shows the 1v1 rating.
-          const e = lobby.ranked && lobby.rankedMode === "2v2" ? p.e2 : p.e1;
-          return typeof e === "number" ? rankBadge(e, 16) : "";
-        })()} ${p.name ?? COLOR_NAMES[color]}</span>
+        <span class="lobby-name">${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;
   }).join("");

@@ -1,7 +1,7 @@
 // ================================================================
 // audio.js — the whole soundscape, synthesized live with WebAudio.
 // No asset files: every sound is a little oscillator/noise recipe
-// tuned to the retro-arcade character of the original AZ Tank —
+// tuned to a retro-arcade character —
 // poppy fires, ticky ricochets, crunchy booms, chirpy pickups.
 //
 // Everything is defensive: if audio is unavailable (old browser,

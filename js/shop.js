@@ -1,62 +1,46 @@
 // ================================================================
 // shop.js — where paint is earned and worn.
 //
-// Tags (skull coins) come from ranked kills, one apiece. Every colour
-// past the free default costs tags AND needs a rank, so what a tank
-// wears says something about what its driver has done.
+// Tags (skull coins) come from kills, one apiece. What you can BUY is
+// no longer a question of rank — it's a question of what you already
+// own, so the shop reads as a route through itself rather than a list
+// of things other people have unlocked:
 //
-// Two tabs: COLOURS (the paint itself) and PATTERNS. Both equip the
-// same way — tap something you own to wear it, tap something you can
-// afford to buy it.
+//   • a shade needs the same hue one step back (blue → dark blue),
+//     and since red is free, dark red is open from your very first tag;
+//   • a MATERIAL needs its whole family finished (Bronze wants every
+//     primary, Silver every dark, and so on);
+//   • Ruby needs the entire rest of the catalogue.
+//
+// Patterns have no gates at all — they cost tags and that's it.
+//
+// Two tabs, both equipping the same way: tap something you own to wear
+// it, tap something you can afford to buy it.
 // ================================================================
 
 import { onEnter, toast } from "./main.js";
 import {
-  SKINS, SHOP_SKINS, TIER_ORDER, DEFAULT_SKIN, tierUnlocked, skinFinish,
+  SKINS, SHOP_SKINS, FAMILY_ORDER, FAMILY_LABEL, DEFAULT_SKIN,
+  skinFinish, skinUnlocked, lockReason, requirements, isMaterialSkin,
   PATTERNS, SHOP_PATTERNS, DEFAULT_PATTERN, patternColors,
-  isEliteSkin, ELITE_TIER,
 } from "./skins.js";
 import {
-  getAccount, getSkin, getTags, ownsSkin, bestElo, buySkin, equipSkin,
+  getAccount, getSkin, getTags, ownsSkin, buySkin, equipSkin,
   ownsPattern, getPattern, getPatternColors, buyPattern, equipPattern, ownedSkins,
 } from "./social.js";
-import { rankOf, isTop50, myBoardPosition, refreshBoardPosition } from "./ranked.js";
 import { finishSwatchCanvas } from "./tanksprite.js";
 
 let tab = "colours";
 
 /* ---------- swatch rendering ---------- */
 
-// The metals aren't flat colours — they're finishes. A swatch shows
-// that: a raked highlight for metallic, a hard mirror band for
-// reflective, a bright bloom for shiny, and a spectral sweep for
-// diamond. drawTank paints the real hulls the same way.
+// A CSS stand-in for a material chip, shown for the instant before the
+// real canvas swatch replaces it. Deliberately plain: the canvas is the
+// authority on what bronze looks like (material.js), and a CSS gradient
+// pretending otherwise would just disagree with it.
 function swatchStyle(id) {
   const s = SKINS[id];
-  const hex = s.hex;
-  // These mirror hullPaint() in game.js — a swatch has to promise the
-  // same material the tank will actually wear. Hard stops, not soft
-  // ramps: at chip size a gentle blend reads as a flat colour.
-  switch (s.finish) {
-    case "metallic": // brushed bands
-      return `background: linear-gradient(128deg, #0006 0%, #fff6 16%, #0007 30%, #fff9 46%,
-        ${hex} 58%, #0007 72%, #fff7 86%, #0006 100%), ${hex};`;
-    case "reflective": // chrome: hard horizon + mirror band
-      return `background: linear-gradient(128deg, #0009 0%, #0008 40%, #fffa 42%, #ffffff 50%,
-        #fff8 56%, #0006 58%, #0009 100%), ${hex};`;
-    case "shiny": // gloss bloom
-      return `background: linear-gradient(128deg, #0007 0%, transparent 28%, #fffb 46%,
-        #fffdf0 52%, #fff9 60%, transparent 80%, #0007 100%), ${hex};`;
-    case "shinyReflective": // diamond: faceted mirror + gloss
-      return `background: linear-gradient(128deg, #0008 0%, #fff5 22%, #0007 30%, #ffffff 32%,
-        #fff4 38%, transparent 52%, #ffffff 62%, #fff6 66%, #0006 80%, #fff4 100%), ${hex};`;
-    case "ruby": // gemstone: dark facets, inner fire, hard glints
-      return `background: linear-gradient(128deg, #3a0010 0%, #fff5 12%, #3a0010 22%,
-        #ffffff 26%, #ffcf9e 34%, #3a0010 44%, #fff2f5 50%, #ffcf9e 58%,
-        ${hex} 66%, #3a0010 76%, #ffffff 82%, #fff6 90%, #3a0010 100%), ${hex};`;
-    default:
-      return `background: ${hex};`;
-  }
+  return `background: ${s.hex};`;
 }
 
 function tile(id, { owned, worn, afford, unlocked }) {
@@ -66,15 +50,18 @@ function tile(id, { owned, worn, afford, unlocked }) {
   let foot = "";
   if (worn) { state = "is-worn"; foot = "WORN"; }
   else if (owned) { state = "is-owned"; foot = "WEAR"; }
-  else if (!unlocked) { state = "is-locked"; foot = `🔒 ${s.tier}`; }
+  else if (!unlocked) { state = "is-locked"; foot = "🔒"; }
   else if (!afford) { state = "is-broke"; foot = `💀 ${cost}`; }
   else { foot = `💀 ${cost}`; }
+  // A locked tile says what's missing, not just that it's shut.
+  const why = unlocked || owned ? "" : lockReason(id, ownsSkin);
   return `
     <button class="shop-tile ${state}" data-skin="${id}" type="button"
-            aria-label="${s.name}${owned ? "" : `, ${cost} tags`}">
+            aria-label="${s.name}${owned ? "" : `, ${cost} tags${why ? `, locked: ${why}` : ""}`}">
       <span class="shop-chip" data-chip="${id}" style="${swatchStyle(id)}"></span>
       <span class="shop-name">${s.name}</span>
       <span class="shop-foot">${foot}</span>
+      ${why ? `<span class="shop-need">${why}</span>` : ""}
     </button>`;
 }
 
@@ -84,39 +71,30 @@ function renderColours() {
   const host = document.getElementById("shop-colours");
   if (!host) return;
   const acc = getAccount();
-  const elo = bestElo();
-  const rank = elo == null ? "Copper" : rankOf(elo).name;
   const tags = getTags();
   const worn = getSkin();
 
-  // Group by the rank that unlocks them; the free defaults sit on their
-  // own (red plus the three extra no-cost primaries).
-  const freeIds = SHOP_SKINS.filter((id) => SKINS[id].tier == null && !isEliteSkin(id));
-  const groups = [{ tier: null, label: "Standard issue", ids: freeIds.length ? freeIds : [DEFAULT_SKIN] }];
-  for (const t of TIER_ORDER) {
-    const ids = SHOP_SKINS.filter((id) => SKINS[id].tier === t);
-    if (ids.length) groups.push({ tier: t, label: `${t} rank`, ids });
-  }
-  // ELITE sits last: leaderboard-gated, not rank-gated.
-  const eliteIds = SHOP_SKINS.filter((id) => isEliteSkin(id));
-  if (eliteIds.length) {
-    groups.push({ tier: ELITE_TIER, label: "Elite — world top 50", ids: eliteIds, elite: true });
-  }
+  // Grouped by family, in progression order, with the materials last —
+  // that ordering IS the unlock chain, so the shelf reads top to bottom
+  // the same way you actually work through it.
+  const groups = FAMILY_ORDER
+    .map((fam) => ({
+      fam,
+      label: FAMILY_LABEL[fam] ?? fam,
+      ids: SHOP_SKINS.filter((id) => SKINS[id].fam === fam),
+    }))
+    .filter((g) => g.ids.length);
 
-  const top50 = isTop50();
-  const myPos = myBoardPosition();
+  const materialIds = SHOP_SKINS.filter((id) => isMaterialSkin(id));
+  if (materialIds.length) {
+    groups.push({ fam: "material", label: "Materials", ids: materialIds, material: true });
+  }
 
   host.innerHTML = groups.map((g) => {
-    // Elite unlocks on leaderboard standing; everything else on rank.
-    const unlocked = g.elite ? top50 : tierUnlocked(g.tier, rank);
     const ownedN = g.ids.filter((id) => ownsSkin(id)).length;
-    const note = unlocked
-      ? `${ownedN}/${g.ids.length} owned`
-      : g.elite
-        ? (myPos ? `🔒 Top 50 only — you're #${myPos}` : "🔒 Top 50 only")
-        : `🔒 Reach ${g.tier}`;
+    const note = `${ownedN}/${g.ids.length} owned`;
     return `
-      <section class="shop-group ${unlocked ? "" : "locked"} ${g.elite ? "shop-group-elite" : ""}">
+      <section class="shop-group ${g.material ? "shop-group-material" : ""}">
         <h3 class="shop-group-head">
           <span>${g.label}</span>
           <span class="shop-group-note">${note}</span>
@@ -126,7 +104,7 @@ function renderColours() {
             owned: ownsSkin(id),
             worn: id === worn,
             afford: tags >= (SKINS[id].cost ?? 0),
-            unlocked,
+            unlocked: skinUnlocked(id, ownsSkin),
           })).join("")}
         </div>
       </section>`;
@@ -134,21 +112,26 @@ function renderColours() {
 
   const rankEl = document.getElementById("shop-rank");
   if (rankEl) {
-    rankEl.textContent = !acc
-      ? "Log in to earn tags and buy paint — you're running standard red for now."
-      : elo == null
-        ? "Play a ranked match to set your rank. Copper paint is open to you now."
-        : `${rank} rank · paint up to ${rank} is open to you.`;
+    if (!acc) {
+      rankEl.textContent = "Log in to earn tags and buy paint — you're running standard red for now.";
+    } else {
+      // Point at the next thing that's actually within reach, so there's
+      // always a concrete next step rather than a wall of padlocks.
+      const next = SHOP_SKINS.find((id) =>
+        !ownsSkin(id) && skinUnlocked(id, ownsSkin) && tags >= (SKINS[id].cost ?? 0));
+      const owned = SHOP_SKINS.filter((id) => ownsSkin(id)).length;
+      rankEl.textContent = next
+        ? `${owned}/${SHOP_SKINS.length} colours owned · ${SKINS[next].name} is yours for ${SKINS[next].cost}.`
+        : `${owned}/${SHOP_SKINS.length} colours owned · every colour opens the one after it.`;
+    }
   }
 
-  // Replace the metal chips' static CSS gradient with a live animated
-  // finish swatch, so the shop shimmers exactly like the tank will. The
-  // CSS gradient stays as the instant, pre-animation fallback.
+  // Swap each material's flat CSS chip for the real thing: the same
+  // static shading the tank will wear, drawn by material.js.
   host.querySelectorAll(".shop-chip[data-chip]").forEach((chip) => {
     const id = chip.dataset.chip;
-    if (skinFinish(id) === "flat") return; // flat paints keep the plain fill
-    const cv = finishSwatchCanvas(id, 40);
-    chip.replaceWith(cv);
+    if (skinFinish(id) === "flat") return; // plain colours keep the plain fill
+    chip.replaceWith(finishSwatchCanvas(id, 40));
   });
 }
 
@@ -203,13 +186,12 @@ function patternChip(id) {
   }
 }
 
-function patternTile(id, { owned, worn, afford, unlocked }) {
+function patternTile(id, { owned, worn, afford }) {
   const p = PATTERNS[id];
   const cost = p.cost ?? 0;
   let state = "", foot = "";
   if (worn) { state = "is-worn"; foot = "WORN"; }
   else if (owned) { state = "is-owned"; foot = "WEAR"; }
-  else if (!unlocked) { state = "is-locked"; foot = `🔒 ${p.tier}`; }
   else if (!afford) { state = "is-broke"; foot = `💀 ${cost}`; }
   else { foot = `💀 ${cost}`; }
   return `
@@ -225,43 +207,27 @@ function renderPatterns() {
   const host = document.getElementById("shop-patterns");
   if (!host) return;
   const acc = getAccount();
-  const elo = bestElo();
-  const rank = elo == null ? "Copper" : rankOf(elo).name;
   const tags = getTags();
   const worn = getPattern();
 
-  const groups = [{ tier: null, label: "Standard issue", ids: [DEFAULT_PATTERN] }];
-  for (const t of TIER_ORDER) {
-    const ids = SHOP_PATTERNS.filter((id) => PATTERNS[id].tier === t);
-    if (ids.length) groups.push({ tier: t, label: `${t} rank`, ids });
-  }
-
+  // No gates and no shelves: one grid, cheapest first, and the only
+  // question is whether you can pay for it.
+  const ownedN = SHOP_PATTERNS.filter((id) => ownsPattern(id)).length;
   host.innerHTML = `
     <p class="shop-rank" id="shop-pattern-rank">${
       !acc
         ? "Log in to earn tags and buy patterns."
-        : `${rank} rank · patterns need two colours you own to wear.`
-    }</p>` + groups.map((g) => {
-    const unlocked = tierUnlocked(g.tier, rank);
-    const ownedN = g.ids.filter((id) => ownsPattern(id)).length;
-    return `
-      <section class="shop-group ${unlocked ? "" : "locked"}">
-        <h3 class="shop-group-head">
-          <span>${g.label}</span>
-          <span class="shop-group-note">
-            ${unlocked ? `${ownedN}/${g.ids.length} owned` : `🔒 Reach ${g.tier}`}
-          </span>
-        </h3>
-        <div class="shop-grid">
-          ${g.ids.map((id) => patternTile(id, {
-            owned: ownsPattern(id),
-            worn: id === worn,
-            afford: tags >= (PATTERNS[id].cost ?? 0),
-            unlocked,
-          })).join("")}
-        </div>
-      </section>`;
-  }).join("");
+        : `${ownedN}/${SHOP_PATTERNS.length} owned · patterns need two colours you own to wear.`
+    }</p>
+    <section class="shop-group">
+      <div class="shop-grid">
+        ${SHOP_PATTERNS.map((id) => patternTile(id, {
+          owned: ownsPattern(id),
+          worn: id === worn,
+          afford: tags >= (PATTERNS[id].cost ?? 0),
+        })).join("")}
+      </div>
+    </section>`;
 }
 
 // The two-colour picker shown when equipping a multi-colour pattern.
@@ -341,17 +307,7 @@ function pickTab(which) {
 }
 
 export function initShop() {
-  onEnter("screen-shop", () => {
-    pickTab(tab);
-    // Elite paint depends on live leaderboard standing, so re-check it
-    // on open and repaint if it changed the answer.
-    // Always repaint once standing resolves — not just when the answer
-    // flipped. The first open has no cached position at all, so a
-    // conditional repaint could leave Ruby showing as locked.
-    refreshBoardPosition().then(() => {
-      if (tab === "colours") renderColours();
-    }).catch(() => {});
-  });
+  onEnter("screen-shop", () => pickTab(tab));
 
   document.getElementById("shop-tab-colours")?.addEventListener("click", () => pickTab("colours"));
   document.getElementById("shop-tab-patterns")?.addEventListener("click", () => pickTab("patterns"));
@@ -376,27 +332,16 @@ export function initShop() {
       }
       return;
     }
-    const elo = bestElo();
-    const rank = elo == null ? "Copper" : rankOf(elo).name;
-    if (isEliteSkin(id)) {
-      // Elite paint is leaderboard-gated. Re-check standing live so a
-      // stale cache can't hand out (or wrongly withhold) Ruby.
-      await refreshBoardPosition().catch(() => {});
-      if (!isTop50()) {
-        const pos = myBoardPosition();
-        toast(pos
-          ? `${s.name} is for the world top 50 — you're #${pos}.`
-          : `${s.name} is for the world top 50 only.`);
-        renderColours();
-        return;
-      }
-    } else if (!tierUnlocked(s.tier, rank)) {
-      toast(`${s.name} needs ${s.tier} rank.`);
+
+    // The chain is checked here as well as in the UI — an enabled
+    // button is never the authority on whether something can be sold.
+    if (!skinUnlocked(id, ownsSkin)) {
+      toast(lockReason(id, ownsSkin) || `${s.name} is still locked.`);
       return;
     }
     btn.disabled = true;
     try {
-      await buySkin(id, { eliteOk: isEliteSkin(id) && isTop50() });
+      await buySkin(id);
       await equipSkin(id); // buying it means you want to wear it
       toast(`${s.name} bought — you're wearing it.`);
       refresh();
@@ -427,12 +372,6 @@ export function initShop() {
       if (patternColors(id) >= 2) openPatternPicker(id);
       return;
     }
-    const elo = bestElo();
-    const rank = elo == null ? "Copper" : rankOf(elo).name;
-    if (!tierUnlocked(p.tier, rank)) {
-      toast(`${p.name} needs ${p.tier} rank.`);
-      return;
-    }
     btn.disabled = true;
     try {
       await buyPattern(id);
@@ -446,4 +385,4 @@ export function initShop() {
   });
 }
 
-export { skinFinish };
+export { skinFinish, requirements };

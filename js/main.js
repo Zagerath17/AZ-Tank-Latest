@@ -9,7 +9,7 @@ import { initOnline } from "./online.js";
 import { initGame } from "./game.js";
 import { sfx, startMusic } from "./audio.js";
 import { initSocial, setStatus, getAccount } from "./social.js";
-import { initRanked } from "./ranked.js";
+import { initDuel } from "./duel.js";
 import { initChat } from "./chat.js";
 
 // True while a match is running — screen hops (e.g. Settings mid-game)
@@ -187,7 +187,7 @@ initLocal();
 initOnline();
 initGame();
 initSocial();
-initRanked();
+initDuel();
 initChat();
 
 // Push-to-talk: hold the bound key to open the mic (ignored when

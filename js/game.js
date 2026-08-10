@@ -16,6 +16,7 @@ import { showScreen, toast, tankSVG, setInMatch, paintVar } from "./main.js";
 import { tankSpriteCanvas } from "./tanksprite.js";
 import { COLOR_NAMES, PALETTE } from "./palette.js";
 import { skinFinish } from "./skins.js";
+import { materialFill, materialDetail, isMaterial } from "./material.js";
 import { getBinds } from "./settings.js";
 import { mulberry32, generateMaze, wallRects, segmentFirstHit, MAZE_SHAPES, ringDistance, boundaryWalls, shapePolygon, snapSpawn } from "./maze.js";
 import { botActions, AI_PARAMS } from "./ai.js";
@@ -73,9 +74,9 @@ const GEAR_EVERY_MS = 3930;    // then every 3.9–6.4 s (40% faster than 5.5–
 const GEAR_EVERY_JITTER = 2500;
 const GEAR_SPREAD_MIN = CELL * 2.2; // crates keep this far apart when they can
 
-// ---- Ranked closing zone ----
-const ZONE_FIRST_MS = 30000;   // first layer claimed 30 s in (ranked)
-const ZONE_PERIOD = 30000;     // a new layer every 30 s thereafter (ranked)
+// ---- Closing zone ----
+const ZONE_FIRST_MS = 30000;   // first layer claimed 30 s in (1v1)
+const ZONE_PERIOD = 30000;     // a new layer every 30 s thereafter (1v1)
 const ZONE_WARN_MS = 5000;     // a layer blinks this long before it turns red
 export const ZONE_MIN_PERIOD = 10000; // custom-lobby clamp: fastest zone
 export const ZONE_MAX_PERIOD = 60000; // custom-lobby clamp: slowest zone
@@ -140,12 +141,12 @@ const NET_BUF_MAX = 24;        // ~1.8 s of history
 const NET_SNAP_DIST = CELL * 2.5;   // beyond this, catch up aggressively
 const NET_TELEPORT_DIST = CELL * 6; // only THIS is a real discontinuity
 // Hard ceiling on tanks in one match. Custom lobbies fill up to this;
-// offline and ranked use fewer. Must match online.js's MAX_PLAYERS.
+// offline and 1v1 use fewer. Must match online.js's MAX_PLAYERS.
 export const MAX_TANKS = 8;
 const NET_CATCHUP_SPEED = 6;        // × MOVE_SPEED while closing a big gap
 const NET_CORRECT_SPEED = 2.2;      // × MOVE_SPEED correction cap
-// Arenas grouped by grid size. 1v1 (ranked) draws from small+medium,
-// 2v2 (ranked) from large+xl; casual/offline use the whole range.
+// Arenas grouped by grid size. A matchmade 1v1 draws from small+medium;
+// casual/offline use the whole range.
 const MAZE_SIZE_GROUPS = {
   small:  [[7, 5], [7, 6], [8, 5], [8, 6], [8, 7]],
   medium: [[9, 5], [9, 6], [9, 7], [10, 6], [10, 7], [11, 6]],
@@ -210,7 +211,7 @@ export function initGame() {
     if (s?.mode === "online") {
       // The exit callback (leaveLobby / endMatchForAll) stops the game
       // itself — calling stopGame first would wipe the match state the
-      // ranked ABORT penalty needs to read.
+      // abandon-a-1v1 handling needs to read.
       s.onExit?.();
     } else {
       stopGame();
@@ -331,7 +332,6 @@ function opts_toState(o) {
     seed: o.seed,
     roundN: o.roundN ?? 1,
     myId: o.myId,
-    localGuest: o.localGuest ?? null,
     roster: o.roster,
     sendPos: o.sendPos,
     sendShot: o.sendShot,
@@ -346,7 +346,7 @@ function opts_toState(o) {
     sendPickup: o.sendPickup,
     sendGun: o.sendGun,
     onExit: o.onExit,
-    ranked: o.ranked,
+    duel: o.duel,
     winTarget: o.winTarget,
     serverNow: o.serverNow,
     gearPool: o.gearPool,
@@ -355,7 +355,7 @@ function opts_toState(o) {
     zone: o.zone,
     zonePeriod: o.zonePeriod,
     teams: o.teams,
-    onRankedEnd: o.onRankedEnd,
+    onDuelEnd: o.onDuelEnd,
     casualPlayers: o.casualPlayers,
   };
 }
@@ -567,27 +567,20 @@ export function onlineLobbyUpdate(lobby) {
     }
   }
 
-  // Ranked mid-match departure = an abort. Track who left so their
-  // rating is settled apart from the finishers.
-  if (S.ranked && !S.matchOver && S.roundStartCount >= 2) {
-    S.rankedGone = S.rankedGone ?? new Set();
-    for (const t of S.tanks) {
-      if (!t.bot && t.gone && t.id !== S.myId) S.rankedGone.add(t.id);
+  // Walking out of a live 1v1 hands the match to whoever stayed: my
+  // only opponent bailed → I take it as a 3:0 win. (Their own client
+  // books the matching 0:3 loss on the way out, so both sides agree
+  // without either needing to referee the other.)
+  if (S.duel && !S.matchOver && S.roundStartCount >= 2) {
+    const oppGone = S.roster.some((p) =>
+      !p.bot && p.id !== S.myId && S.tanks.some((t) => t.id === p.id && t.gone));
+    if (oppGone && S.present.has(S.myId)) {
+      for (const p of S.roster) S.scores[p.id] = p.id === S.myId ? (S.winTarget ?? 3) : 0;
+      S.matchOver = true;
+      S.banner = { silent: true };
+      S.roundOverAt = performance.now();
+      updateScoreHUD();
     }
-    if (!S.teams) {
-      // 1v1: my only opponent bailed → I take the match as a 3:0 win.
-      // (Their own client books the matching 0:3 loss as it leaves.)
-      const oppGone = S.roster.some((p) => !p.bot && p.id !== S.myId && S.rankedGone.has(p.id));
-      if (oppGone && S.present.has(S.myId)) {
-        for (const p of S.roster) S.scores[p.id] = p.id === S.myId ? (S.winTarget ?? 3) : 0;
-        S.matchOver = true;
-        S.banner = { silent: true };
-        S.roundOverAt = performance.now();
-        updateScoreHUD();
-      }
-    }
-    // 2v2: the remaining three keep playing (the abandoned player is
-    // simply down a tank → a 1v2); the aborter is excluded at the end.
   }
 
   if (!meIn) {
@@ -608,7 +601,6 @@ function begin(opts) {
   S = {
     mode: opts.mode,
     myId: opts.myId ?? null,
-    localGuest: opts.localGuest ?? null,
     roster: opts.roster.slice(0, MAX_TANKS),
     scores: Object.fromEntries(opts.roster.map((p) => [p.id, 0])),
     present: new Set(opts.roster.map((p) => p.id)),
@@ -623,7 +615,7 @@ function begin(opts) {
     sendPickup: opts.sendPickup,
     sendGun: opts.sendGun,
     onExit: opts.onExit,
-    ranked: !!opts.ranked,
+    duel: !!opts.duel,
     netClock: opts.serverNow ?? (() => Date.now()), // shared match clock
     // Custom-lobby host settings (null → defaults everywhere).
     gearPool: opts.gearPool ?? null,   // greenlit ability types
@@ -631,11 +623,10 @@ function begin(opts) {
     sizePool: opts.sizePool ?? null,   // allowed map size groups
     zoneOn: !!opts.zone,               // custom lobby: closing zone?
     zoneSec: opts.zonePeriod ?? 30,    // ...and how often it steps in
-    teams: opts.teams ?? null, // { [playerId]: 0|1 } in team modes (2v2)
     winTarget: opts.winTarget ?? 5,
-    onRankedEnd: opts.onRankedEnd ?? null,
+    onDuelEnd: opts.onDuelEnd ?? null,
     matchOver: false,
-    rankedEndFired: false,
+    duelEndFired: false,
     dmgBy: {},   // attackerId → damage they dealt to MY tanks
     killsBy: {}, // attackerId → kills of MY tanks
     roundN: opts.roundN ?? 1,
@@ -697,20 +688,20 @@ function begin(opts) {
 
 function startRound(seed) {
   const rng = mulberry32(seed);
-  // Every match — ranked included — can roll a random silhouette now
+  // Every match can roll a random silhouette now
   // that the closing zone works on any shape. Every maze is braided so
   // there are many open routes.
   let shape = rng() < 0.55
     ? "rect"
     : MAZE_SHAPES_NONRECT[Math.floor(rng() * MAZE_SHAPES_NONRECT.length)];
-  // Size pool by mode: 1v1 → small+medium, 2v2 → large+xl, casual →
-  // the host's chosen groups (all of them by default). Shaped arenas
-  // lose cells to the mask, so within the chosen pool they take the
-  // larger half to keep the area generous.
+  // Size pool by mode: a matchmade 1v1 gets small+medium (two tanks
+  // need to actually find each other), casual gets the host's chosen
+  // groups — all of them by default. Shaped arenas lose cells to the
+  // mask, so within the chosen pool they take the larger half to keep
+  // the area generous.
   const G = MAZE_SIZE_GROUPS;
   let pool;
-  if (S.ranked && S.teams) pool = [...G.large, ...G.xl];       // 2v2
-  else if (S.ranked) pool = [...G.small, ...G.medium];         // 1v1
+  if (S.duel) pool = [...G.small, ...G.medium];                // 1v1
   else if (S.sizePool?.length) {
     pool = S.sizePool.flatMap((k) => G[k] ?? []);
     if (!pool.length) pool = MAZE_SIZES; // host unticked everything
@@ -742,7 +733,7 @@ function startRound(seed) {
   S.freezeUntil = performance.now() + 3000;
   S.cdLast = 4; // last number we ticked for (4 = none yet)
   S.gearNextAt = S.freezeUntil + GEAR_FIRST_MS;
-  // ---- Ranked closing zone ----
+  // ---- Closing zone ----
   // A creeping "red zone" eats the arena from the outside in. Each
   // layer of cells first BLINKS as a warning, then turns permanently
   // red: red cells delete gear and steadily damage tanks sitting in
@@ -754,16 +745,16 @@ function startRound(seed) {
   S.zoneMaxLayer = rd.maxLayer;
   S.zoneLevel = 0;             // layers currently permanently red
   S.zoneWarnLevel = -1;        // layer currently blinking (‑1 = none)
-  // Ranked always closes on the default cadence. Custom lobbies close
-  // only if the host enabled it, and at the host's chosen period
-  // (clamped 10–60 s). The warning blink can't outrun the period, so a
-  // fast 10 s zone still gets a sensible heads-up.
-  const zoneOn = S.ranked || !!S.zoneOn;
+  // A matchmade 1v1 always closes on the default cadence. Custom
+  // lobbies close only if the host enabled it, and at the host's chosen
+  // period (clamped 10–60 s). The warning blink can't outrun the
+  // period, so a fast 10 s zone still gets a sensible heads-up.
+  const zoneOn = S.duel || !!S.zoneOn;
   // Remember the RESOLVED answer. The renderer used to re-derive this
-  // from S.ranked alone, which made the zone invisible (but still
+  // from the match flag alone, which made the zone invisible (but still
   // lethal) in custom lobbies and offline matches.
   S.zoneActive = zoneOn;
-  S.zonePeriod = S.ranked
+  S.zonePeriod = S.duel
     ? ZONE_PERIOD
     : Math.max(ZONE_MIN_PERIOD, Math.min(ZONE_MAX_PERIOD, (S.zoneSec ?? 30) * 1000));
   S.zoneWarn = Math.min(ZONE_WARN_MS, Math.max(2000, S.zonePeriod - 2000));
@@ -806,12 +797,6 @@ function startRound(seed) {
   S.touchSeat = S.mode === "online"
     ? (S.myId ?? null)
     : ((S.roster.find((p) => !p.bot) ?? {}).id ?? null);
-  // Couch co-op that was set up in the lobby (ranked 2v2 local duo)
-  // starts already paired: the guest tank answers to Player 2 (green)
-  // binds immediately, no fire-key opt-in needed. Online couch play
-  // only ever has this one pre-seated guest.
-  S.coopBinds = S.localGuest ? { [S.localGuest]: "green" } : {};
-  S.coopJoined = !!S.localGuest;
   S.banner = null;
   resetMultiKill();
   S.personalMsg = null;
@@ -819,50 +804,31 @@ function startRound(seed) {
   S.sentNext = false;
   for (const t of S.tanks) { t.phaseUntil = 0; t.wasPhasing = false; t.ejecting = false; }
 
-  // Players 1 & 2 in opposite corners, 3 & 4 in the other pair. In a
-  // TEAM match (2v2) the pairing changes: team 0 takes the two LEFT
-  // corners, team 1 the two RIGHT corners, so teammates start on the
-  // same side facing the enemy duo. For a shaped maze a raw corner may
-  // fall outside the silhouette, so snap each to the nearest playable
-  // cell.
+  // Players 1 & 2 in opposite corners, 3 & 4 in the other pair, then
+  // the edge mid-points so a full eight-tank lobby still starts spread
+  // evenly around the rim. For a shaped maze a raw corner may fall
+  // outside the silhouette, so snap each to the nearest playable cell.
   const midC = Math.floor((cols - 1) / 2);
   const midR = Math.floor((rows - 1) / 2);
-  const rawCorners = S.teams
-    ? [
-        [0, 0],               // team 0, first member
-        [0, rows - 1],        // team 0, second member
-        [cols - 1, 0],        // team 1, first member
-        [cols - 1, rows - 1], // team 1, second member
-      ]
-    : [
-        // Four corners first (best separation for small lobbies), then
-        // the four edge mid-points so an 8-tank lobby still starts
-        // spread evenly around the rim.
-        [0, 0],
-        [cols - 1, rows - 1],
-        [cols - 1, 0],
-        [0, rows - 1],
-        [midC, 0],
-        [midC, rows - 1],
-        [0, midR],
-        [cols - 1, midR],
-      ];
+  const rawCorners = [
+    // Four corners first — best separation for small lobbies.
+    [0, 0],
+    [cols - 1, rows - 1],
+    [cols - 1, 0],
+    [0, rows - 1],
+    [midC, 0],
+    [midC, rows - 1],
+    [0, midR],
+    [cols - 1, midR],
+  ];
   // snapSpawn is the maze generator's OWN rule (nearest playable cell
   // with room to move), so the tanks land exactly on the cells the
   // multi-route guarantee was computed for.
   const corners = rawCorners.map(([c, r]) => snapSpawn(S.maze, c, r));
 
-  // In a team match, hand out corners by TEAM (0 → left pair, 1 →
-  // right pair) regardless of roster order.
-  let seat0 = 0, seat1 = 0;
-  const cornerFor = (spec, i) => {
-    // Wrap rather than run off the end — a lobby can never out-number
-    // the spawn list now, but a stray index must not crash the match.
-    if (!S.teams) return corners[i % corners.length];
-    const team = S.teams[spec.id] ?? 0;
-    const idx = team === 0 ? seat0++ : 2 + seat1++;
-    return corners[Math.min(idx, corners.length - 1)];
-  };
+  // Wrap rather than run off the end — a lobby can never out-number the
+  // spawn list now, but a stray index must not crash the match.
+  const cornerFor = (spec, i) => corners[i % corners.length];
 
   S.tanks = S.roster.map((spec, i) => {
     const [c, r] = cornerFor(spec, i);
@@ -871,7 +837,7 @@ function startRound(seed) {
     const a = Math.atan2(S.worldH / 2 - y, S.worldW / 2 - x);
     return {
       ...spec,
-      local: S.mode === "local" ? true : (spec.id === S.myId || spec.id === S.localGuest),
+      local: S.mode === "local" ? true : spec.id === S.myId,
       x, y, a, tx: x, ty: y, ta: a,
       turret: a, tu: a, // barrel aim (world angle) + remote target
       dead: false,
@@ -954,12 +920,6 @@ function isBoundCode(code) {
   );
 }
 
-// RANKED 2v2 COUCH CO-OP.
-// A second player sitting at the same keyboard joins by tapping their
-// own (Player 2) fire key. From then on the teammate tank answers to
-// Player 2's binds instead of being driven remotely. Outside ranked
-// 2v2 — custom lobbies, ranked 1v1 — this never arms, so only Player
-// 1's controls are ever live there.
 // LOCAL DROP-IN. In an offline match, a bot seat can be taken over at
 // any time by a person pressing THAT seat's fire key (red/green/blue/
 // yellow). The bot hands the tank over and it answers to that seat's
@@ -985,26 +945,6 @@ function pollLocalJoins(binds) {
 
 const SLOT_LABEL = { red: "Player 1", green: "Player 2", blue: "Player 3", yellow: "Player 4" };
 
-function pollCoopJoin(binds) {
-  if (!S || S.mode !== "online" || !S.ranked || !S.teams) return;
-  if (S.coopJoined) return;
-  const key = binds?.green?.shoot;
-  if (!key || !held.has(key)) return;
-
-  const me = S.tanks.find((t) => t.local);
-  if (!me) return;
-  const myTeam = S.teams[me.id] ?? 0;
-  // The teammate seat: same team, not me, and not already someone
-  // else's live tank.
-  const mate = S.tanks.find((t) =>
-    t !== me && !t.bot && (S.teams[t.id] ?? 0) === myTeam);
-  if (!mate) return;
-
-  S.coopBinds = { ...(S.coopBinds ?? {}), [mate.id]: "green" };
-  S.coopJoined = true;
-  toast("Player 2 joined — you're driving as a pair.");
-}
-
 function readActions(tank, binds) {
   const acts = {
     up: false, down: false, left: false, right: false,
@@ -1013,12 +953,11 @@ function readActions(tank, binds) {
 
   // Which control set drives this tank?
   //  • Local play  → the tank's own seat (four people, one keyboard).
-  //  • Online      → Player 1's binds only…
-  //  • …EXCEPT ranked 2v2, where a second person on the same keyboard
-  //    can take the teammate tank; that one answers to Player 2.
+  //  • Online      → Player 1's binds only. Online seats are one tank
+  //    per client, so there is no second local driver to arbitrate.
   const seat = S.mode === "local"
     ? (tank.slot ?? tank.color)
-    : (S.coopBinds?.[tank.id] ?? "red");
+    : "red";
   const set = binds[seat] ?? binds.red ?? Object.values(binds)[0] ?? {};
   for (const a of ["up", "down", "left", "right", "shoot", "def", "agi"]) {
     const code = set[a];
@@ -1080,8 +1019,7 @@ function frame(now) {
     } else if (t.weapon === "mortar" && !t.bot && t.local && t.mortarAiming) {
       // A targeting reticle for EACH locally-driven tank that has its
       // launcher open. This is a list, not a single slot: with two
-      // people on one machine (local play, or ranked 2v2 couch co-op)
-      // both can be aiming at once, and a shared slot meant only the
+      // people on one machine (local play) both can be aiming at once, and a shared slot meant only the
       // last one written ever drew. Tinted per tank so each player can
       // pick out their own. The in-flight red dot still warns everyone.
       if (t.mortarAim) {
@@ -1124,20 +1062,16 @@ function frame(now) {
     maybeEndRound(now);
   } else if (S.matchOver) {
     // The match is decided — hold the banner, then report placements
-    // exactly once so every client settles its own Elo.
-    if (!S.rankedEndFired && now - S.roundOverAt > 3500) {
-      S.rankedEndFired = true;
-      // In 2v2, anyone who left mid-match already booked their abort
-      // penalty and is dropped here, so the finishers rate against the
-      // players who were actually present (a 1v2 stays a 1v2). In 1v1
-      // the departed opponent must stay in with a 0 score so the win
-      // computes as a clean 3:0.
-      const drop = S.teams ? (S.rankedGone ?? new Set()) : new Set();
+    // exactly once so both clients settle the same result.
+    if (!S.duelEndFired && now - S.roundOverAt > 3500) {
+      S.duelEndFired = true;
+      // An opponent who walked out stays in the list with a 0 score, so
+      // the win computes as the clean 3:0 their own client already
+      // booked against itself when it left.
       const placements = S.roster
-        .filter((p) => !drop.has(p.id))
         .map((p) => ({ id: p.id, color: p.color, score: S.scores[p.id] ?? 0 }))
         .sort((a, b) => b.score - a.score);
-      S.onRankedEnd?.(placements, { dmgBy: S.dmgBy ?? {}, killsBy: S.killsBy ?? {}, myId: S.myId });
+      S.onDuelEnd?.(placements, { dmgBy: S.dmgBy ?? {}, killsBy: S.killsBy ?? {}, myId: S.myId });
     }
   } else if (now - S.roundOverAt > ROUND_PAUSE) {
     if (S.mode === "local") {
@@ -1233,7 +1167,6 @@ function sampleNetState(t) {
 }
 
 function stepTanks(now, dt) {
-  pollCoopJoin(getBinds());
   pollLocalJoins(getBinds());
   const binds = getBinds();
 
@@ -1247,6 +1180,14 @@ function stepTanks(now, dt) {
             maze: S.maze,
             rects: S.rects,
             diag: S.diag,
+            // The arena as it stands RIGHT NOW, not as it was generated.
+            // Brick walls and mud puddles are placed mid-round, and
+            // without them the bots plan on a map that no longer
+            // exists — routing straight into a wall someone just built
+            // and ploughing through mud they could have driven round.
+            walls: S.walls,
+            mud: S.mudPits,
+            mudSlow: MUD.slow,
             tanks: S.tanks,
             tankR: TANK_RAD,
             bullets: S.aiBullets ?? S.bullets,
@@ -3179,8 +3120,8 @@ function damageTank(t, amount, byId = null) {
       S.killsBy = S.killsBy ?? {};
       S.killsBy[byId] = (S.killsBy[byId] ?? 0) + 1;
       // NOTE: no streak scoring here. Multi-kills are an ONLINE thing
-      // only (custom lobbies, plus the Double that 2v2 ranked allows) —
-      // offline is one player against bots, which doesn't get them.
+      // only (custom lobbies) — offline is one player against bots,
+      // which doesn't get them.
       // Online, the victim tells the killer over the dead channel.
     }
   }
@@ -3212,13 +3153,12 @@ const MULTIKILL_NAMES = {
 const MULTIKILL_SHOW_MS = 2200;
 
 // Score a kill for `byId`. Only the killer sees their own banner, so we
-// bail early for anyone else's kills. Ranked 1v1 has a single opponent
-// and so can never chain; ranked 2v2 tops out at a Double, which falls
-// out naturally from how many enemies exist.
+// bail early for anyone else's kills. A 1v1 has a single opponent and
+// so can never chain; the length of a streak falls out naturally from
+// how many enemies exist.
 function registerKill(byId, now) {
-  // Online only: custom lobbies get the full chain, and 2v2 ranked
-  // naturally tops out at a Double because there are only two enemies.
-  // Offline (one player vs bots) has no streaks at all.
+  // Online only: custom lobbies get the full chain, and a 1v1 can't
+  // chain at all. Offline (one player vs bots) has no streaks.
   if (!S || S.mode !== "online") return;
   const killer = S.tanks.find((x) => x.id === byId);
   if (!isMyTank(killer)) return;   // only ever show MY own streak
@@ -3287,46 +3227,12 @@ function maybeEndRound(now) {
   if (S.banner || S.roundStartCount < 2) return;
   const alive = S.tanks.filter((t) => !t.dead && !t.gone);
 
-  if (S.teams) {
-    // TEAM match (2v2): the round runs while BOTH teams still have a
-    // tank standing. When one team is wiped, every member of the other
-    // team banks the round win — dead or alive ("if your teammate wins
-    // the round, you also win the round").
-    const aliveTeams = new Set(alive.map((t) => S.teams[t.id] ?? 0));
-    if (aliveTeams.size > 1) return;
-
-    const winTeam = aliveTeams.size === 1 ? [...aliveTeams][0] : null;
-    if (winTeam != null) {
-      let top = 0;
-      for (const p of S.roster) {
-        if ((S.teams[p.id] ?? 0) !== winTeam) continue;
-        S.scores[p.id] = (S.scores[p.id] ?? 0) + 1;
-        top = Math.max(top, S.scores[p.id]);
-      }
-      if (S.ranked && top >= (S.winTarget ?? 5)) S.matchOver = true;
-      S.banner = { silent: true };
-      // The LOCAL player's team winning is a personal Victory — even
-      // if their own tank died earlier in the round.
-      const meTank = S.tanks.find((t) => (S.mode === "online" ? t.id === S.myId : !t.bot));
-      if (meTank && (S.teams[meTank.id] ?? 0) === winTeam) {
-        S.personalMsg = { text: "Victory", color: "#ffd23f", born: now, kind: "win" };
-      }
-      sfx.roundEnd();
-    } else {
-      S.banner = { silent: true }; // both teams wiped — a draw
-      sfx.roundEnd();
-    }
-    S.roundOverAt = now;
-    updateScoreHUD();
-    return;
-  }
-
   if (alive.length > 1) return;
 
   const w = alive[0] ?? null;
   if (w) {
     S.scores[w.id] = (S.scores[w.id] ?? 0) + 1;
-    if (S.ranked && S.scores[w.id] >= (S.winTarget ?? 5)) {
+    if (S.duel && S.scores[w.id] >= (S.winTarget ?? 5)) {
       S.matchOver = true;
     }
     // No "X wins" banner any more — the round just freezes. The only
@@ -3364,10 +3270,7 @@ function rosterLabel(p, order) {
 
 function updateScoreHUD() {
   if (!scoreEl || !S) return;
-  // Team matches list teammates side by side (team 0 first).
-  const order = S.teams
-    ? [...S.roster].sort((a, b) => (S.teams[a.id] ?? 0) - (S.teams[b.id] ?? 0))
-    : S.roster;
+  const order = S.roster;
 
   // Build the card shells once (identified by a signature). Rebuilding
   // every score change would trash the animated sprite canvases, so we
@@ -3386,11 +3289,8 @@ function updateScoreHUD() {
       const name = document.createElement("span");
       name.className = "sc-name";
       name.textContent = rosterLabel(p, order);
-      // Carry the 2v2 team-paint overrides through, so a recoloured
-      // enemy team looks the same on the scoreboard as in the arena.
       const sprite = tankSpriteCanvas({
         color: p.color, pattern: p.pattern, patColors: p.patColors,
-        colorHex: p.colorHex ?? null, patHex: p.patHex ?? null,
       }, 34, p.id);
       const sc = document.createElement("span");
       sc.className = "sc";
@@ -3973,11 +3873,11 @@ function draw(now) {
   // the walls, and under everything that moves.
   drawTracks(now);
 
-  // Ranked shrink: the dead ring is simply gone — plain white canvas
+  // Zone shrink: the dead ring is simply gone — plain white canvas
   // where it used to be. Nothing to draw; the walls there were already
   // stripped from S.rects when the ring dropped.
 
-  // Ranked closing zone: cells already claimed glow a steady red; the
+  // Closing zone: cells already claimed glow a steady red; the
   // layer currently being warned blinks. Painted per-cell UNDER the
   // walls. On shaped arenas the diagonal cuts through boundary cells,
   // so an outside cell can still hold a thin interior sliver — we paint
@@ -4405,7 +4305,7 @@ function draw(now) {
     }
   }
 
-  // The ranked zone timer lives in the top bar. It counts down to the
+  // The closing-zone timer lives in the top bar. It counts down to the
   // next layer, flips to a red "CLOSING" flash while a layer blinks,
   // and disappears once the whole map is red.
   if (shrinkEl) {
@@ -4711,18 +4611,18 @@ function drawWall(w, now) {
   ctx.restore();
 }
 
-// The hull fill for a paint id: a flat colour for ordinary paints, or
-// a raked gradient for the shop's metals. Called per tank per frame,
-// so the flat path stays a plain string and only the metals build a
-// gradient object.
+// The hull fill for a paint id. Ordinary paints are a flat colour;
+// the shop's specials are MATERIALS, shaded by material.js — the same
+// module the preview canvases use, so bronze on the battlefield is the
+// bronze you bought in the shop.
 //
-// Each premium finish is a distinct MATERIAL and has to read as one at
-// tank size, so the gradients are high-contrast with hard specular
-// edges — a gentle ramp on a ~50px hull just looks like uneven paint.
-// The sweep drifts with time so the surface catches the light as the
-// tank moves and turns.
-// The effective BASE hex a tank is wearing right now, honouring any 2v2
-// team-paint override so beams/effects match the hull the player sees.
+// Nothing here reads the clock. The old finishes scrolled a highlight
+// across the hull on a timer, which made a metal tank read as an
+// effect rather than as metal; a real material's response is fixed to
+// the object and its light, so that is how it's drawn now.
+//
+// The effective BASE hex a tank is wearing right now, honouring any
+// paint override so beams/effects match the hull the player sees.
 function hexToRgba(hex, a) {
   const n = parseInt(String(hex).slice(1), 16) || 0;
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
@@ -4737,99 +4637,16 @@ function effBaseHex(t) {
   return HULL[pat && pc[0] ? pc[0] : t.color] ?? HULL.red;
 }
 
-function hullPaint(color, R, now, hexOverride) {
+function hullPaint(color, R, hexOverride) {
   const hex = hexOverride ?? HULL[color] ?? HULL.red;
-  const finish = skinFinish(color);
-  if (finish === "flat") return hex;
+  return materialFill(ctx, hex, skinFinish(color), R);
+}
 
-  // Drift the sweep with a SINE wave (not a sawtooth `% 1`, which
-  // snapped back at the wrap and made the finish stutter). Half the old
-  // speed for a slow, smooth shimmer.
-  const drift = Math.sin(now / 5200 * Math.PI * 2); // -1 → 1, smooth
-  const off = drift * R * 1.1;
-  const g = ctx.createLinearGradient(-R + off, -R * 1.2, R + off, R * 1.2);
-  // Clean ramps: `lit` heads toward WHITE, `dim` toward near-black, so
-  // highlights read as real light rather than washed-out paint.
-  const lit = (f) => mix(hex, "#ffffff", f);
-  const dim = (f) => mix(hex, "#0b0d12", f);
-
-  if (finish === "metallic") {
-    // Brushed metal (copper / platinum): tight alternating light-dark
-    // bands with a couple of bright brushed streaks — anisotropic, no
-    // single mirror.
-    g.addColorStop(0.00, dim(0.55));
-    g.addColorStop(0.12, lit(0.55));
-    g.addColorStop(0.20, dim(0.42));
-    g.addColorStop(0.34, lit(0.85));   // bright brushed streak
-    g.addColorStop(0.42, hex);
-    g.addColorStop(0.55, dim(0.55));
-    g.addColorStop(0.66, lit(0.70));   // second streak
-    g.addColorStop(0.78, dim(0.36));
-    g.addColorStop(0.90, lit(0.50));
-    g.addColorStop(1.00, dim(0.58));
-  } else if (finish === "reflective") {
-    // Chrome / mirror (silver): a dark "ground" and a bright "sky"
-    // meeting at a razor horizon, with a blown-out mirror line on it.
-    g.addColorStop(0.00, dim(0.70));
-    g.addColorStop(0.38, dim(0.52));
-    g.addColorStop(0.44, lit(0.65));   // hard horizon
-    g.addColorStop(0.48, "#ffffff");   // the mirror line
-    g.addColorStop(0.52, "#ffffff");
-    g.addColorStop(0.56, lit(0.55));
-    g.addColorStop(0.60, dim(0.42));   // hard edge back down
-    g.addColorStop(0.82, dim(0.30));
-    g.addColorStop(1.00, dim(0.66));
-  } else if (finish === "shiny") {
-    // High gloss (gold): saturated body with one big blown specular
-    // bloom — the classic "polished" look.
-    g.addColorStop(0.00, dim(0.50));
-    g.addColorStop(0.24, hex);
-    g.addColorStop(0.42, lit(0.85));
-    g.addColorStop(0.49, "#ffffff");   // hot spot
-    g.addColorStop(0.53, "#fffef7");
-    g.addColorStop(0.60, lit(0.75));
-    g.addColorStop(0.78, hex);
-    g.addColorStop(1.00, dim(0.52));
-  } else if (finish === "ruby") {
-    // RUBY — the top-50 exclusive, and the richest finish in the game.
-    // A cut gemstone rather than a metal: a deep crimson body broken by
-    // sharp facet edges, three white fire-glints, and an INNER FIRE that
-    // pulses on its own slow cycle (independent of the sweep) so the
-    // stone looks lit from within rather than merely polished.
-    const fire = 0.5 + 0.5 * Math.sin(now / 900);      // slow heartbeat
-    const hot = mix(hex, "#ffd9a0", 0.30 + 0.28 * fire); // warm core glow
-    const deep = mix(hex, "#3a0010", 0.55);              // wine-dark shadow
-    g.addColorStop(0.00, deep);
-    g.addColorStop(0.09, lit(0.28));
-    g.addColorStop(0.15, dim(0.62));   // facet edge
-    g.addColorStop(0.19, "#ffffff");   // glint 1
-    g.addColorStop(0.24, hot);         // inner fire
-    g.addColorStop(0.33, deep);        // facet edge
-    g.addColorStop(0.40, lit(0.50));
-    g.addColorStop(0.47, "#fff2f5");   // glint 2 (cool white)
-    g.addColorStop(0.52, hot);         // inner fire
-    g.addColorStop(0.60, hex);
-    g.addColorStop(0.66, dim(0.58));   // facet edge
-    g.addColorStop(0.71, "#ffffff");   // glint 3
-    g.addColorStop(0.77, lit(0.38));
-    g.addColorStop(0.87, deep);
-    g.addColorStop(1.00, lit(0.20 + 0.20 * fire));
-  } else { // shinyReflective — diamond: faceted, multiple prismatic glints
-    g.addColorStop(0.00, dim(0.55));
-    g.addColorStop(0.14, lit(0.55));
-    g.addColorStop(0.22, dim(0.50));   // facet edge
-    g.addColorStop(0.26, "#ffffff");   // glint 1
-    g.addColorStop(0.30, lit(0.30));
-    g.addColorStop(0.42, hex);
-    g.addColorStop(0.50, "#eaf7ff");   // cool glint 2
-    g.addColorStop(0.56, lit(0.45));
-    g.addColorStop(0.64, dim(0.48));   // facet edge
-    g.addColorStop(0.68, "#ffffff");   // glint 3
-    g.addColorStop(0.74, lit(0.35));
-    g.addColorStop(0.88, dim(0.42));
-    g.addColorStop(1.00, lit(0.25));
-  }
-  return g;
+// The material's own structure — brushed grain, a mirror horizon, cut
+// facets. The caller has already clipped to the piece being painted.
+function hullDetail(color, R, hexOverride) {
+  const hex = hexOverride ?? HULL[color] ?? HULL.red;
+  materialDetail(ctx, hex, skinFinish(color), R);
 }
 
 function drawTank(t, now) {
@@ -4899,23 +4716,25 @@ function drawTank(t, now) {
   const pat = t.pattern && t.pattern !== "solid" ? t.pattern : null;
   const pc = Array.isArray(t.patColors) ? t.patColors : [];
   const bodyColor = pat && pc[0] ? pc[0] : t.color;   // colour id (for finish)
-  // Team paint (2v2) can override the actual HEXES a tank wears while
-  // keeping its skin/pattern IDs for finish + shape. t.colorHex is the
+  // A caller may override the actual HEXES a tank wears while keeping
+  // its skin/pattern IDs for material + shape. t.colorHex is the
   // solid/base override; t.patHex = [h0, h1] overrides the pattern's
   // two colours. Undefined → fall back to the id's own hex.
   const patOv = Array.isArray(t.patHex) ? t.patHex : null;
   const baseHexOv = pat ? (patOv ? patOv[0] : undefined) : (t.colorHex || undefined);
   const overlayHexOv = pat && patOv ? patOv[1] : undefined;
   const bodyHex = baseHexOv ?? (HULL[bodyColor] ?? hull); // effective base hex, for shade()
-  ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
+  ctx.fillStyle = hullPaint(bodyColor, R, baseHexOv);
   rr(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
-  if (pat && pc[0] && pc[1]) {
+  if (isMaterial(skinFinish(bodyColor)) || (pat && pc[0] && pc[1])) {
     ctx.save();
-    // Clip to the hull rectangle so the pattern never spills onto treads.
+    // Clip to the hull rectangle so neither the material's structure nor
+    // the pattern ever spills onto the treads.
     ctx.beginPath();
     rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
     ctx.clip();
-    drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
+    hullDetail(bodyColor, R, baseHexOv);
+    if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
     ctx.restore();
   }
 
@@ -5034,8 +4853,9 @@ function drawTank(t, now) {
   ctx.save();
   turretPath(0);
   ctx.clip();
-  ctx.fillStyle = hullPaint(bodyColor, R, now, baseHexOv);
+  ctx.fillStyle = hullPaint(bodyColor, R, baseHexOv);
   ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4);
+  hullDetail(bodyColor, R, baseHexOv);
   if (pat && pc[0] && pc[1]) drawPattern(pat, pc[1], R, now, t.id, overlayHexOv);
   // Cross-tube bevel: light along the top, shadow along the bottom, so
   // the whole turret reads as raised metal.
@@ -5481,10 +5301,10 @@ function patRng(seed) {
 
 // Paint a pattern's SECOND colour over the (already clipped) hull. The
 // caller has clipped to the hull, so these can draw freely. `col` is
-// the second colour id (rendered with its finish, so a metal second
-// colour still shines). `now` lets the lightning flicker.
+// the second colour id (rendered with its material, so a bronze second
+// colour is still bronze). `now` only drives the two animated patterns.
 function drawPattern(id, col, R, now, seedId, hexOverride) {
-  const paint = hullPaint(col, R, now, hexOverride);
+  const paint = hullPaint(col, R, hexOverride);
   const colHex = hexOverride ?? HULL[col] ?? HULL.red; // the 2nd colour as a hex, for shade/mix
   ctx.fillStyle = paint;
   ctx.strokeStyle = paint;
