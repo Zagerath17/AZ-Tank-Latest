@@ -34,6 +34,8 @@
 // then blitted, so painting a tank costs a single image draw.
 // ================================================================
 
+import { SUN } from "./scene.js";
+
 // A material is described by physics alone.
 //   metal  — a conductor has no diffuse; its colour lives in F0.
 //   rough  — width of the specular lobe; 0 is a mirror.
@@ -42,10 +44,15 @@
 //   dome   — how domed the casting is, which sets how far the
 //            reflection sweeps across it as the tank turns.
 const MATERIALS = {
-  bronze:   { metal: 1, rough: 0.36, envMul: 1.02, dome: 0.74 },
-  silver:   { metal: 1, rough: 0.055, envMul: 1.30, dome: 0.76 },
-  gold:     { metal: 1, rough: 0.15, envMul: 1.20, dome: 0.72 },
-  platinum: { metal: 1, rough: 0.30, envMul: 1.00, dome: 0.74 },
+  bronze:   { metal: 1, rough: 0.34, envMul: 1.05, dome: 0.74 },
+  silver:   { metal: 1, rough: 0.075, envMul: 1.32, dome: 0.76 },
+  gold:     { metal: 1, rough: 0.16, envMul: 1.22, dome: 0.72 },
+  platinum: { metal: 1, rough: 0.28, envMul: 1.04, dome: 0.74 },
+  // Every OTHER paint in the game. Not a conductor — pigment under a
+  // clear coat — so it keeps a full diffuse response and only picks up
+  // a soft sheen and a single sun highlight. Enough to sit in the same
+  // light as the concrete and the brickwork without turning chrome.
+  flat:     { metal: 0.16, rough: 0.46, envMul: 0.60, dome: 0.70, coat: 1 },
   // The stones are dielectrics: light enters, is absorbed on the way
   // through, and returns carrying the stone's own colour.
   diamond:  { metal: 0, rough: 0.02, ior: 2.42, envMul: 2.4, dome: 0.90,
@@ -54,16 +61,23 @@ const MATERIALS = {
               absorb: [0.05, 1.9, 1.5], body: 1.8 },
 };
 
-export const FINISHES = ["flat", ...Object.keys(MATERIALS)];
+export const FINISHES = [...Object.keys(MATERIALS)];
+// Everything is shaded now — a plain colour is just a rougher, mostly
+// dielectric material. Anything unrecognised falls back to that.
 export function isMaterial(finish) {
-  return !!finish && finish !== "flat" && !!MATERIALS[finish];
+  return true;
 }
+function matOf(finish) { return MATERIALS[finish] || MATERIALS.flat; }
 
 // The key light, in WORLD radians, plus its elevation. Fixed in the
 // world: the tank turns under it.
-const LIGHT_A = -2.2;
-const LIGHT_Z = 0.62;
-const LIGHT_I = 2.6;
+// The light is no longer invented here. It is the arena's sun, the same
+// one the concrete and the brickwork are shaded by — which is the whole
+// reason these materials never looked like they were standing in the
+// scene. Import it so there is exactly one light in the game.
+const LIGHT_A = SUN.az;
+const LIGHT_Z = Math.sin(SUN.el);
+const LIGHT_I = SUN.intensity;
 
 /* ---------- helpers ---------- */
 
@@ -100,14 +114,18 @@ function sampleEnv(r, rough, out) {
   // The horizon sharpens as roughness falls: that hard sky/ground join
   // is what says "polished" rather than "grey paint".
   const edge = sat((t - 0.5) / Math.max(0.02, blur * 0.9 + 0.02) * 0.5 + 0.5);
-  // A real room is bright above and dark below with a crisp join. That
-  // CONTRAST is what the eye reads as polish — a low-contrast room makes
-  // even a perfect BRDF look like grey paint.
-  const skyR = 0.30 + 0.95 * t, skyG = 0.31 + 0.97 * t, skyB = 0.35 + 1.00 * t;
-  const g = 0.015;
-  out[0] = g + (skyR - g) * edge;
-  out[1] = g + (skyG - g) * edge;
-  out[2] = g + (skyB - g) * edge;
+  // What a tank in THIS arena actually stands in: open sky above, grey
+  // concrete below, a crisp horizon between them. The contrast across
+  // that join is what the eye reads as polish, and the colours match the
+  // ground it is parked on so the reflection belongs to the scene.
+  const skyR = SUN.sky[0] * (0.42 + 1.15 * t);
+  const skyG = SUN.sky[1] * (0.42 + 1.15 * t);
+  const skyB = SUN.sky[2] * (0.44 + 1.18 * t);
+  const g = 0.05;
+  const gr = g * SUN.bounce[0] * 6.0, gg = g * SUN.bounce[1] * 6.0, gb = g * SUN.bounce[2] * 5.6;
+  out[0] = gr + (skyR - gr) * edge;
+  out[1] = gg + (skyG - gg) * edge;
+  out[2] = gb + (skyB - gb) * edge;
 
   // (A narrow Gaussian glow used to sit just above the horizon here. On a
   // near-flat hull it swept across the whole piece as the tank turned and
@@ -120,7 +138,7 @@ function sampleEnv(r, rough, out) {
   const d = sat(dot3(r, L));
   const tight = 1 / Math.max(0.006, blur * 0.7 + 0.006);
   const sun = Math.pow(d, tight) * (2.2 + 6 * (1 - rough));
-  out[0] += sun; out[1] += sun * 0.97; out[2] += sun * 0.9;
+  out[0] += sun * SUN.color[0]; out[1] += sun * SUN.color[1]; out[2] += sun * SUN.color[2];
 
   // A dim bounce from behind, so shadowed metal isn't dead black.
   const f = sat(-dot3(r, L)) * 0.10;
@@ -169,7 +187,7 @@ export function bucketOf(ang) {
 }
 
 function renderTile(hex, finish, size, ang) {
-  const M = MATERIALS[finish];
+  const M = matOf(finish);
   const cv = typeof OffscreenCanvas !== "undefined"
     ? new OffscreenCanvas(size, size)
     : document.createElement("canvas");
@@ -179,8 +197,15 @@ function renderTile(hex, finish, size, ang) {
   const px = img.data;
 
   const base = hexToLinear(hex);
+  const metalness = M.metal ?? 0;
   let f0;
-  if (M.metal) {
+  if (metalness > 0 && metalness < 1) {
+    // A painted panel: pigment under a clear coat. Its F0 is the coat's
+    // (about 4%), nudged toward the paint by the metallic flake in it.
+    // Its colour still comes from DIFFUSE, which is what keeps a red
+    // tank red instead of turning it into red chrome.
+    f0 = [0, 1, 2].map((i) => sat(0.04 * (1 - metalness) + base[i] * metalness));
+  } else if (metalness >= 1) {
     // A conductor's F0 IS its colour. This is the paint you bought,
     // lifted to the reflectance real metal has — same hue, physical
     // brightness — which is what keeps each material one recognisable
@@ -211,6 +236,7 @@ function renderTile(hex, finish, size, ang) {
   const dome = size * 0.46 * (M.dome ?? 0.8);
 
   const V = [0, 0, 1];                      // top-down view
+  const N = [0, 0, 1];                      // scratch, reused per pixel
   const lz = LIGHT_Z, lr = Math.sqrt(Math.max(0, 1 - lz * lz));
   // The light lives in the WORLD, so in the tile's own frame it sits at
   // (LIGHT_A − ang). This one line is what anchors the reflection.
@@ -261,10 +287,15 @@ function renderTile(hex, finish, size, ang) {
       nx += Math.sin(gph) * 0.012 * grainAmt;
       ny += Math.cos(gph * 1.7) * 0.010 * grainAmt;
 
-      const N = norm3([nx, ny, 1]);
+      // Inlined rather than norm3([...]) — that allocated two arrays for
+      // every pixel of every tile, and with every paint in the game now
+      // being shaded that was the single biggest cost in baking one.
+      const ninv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const Nx = nx * ninv, Ny = ny * ninv, Nz = ninv;
+      N[0] = Nx; N[1] = Ny; N[2] = Nz;
 
-      const NoV = sat(dot3(N, V));
-      const NoL = dot3(N, L);
+      const NoV = sat(Nz);                       // V is (0,0,1)
+      const NoL = Nx * L[0] + Ny * L[1] + Nz * L[2];
 
       // --- direct specular ------------------------------------------
       let rr = 0, gg = 0, bb = 0;
@@ -278,18 +309,37 @@ function renderTile(hex, finish, size, ang) {
       }
 
       // --- environment reflection ------------------------------------
-      const NdV = dot3(N, V);
-      R[0] = 2 * NdV * N[0] - V[0];
-      R[1] = 2 * NdV * N[1] - V[1];
-      R[2] = 2 * NdV * N[2] - V[2];
+      const NdV = Nz;                            // dot(N, (0,0,1))
+      R[0] = 2 * NdV * Nx;
+      R[1] = 2 * NdV * Ny;
+      R[2] = 2 * NdV * Nz - 1;
       sampleEnv(R, aRough, env);
       F_Schlick(NoV, f0, F);                 // grazing pixels reflect more
       rr += env[0] * F[0] * em;
       gg += env[1] * F[1] * em;
       bb += env[2] * F[2] * em;
 
-      // --- body (dielectrics only; a metal has none) -----------------
-      if (!M.metal) {
+      // --- diffuse -------------------------------------------------
+      // A conductor has none. Everything else does, and for the painted
+      // colours it is the ENTIRE reason they look like their colour.
+      // Without this every ordinary paint renders almost black, since
+      // its 4% specular is all that would be left.
+      if (metalness < 1) {
+        const kd = 1 - metalness;
+        const wrap = sat((NoL + 0.28) / 1.28);      // soft terminator
+        const sunD = wrap * LIGHT_I * 0.30;
+        // Ambient: sky from above, bounce off the concrete from below.
+        const up = sat(N[2]);
+        const ambR = SUN.sky[0] * 0.30 * up + SUN.bounce[0] * 0.22;
+        const ambG = SUN.sky[1] * 0.30 * up + SUN.bounce[1] * 0.22;
+        const ambB = SUN.sky[2] * 0.30 * up + SUN.bounce[2] * 0.22;
+        rr += base[0] * kd * (sunD * SUN.color[0] + ambR);
+        gg += base[1] * kd * (sunD * SUN.color[1] + ambG);
+        bb += base[2] * kd * (sunD * SUN.color[2] + ambB);
+      }
+
+      // --- body (transparent stones only) ---------------------------
+      if (M.absorb) {
         // Light that went into the stone, was absorbed along its path,
         // and came back out. Deeper parts read darker and more
         // saturated, which is all a gem's depth actually is.
@@ -327,16 +377,28 @@ function renderTile(hex, finish, size, ang) {
   return cv;
 }
 
+// How finely a material needs to be re-baked as the tank turns. A mirror
+// sweeps its reflection fast and needs every step; a satin paint barely
+// changes, so it can share far fewer tiles. This matters: EVERY paint is
+// shaded now, and baking 48 orientations of all of them would hitch on
+// the first frame of a full lobby for no visible gain.
+function bucketsFor(finish) {
+  const M = matOf(finish);
+  if ((M.metal ?? 0) >= 1 || M.absorb) return BUCKETS;   // specials: full
+  return 12;                                             // painted: coarse
+}
+
 export function materialTile(hex, finish, sizePx, ang) {
-  if (!isMaterial(finish)) return null;
   // Quantise the size so smooth zooming doesn't bake a fresh set every
   // frame; the blit scales the small difference away invisibly.
   const size = Math.max(24, Math.min(256, 1 << Math.ceil(Math.log2(sizePx))));
-  const b = bucketOf(ang);
-  const key = `${finish}|${hex}|${size}|${b}`;
+  const nb = bucketsFor(finish);
+  const two = Math.PI * 2;
+  const b = Math.round((((ang % two) + two) % two) / two * nb) % nb;
+  const key = `${finish}|${hex}|${size}|${b}/${nb}`;
   let tile = cache.get(key);
   if (tile) return tile;
-  tile = renderTile(hex, finish, size, (b / BUCKETS) * Math.PI * 2);
+  tile = renderTile(hex, finish, size, (b / nb) * two);
   cacheBytes += size * size * 4;
   if (cacheBytes > CACHE_LIMIT) { cache.clear(); cacheBytes = size * size * 4; }
   cache.set(key, tile);

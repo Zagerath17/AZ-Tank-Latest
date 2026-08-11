@@ -558,8 +558,12 @@ async function removeBot(id) {
 // hides the code (handy while streaming), it's hidden for everyone in
 // the room, and only the host gets the button. Copy still copies the
 // real code for whoever already has it.
+let hideWanted = false;   // what THIS client last asked for, for instant paint
+
 function renderLobbyCode(code, lobby) {
-  const hidden = !!lobby?.hideCode;
+  // Prefer the lobby's own value; fall back to what we just asked for so
+  // the first paint after a click is never blank or stale.
+  const hidden = lobby && "hideCode" in lobby ? !!lobby.hideCode : hideWanted;
   // Am I the host? Prefer the snapshot, but fall back to what we
   // already worked out. This used to read the snapshot ALONE, so the
   // very first paint — which happens on entering the lobby, before any
@@ -1273,7 +1277,26 @@ function renderLobby(code, lobby) {
       .catch(() => { /* retried on next snapshot */ });
   }
 
-  renderLobbyCode(code, null); // real state paints on the first snapshot
+  // Pass the ACTUAL lobby. This used to hand in `null`, so every render
+  // repainted the panel as "not hidden" — the toggle worked for a single
+  // frame and the very next snapshot put the code straight back. That is
+  // why the button looked completely dead.
+  renderLobbyCode(code, lobby);
+
+  // Paint equipped in the Shop only ever reached the lobby at JOIN time,
+  // so changing it while sitting in one updated the Shop preview and
+  // nothing else. Fold it in BEFORE colours are resolved — done after,
+  // the resolve below immediately wrote the old colour back over it.
+  if (!lobby.matched) {
+    const worn = social.getSkin();
+    const meRow = (lobby.players ?? {})[me];
+    if (worn && meRow && !meRow.bot && meRow.color !== worn) {
+      meRow.color = worn;                       // resolve against the new paint
+      const row = entries.find(([id]) => id === me);
+      if (row) row[1].color = worn;
+      write(`players/${me}/color`, worn);
+    }
+  }
 
   const resolved = resolveColors(entries);
   current.playersCache = entries;
@@ -1296,23 +1319,6 @@ function renderLobby(code, lobby) {
     const colorMap = {};
     for (const [id, p] of entries) colorMap[id] = resolved[id] ?? p.color ?? DEFAULT_SKIN;
     updateChatColors(colorMap);
-  }
-
-  // Paint bought or equipped in the Shop only ever reached the lobby at
-  // JOIN time, so changing it while sitting in a lobby updated the Shop
-  // preview and nothing else — the tank kept its old colour. Push the
-  // equipped paint up whenever it has actually changed.
-  if (!lobby.matched) {
-    const worn = social.getSkin();
-    if (worn && worn !== current.sentPaint) {
-      const meRow = (lobby.players ?? {})[me];
-      if (meRow && !meRow.bot && meRow.color !== worn) {
-        current.sentPaint = worn;
-        write(`players/${me}/color`, worn);
-      } else if (meRow && meRow.color === worn) {
-        current.sentPaint = worn;
-      }
-    }
   }
 
   const mine = entries.find(([id]) => id === me);
@@ -1402,7 +1408,24 @@ function guard(btn, fn) {
   };
 }
 
+// Coming back from the Shop should apply the new paint at once, without
+// waiting for whatever the next snapshot happens to be.
+export function syncLobbyPaint() {
+  if (!current || !current.lastLobby) return;
+  const me = myId();
+  const lob = current.lastLobby;
+  if (lob.matched) return;
+  const worn = social.getSkin();
+  const row = (lob.players ?? {})[me];
+  if (worn && row && !row.bot && row.color !== worn) {
+    row.color = worn;
+    write(`players/${me}/color`, worn);
+  }
+}
+
 export function initOnline() {
+  // Returning to the lobby (e.g. Back from the Shop) re-applies paint.
+  onEnter("screen-lobby", syncLobbyPaint);
   const codeInput = document.getElementById("join-code");
   const createBtn = document.getElementById("btn-create");
   const joinBtn = document.getElementById("btn-join");
@@ -1412,16 +1435,16 @@ export function initOnline() {
   const hideBtn = document.getElementById("lobby-hide");
   hideBtn.addEventListener("click", () => {
     if (!current) return;
-    // Work the host test out from the lobby itself. `current.isHost` is
-    // only filled in once a lobby render has run, so on the first click
-    // after entering it could still be undefined — and the whole handler
-    // bailed out, which is why the button did nothing at all.
-    const host = current.lastLobby ? current.lastLobby.hostId === myId() : !!current.isHost;
-    if (!host) return;
-    const next = !current?.lastLobby?.hideCode;
+    // No host test here. The button is only ever SHOWN to the host, and
+    // gating the click on current.lastLobby / current.isHost meant that
+    // whenever either was still undefined the handler returned and the
+    // button appeared dead — which is exactly what it was doing.
+    const lob = current.lastLobby;
+    const next = !(lob && "hideCode" in lob ? !!lob.hideCode : hideWanted);
+    hideWanted = next;
     localStorage.setItem("tank.hideCode.v1", next ? "1" : "0"); // remembered for my next lobby
-    if (current.lastLobby) current.lastLobby.hideCode = next;   // instant local paint
-    renderLobbyCode(current.code, current.lastLobby);
+    if (lob) lob.hideCode = next;                                // instant local paint
+    renderLobbyCode(current.code, lob);
     write("hideCode", next);
   });
 

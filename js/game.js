@@ -26,6 +26,7 @@ import {
   laserPath, castRay, castRaySlab, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
   WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
+import { SUN, SUN_DIR, buildScene, drawGround, drawWallLayer } from "./scene.js";
 import { sfx, setEngine, setFlame, startMusic, stopAll } from "./audio.js";
 
 /* ---------- tuning ---------- */
@@ -562,9 +563,14 @@ export function onlineLobbyUpdate(lobby) {
         // this round's freshly spawned tank.
         if (h.r != null && h.r !== S.roundN) continue;
         if (!victim.dead && !victim.gone) {
-          victim.lastHitAt = performance.now();
+          const hnow = performance.now();
+          victim.lastHitAt = hnow;
           damageTank(victim, h.d ?? 1, h.by ?? t.id);
-          absorbShot(victim, h.by ?? t.id);
+          // End the round on us if it's already in flight nearby;
+          // otherwise arm the absorber for one that's still coming.
+          if (!reconcileShot(victim, h.by ?? t.id, hnow)) {
+            absorbShot(victim, h.by ?? t.id);
+          }
         }
       }
     }
@@ -576,8 +582,10 @@ export function onlineLobbyUpdate(lobby) {
         mine.add(key);
         if (h.r != null && h.r !== S.roundN) continue; // stale round
         if (!t.dead && !t.gone) {
-          t.lastHitAt = performance.now();
+          const hnow = performance.now();
+          t.lastHitAt = hnow;
           damageTank(t, h.d ?? 1, h.by ?? null);
+          if (!reconcileShot(t, h.by ?? null, hnow)) absorbShot(t, h.by ?? null);
           absorbShot(t, h.by ?? null);
         }
       }
@@ -737,6 +745,7 @@ function startRound(seed) {
   // Both are empty/null for a plain rectangle, so nothing changes there.
   S.diag = boundaryWalls(S.maze, CELL, WALL_T);
   S.polyWorld = shapePolygon(S.maze, CELL);
+  S.groundSeed = (seed ?? 1) >>> 0;   // arena art is regenerated per layout
   S.worldW = cols * CELL;
   S.worldH = rows * CELL;
   S.bullets = [];
@@ -1424,9 +1433,17 @@ function stepTanks(now, dt) {
             t.flameNetAt = 0;       // push a fresh pulse to peers at once
             sfx.windup?.();
           }
-          t.flameFuel = Math.max(0, t.flameFuel - dt * 1000); // dt is seconds
-          const doTick = now >= (t.flameTickAt ?? 0);
-          if (doTick) t.flameTickAt = now + FLAME.tickMs;
+          const burn = Math.min(t.flameFuel, dt * 1000);       // dt is seconds
+          t.flameFuel = Math.max(0, t.flameFuel - burn);
+          // Damage is charged against FUEL BURNED, not against the clock.
+          // It used to fire whenever `now` passed a deadline, so tapping
+          // the trigger once every tick-length spent almost no fuel and
+          // still landed full damage every time — a whole tank could be
+          // taken down on one clip by spamming taps. Metering it by fuel
+          // means a tap costs exactly the damage it pays for.
+          t.flameBurn = (t.flameBurn ?? FLAME.tickMs) + burn;
+          const doTick = t.flameBurn >= FLAME.tickMs;
+          if (doTick) t.flameBurn -= FLAME.tickMs;
           for (const o of S.tanks) {
             if (o === t || o.dead || o.gone) continue;
             if (!tankInFlameCone(t, o)) continue;
@@ -1704,17 +1721,32 @@ function drawTracks(now) {
 function emitDriveDust(t, back, boosting, now) {
   // Boost pumps particles out at nearly double the rate.
   t.dustAt = now + (boosting ? 34 + Math.random() * 24 : 65 + Math.random() * 45);
+  // Behind the TREADS, not out of the tank's belly. Treads are what
+  // actually bite the ground, so that's where the dust comes from — the
+  // same ±0.62R offset the tread marks use.
   const bx = t.x + Math.cos(t.a) * TANK_R * back;
   const by = t.y + Math.sin(t.a) * TANK_R * back;
+  const px = -Math.sin(t.a) * TANK_R * 0.62;
+  const py = Math.cos(t.a) * TANK_R * 0.62;
 
   // Boost: 4 puffs per emission (vs 1), thrown wider and harder.
-  const puffs = boosting ? 4 : 1;
+  const puffs = boosting ? 6 : 2;   // one per tread, more under boost
   const scat = boosting ? 11 : 6;
   const kick = boosting ? 15 : 9;
   for (let p = 0; p < puffs; p++) {
+    const side = (p % 2) ? 1 : -1;          // alternate left / right tread
     S.dust.push({
-      x: bx + (Math.random() - 0.5) * scat,
-      y: by + (Math.random() - 0.5) * scat,
+      // Three or four soft lobes give the puff an irregular, cloudy
+      // outline instead of the perfect disc it used to be.
+      lobes: [
+        { ox: 0, oy: 0, r: 0.9 },
+        { ox: (Math.random() - 0.5) * 0.7, oy: (Math.random() - 0.5) * 0.7, r: 0.62 + Math.random() * 0.22 },
+        { ox: (Math.random() - 0.5) * 0.9, oy: (Math.random() - 0.5) * 0.9, r: 0.5 + Math.random() * 0.22 },
+        { ox: (Math.random() - 0.5) * 1.1, oy: (Math.random() - 0.5) * 1.1, r: 0.36 + Math.random() * 0.2 },
+      ],
+      spin: (Math.random() - 0.5) * 1.4,
+      x: bx + px * side + (Math.random() - 0.5) * scat,
+      y: by + py * side + (Math.random() - 0.5) * scat,
       vx: Math.cos(t.a) * back * kick + (Math.random() - 0.5) * (boosting ? 16 : 8),
       vy: Math.sin(t.a) * back * kick + (Math.random() - 0.5) * (boosting ? 16 : 8),
       born: now,
@@ -1800,6 +1832,7 @@ function clearWeapon(t, now) {
   t.weapon = null;
   t.flameUntil = 0;      // legacy field, kept zeroed for safety
   t.flameTickAt = 0;
+  t.flameBurn = FLAME.tickMs;   // first pull of a fresh tank bites at once
   t.flameOn = false;
   t.flameOnAt = 0;
   t.flameOffAt = 0;
@@ -2423,6 +2456,7 @@ function stepGear(now) {
           // ticks at once and can't be tap-spammed.
           t.flameFuel = FLAME.durationMs;
           t.flameTickAt = 0;
+          t.flameBurn = FLAME.tickMs;
           t.flameOn = false;
           t.flameOnAt = 0;
           t.flameOffAt = 0;
@@ -3104,6 +3138,35 @@ function stepShrapnel(now, dt) {
 // shown bursting on the hull. The window covers a round that has
 // already gone past as well as one that hasn't arrived yet, and it
 // deals no further damage — the damage is already applied.
+// Make the VICTIM's screen agree with the authoritative result.
+//
+// The shooter fires at where we were a moment ago (their picture of us is
+// interpolated a little behind), so a round that clearly connects on
+// their screen can sail past on ours — and we take the damage anyway,
+// which looks exactly like being shot through thin air. absorbShot below
+// only helps when the round would have collided locally too, which is
+// precisely the case that isn't broken. So when a hit lands, find that
+// shooter's round near us and END it on us, with the impact, so the two
+// screens tell the same story.
+function reconcileShot(victim, byId, now) {
+  if (!S || S.mode === "local" || !victim) return false;
+  const list = S.bullets ?? [];
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    if (byId && b.by !== byId) continue;
+    const d = Math.hypot(b.x - victim.x, b.y - victim.y);
+    // Generous, because the disagreement between the two views is
+    // exactly the interpolation delay times the closing speed.
+    if (d < TANK_RAD * 4.5 && d < bestD) { bestD = d; best = i; }
+  }
+  if (best < 0) return false;
+  const b = list[best];
+  addFade(b.x, b.y, (BULLET_R ?? 3) * 2.2, now);
+  list.splice(best, 1);
+  return true;
+}
+
 function absorbShot(victim, byId) {
   if (!victim || S.mode === "local") return;
   (victim.absorb ??= []).push({ by: byId ?? null, until: performance.now() + 400 });
@@ -4017,8 +4080,11 @@ function draw(now) {
     ctx.clip();
     clippedToShape = true;
   }
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, S.worldW, S.worldH);
+  // The arena floor: aged concrete, generated once for the whole map at
+  // its real size (see scene.js). Nothing here tiles — every crack,
+  // stain and weed is placed individually across the world.
+  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1);
+  drawGround(ctx, scene);
 
   // Tread marks go straight onto the floor — under the zone tint, under
   // the walls, and under everything that moves.
@@ -4064,8 +4130,9 @@ function draw(now) {
     }
   }
 
-  ctx.fillStyle = "#808896";
-  for (const r of S.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
+  // Walls: stone brick, markedly darker than the floor, with the shadow
+  // the sun casts from them laid down first.
+  drawWallLayer(ctx, buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1));
 
   // Shaped arena: lift the silhouette clip and draw the diagonal border
   // as ONE stroked polygon (round joins), so the corners connect
@@ -4074,7 +4141,7 @@ function draw(now) {
   // lines up exactly with the slab collision.
   if (clippedToShape) {
     ctx.restore();
-    ctx.strokeStyle = "#808896";
+    ctx.strokeStyle = "#606265";
     ctx.lineWidth = WALL_T;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -4109,9 +4176,22 @@ function draw(now) {
       ctx.fill();
     } else {
       ctx.fillStyle = d.boost ? "#646974" : "#8b93a3"; // boosted = 20% darker again
-      ctx.globalAlpha = (d.boost ? 0.18 : 0.16) * (1 - k);
+      // A puff is a few overlapping lobes that spread and drift apart as
+      // it ages, so the silhouette is ragged like real kicked-up dust
+      // rather than a clean circle.
+      const dx0 = d.x + d.vx * k, dy0 = d.y + d.vy * k;
+      const R0 = TANK_R * (0.16 + k * 0.34);
+      const spread = 1 + k * 1.5;
+      const rot = (d.spin ?? 0) * k;
+      const cs = Math.cos(rot), sn = Math.sin(rot);
+      ctx.globalAlpha = (d.boost ? 0.15 : 0.13) * (1 - k) * (1 - k * 0.35);
       ctx.beginPath();
-      ctx.arc(d.x + d.vx * k, d.y + d.vy * k, TANK_R * (0.22 + k * 0.4), 0, Math.PI * 2);
+      for (const lo of d.lobes ?? [{ ox: 0, oy: 0, r: 1 }]) {
+        const lx = (lo.ox * cs - lo.oy * sn) * R0 * spread;
+        const ly = (lo.ox * sn + lo.oy * cs) * R0 * spread;
+        ctx.moveTo(dx0 + lx + lo.r * R0, dy0 + ly);
+        ctx.arc(dx0 + lx, dy0 + ly, lo.r * R0, 0, Math.PI * 2);
+      }
       ctx.fill();
     }
   }
