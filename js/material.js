@@ -44,15 +44,15 @@ import { SUN } from "./scene.js";
 //   dome   — how domed the casting is, which sets how far the
 //            reflection sweeps across it as the tank turns.
 const MATERIALS = {
-  bronze:   { metal: 1, rough: 0.34, envMul: 1.05, dome: 0.74 },
-  silver:   { metal: 1, rough: 0.075, envMul: 1.32, dome: 0.76 },
-  gold:     { metal: 1, rough: 0.16, envMul: 1.22, dome: 0.72 },
-  platinum: { metal: 1, rough: 0.28, envMul: 1.04, dome: 0.74 },
+  bronze:   { metal: 1, rough: 0.26, envMul: 1.25, dome: 0.84 },
+  silver:   { metal: 1, rough: 0.055, envMul: 1.55, dome: 0.86 },
+  gold:     { metal: 1, rough: 0.12, envMul: 1.45, dome: 0.84 },
+  platinum: { metal: 1, rough: 0.20, envMul: 1.30, dome: 0.84 },
   // Every OTHER paint in the game. Not a conductor — pigment under a
   // clear coat — so it keeps a full diffuse response and only picks up
   // a soft sheen and a single sun highlight. Enough to sit in the same
   // light as the concrete and the brickwork without turning chrome.
-  flat:     { metal: 0.16, rough: 0.46, envMul: 0.60, dome: 0.70, coat: 1 },
+  flat:     { metal: 0.30, rough: 0.34, envMul: 1.00, dome: 0.78, coat: 1 },
   // The stones are dielectrics: light enters, is absorbed on the way
   // through, and returns carrying the stone's own colour.
   diamond:  { metal: 0, rough: 0.02, ior: 2.42, envMul: 2.4, dome: 0.90,
@@ -276,7 +276,7 @@ function renderTile(hex, finish, size, ang) {
       // the reflection sweep from sky to ground the way it does on a real
       // panel, which is what actually looks like metal.
       const ux = lxp / hx, uy = lyp / hy;          // -1..1 across the piece
-      const CURVE = 1.35;
+      const CURVE = 1.85;
       nx += ux * CURVE;
       ny += uy * CURVE;
 

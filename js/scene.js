@@ -21,8 +21,12 @@
 // mid-morning) but not straight overhead, so surfaces still have a lit
 // side and a shaded side to read form from.
 export const SUN = {
-  az: -2.30,                       // azimuth, radians
-  el: 0.90,                        // elevation above the ground plane
+  az: -2.42,                       // azimuth, radians
+  // Low enough to throw a real shadow. At this elevation anything one
+  // unit tall lays a shadow about 1.5 units long, off to the side —
+  // which is what gives the arena depth instead of looking lit from a
+  // camera flash.
+  el: 0.58,                        // elevation above the ground plane
   color: [1.00, 0.965, 0.905],     // slightly warm
   intensity: 3.1,
   sky: [0.42, 0.50, 0.62],         // cool bounce from the sky dome
@@ -83,18 +87,25 @@ const WALL = { r: 96, g: 98, b: 101 };
 
 let cache = null;   // { key, floor, walls, w, h }
 
-function newCanvas(w, h) {
+// A canvas that is `d` device pixels per WORLD pixel. The returned
+// context is pre-scaled, so every draw below stays in world units and
+// simply lands on more pixels — a 1 px crack is still 1 world px wide,
+// it is just no longer smeared across two screen pixels.
+function newCanvas(w, h, d = 1) {
   const c = document.createElement("canvas");
-  c.width = Math.max(1, Math.ceil(w));
-  c.height = Math.max(1, Math.ceil(h));
+  c.width = Math.max(1, Math.ceil(w * d));
+  c.height = Math.max(1, Math.ceil(h * d));
+  const g = c.getContext("2d");
+  g.scale(d, d);
+  c.__wu = { w, h, d };          // world-unit size, for drawImage
   return c;
 }
 
 // Broad tonal variation: old concrete is poured in patches, stained, and
 // worn unevenly. Rendered at a fraction of the resolution and scaled up,
 // because none of this has any business being pixel-sharp.
-function paintBase(g, w, h, seed) {
-  const SCALE = 3;
+function paintBase(g, w, h, seed, d = 1) {
+  const SCALE = 3 / Math.min(2, d);
   const bw = Math.max(2, Math.ceil(w / SCALE)), bh = Math.max(2, Math.ceil(h / SCALE));
   const tmp = newCanvas(bw, bh);
   const tg = tmp.getContext("2d");
@@ -212,10 +223,10 @@ function paintGrass(g, r, x, y, scale) {
   g.fill();
 }
 
-function buildFloor(w, h, seed) {
-  const cv = newCanvas(w, h);
+function buildFloor(w, h, seed, pad = 0, rects = [], d = 1) {
+  const cv = newCanvas(w, h, d);
   const g = cv.getContext("2d");
-  paintBase(g, w, h, seed);
+  paintBase(g, w, h, seed, d);
   paintAggregate(g, w, h, seed);
 
   const r = rng(seed ^ 0x77ab);
@@ -268,7 +279,61 @@ function buildFloor(w, h, seed) {
     g.arc(x, y, rad, 0, Math.PI * 2);
     g.fill();
   }
+  paintOldTracks(g, w, h, seed ^ 0x33cd, pad, rects);
   return cv;
+}
+
+// Faint tread marks worn into the concrete: everything that has driven
+// here before. Laid all over the arena but never THROUGH a wall — a
+// track that crosses masonry instantly reads as wallpaper.
+function segBlocked(rects, x1, y1, x2, y2) {
+  for (const rc of rects) {
+    // cheap: sample the segment against the slab
+    for (let t = 0; t <= 1; t += 0.25) {
+      const x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t;
+      if (x > rc.x - 6 && x < rc.x + rc.w + 6 && y > rc.y - 6 && y < rc.y + rc.h + 6) return true;
+    }
+  }
+  return false;
+}
+
+function paintOldTracks(g, w, h, seed, pad, rects) {
+  const r = rng(seed);
+  const HALF = 10.7, WIDTH = 7.3, PITCH = 5.9;   // matches a real tank's treads
+  const runs = Math.max(8, Math.floor((w * h) / 30000));
+  g.save();
+  for (let i = 0; i < runs; i++) {
+    let x = r() * w - pad, y = r() * h - pad;
+    let a = r() * Math.PI * 2;
+    const len = 40 + r() * 150;
+    const fade = 0.05 + r() * 0.07;
+    for (let d = 0; d < len; d++) {
+      a += (r() - 0.5) * 0.09;
+      const nx = x + Math.cos(a) * PITCH, ny = y + Math.sin(a) * PITCH;
+      // Inside the arena proper, a track must not cross masonry.
+      const inside = nx > 0 && ny > 0 && nx < w - pad * 2 && ny < h - pad * 2;
+      if (inside && segBlocked(rects, x, y, nx, ny)) break;
+      const px = -Math.sin(a), py = Math.cos(a);
+      for (const side of [-1, 1]) {
+        const cx = nx + px * HALF * side + pad, cy = ny + py * HALF * side + pad;
+        g.strokeStyle = `rgba(96,96,94,${fade})`;
+        g.lineWidth = WIDTH;
+        g.lineCap = "butt";
+        g.beginPath();
+        g.moveTo(cx - Math.cos(a) * PITCH, cy - Math.sin(a) * PITCH);
+        g.lineTo(cx, cy);
+        g.stroke();
+        g.strokeStyle = `rgba(70,70,68,${fade * 1.5})`;
+        g.lineWidth = 1.6;
+        g.beginPath();
+        g.moveTo(cx - px * (WIDTH / 2), cy - py * (WIDTH / 2));
+        g.lineTo(cx + px * (WIDTH / 2), cy + py * (WIDTH / 2));
+        g.stroke();
+      }
+      x = nx; y = ny;
+    }
+  }
+  g.restore();
 }
 
 /* ---------- the walls ---------- */
@@ -277,15 +342,17 @@ function buildFloor(w, h, seed) {
 // brick sized against the tank; the face catches the light on the sun
 // side and falls into shade opposite, and the whole slab throws a soft
 // shadow onto the concrete.
-function buildWalls(w, h, rects, seed) {
-  const cv = newCanvas(w, h);
+function buildWalls(w, h, rects, seed, d = 1) {
+  const cv = newCanvas(w, h, d);
   const g = cv.getContext("2d");
   const r = rng(seed ^ 0x5150);
 
-  const BRICK_W = 21, COURSE = 9, MORTAR = 1.4;
-  const lit = `rgba(214,216,219,`;
-  const shade = `rgba(28,30,33,`;
-  // Which edges face the light.
+  // Real stone: courses of differing height, stones of differing length
+  // within each course, and every face inset by its own small amount so
+  // no two edges line up. The old version used one fixed brick size on a
+  // regular half-offset grid, which is precisely what made it read as
+  // moulded plastic rather than masonry.
+  const MORTAR_C = "rgb(74,74,72)";
   const sx = Math.cos(SUN.az), sy = Math.sin(SUN.az);
 
   for (const rc of rects) {
@@ -297,47 +364,72 @@ function buildWalls(w, h, rects, seed) {
     g.rect(x, y, rw, rh);
     g.clip();
 
-    g.fillStyle = `rgb(${WALL.r},${WALL.g},${WALL.b})`;
+    // Mortar bed first; the stones are then set into it.
+    g.fillStyle = MORTAR_C;
     g.fillRect(x, y, rw, rh);
 
-    // Courses run along the slab's long axis.
     const horiz = rw >= rh;
     const along = horiz ? rw : rh;
     const across = horiz ? rh : rw;
-    const courses = Math.max(1, Math.round(across / COURSE));
-    const cH = across / courses;
-
+    // Courses vary in height around a target, so the bedding lines
+    // wander instead of ruling the wall into a grid.
+    const target = 10;
+    const courses = Math.max(1, Math.round(across / target));
+    const heights = [];
+    let acc = 0;
     for (let c = 0; c < courses; c++) {
-      const offset = (c % 2) * BRICK_W * 0.5;
-      let p = -offset;
+      const hgt = (across / courses) * (0.78 + r() * 0.44);
+      heights.push(hgt); acc += hgt;
+    }
+    for (let c = 0; c < courses; c++) heights[c] *= across / acc;
+
+    let cOff = 0;
+    for (let c = 0; c < courses; c++) {
+      const cH = heights[c];
+      let p = -r() * 20;                       // each course starts differently
       while (p < along) {
-        const bw = BRICK_W * (0.82 + r() * 0.36);
-        const bx = horiz ? x + p : x + c * cH;
-        const by = horiz ? y + c * cH : y + p;
+        const bw = 13 + r() * 20;              // stones are all different lengths
+        // Every face pulls back from the mortar by its own amount.
+        const i1 = 0.7 + r() * 0.9, i2 = 0.7 + r() * 0.9;
+        const i3 = 0.6 + r() * 0.7, i4 = 0.6 + r() * 0.7;
+        const bx = horiz ? x + p : x + cOff;
+        const by = horiz ? y + cOff : y + p;
         const bW = horiz ? bw : cH;
         const bH = horiz ? cH : bw;
-        // Per-stone tone: no two the same.
-        const t = (r() - 0.5) * 30;
+        const fx = bx + i1, fy = by + i3;
+        const fw = Math.max(1, bW - i1 - i2), fh = Math.max(1, bH - i3 - i4);
+
+        const t = (r() - 0.5) * 34;
         g.fillStyle = `rgb(${WALL.r + t},${WALL.g + t},${WALL.b + t})`;
-        g.fillRect(bx + MORTAR * 0.5, by + MORTAR * 0.5,
-                   Math.max(1, bW - MORTAR), Math.max(1, bH - MORTAR));
-        // Bevel: the sun catches one pair of edges, the other two darken.
-        g.fillStyle = lit + (0.16 + r() * 0.10) + ")";
-        if (sx < 0) g.fillRect(bx + MORTAR * 0.5, by + MORTAR * 0.5, 1, Math.max(1, bH - MORTAR));
-        else g.fillRect(bx + bW - MORTAR * 0.5 - 1, by + MORTAR * 0.5, 1, Math.max(1, bH - MORTAR));
-        if (sy < 0) g.fillRect(bx + MORTAR * 0.5, by + MORTAR * 0.5, Math.max(1, bW - MORTAR), 1);
-        else g.fillRect(bx + MORTAR * 0.5, by + bH - MORTAR * 0.5 - 1, Math.max(1, bW - MORTAR), 1);
-        g.fillStyle = shade + (0.20 + r() * 0.12) + ")";
-        if (sx < 0) g.fillRect(bx + bW - MORTAR * 0.5 - 1, by + MORTAR * 0.5, 1, Math.max(1, bH - MORTAR));
-        else g.fillRect(bx + MORTAR * 0.5, by + MORTAR * 0.5, 1, Math.max(1, bH - MORTAR));
-        // A chipped corner here and there.
-        if (r() < 0.10) {
-          g.fillStyle = shade + "0.22)";
-          const cs = 1.5 + r() * 2;
-          g.fillRect(bx + r() * Math.max(1, bW - cs), by + r() * Math.max(1, bH - cs), cs, cs);
+        g.fillRect(fx, fy, fw, fh);
+
+        // Grain within the stone, so a face isn't a flat swatch.
+        const specks = 2 + ((r() * 4) | 0);
+        for (let k = 0; k < specks; k++) {
+          const st = r() < 0.5 ? 255 : 0;
+          g.fillStyle = `rgba(${st},${st},${st},${0.04 + r() * 0.07})`;
+          g.fillRect(fx + r() * fw, fy + r() * fh, 1 + r() * 2.2, 1 + r() * 1.6);
+        }
+        // Lit and shaded arrises, following the sun.
+        g.fillStyle = `rgba(216,218,220,${0.14 + r() * 0.12})`;
+        if (sx < 0) g.fillRect(fx, fy, 1, fh); else g.fillRect(fx + fw - 1, fy, 1, fh);
+        if (sy < 0) g.fillRect(fx, fy, fw, 1); else g.fillRect(fx, fy + fh - 1, fw, 1);
+        g.fillStyle = `rgba(20,21,23,${0.22 + r() * 0.14})`;
+        if (sx < 0) g.fillRect(fx + fw - 1, fy, 1, fh); else g.fillRect(fx, fy, 1, fh);
+        if (sy < 0) g.fillRect(fx, fy + fh - 1, fw, 1); else g.fillRect(fx, fy, fw, 1);
+        // Weathering: a knocked-off corner now and then.
+        if (r() < 0.16) {
+          g.fillStyle = "rgba(74,74,72,0.55)";
+          const cs = 1.6 + r() * 2.6;
+          const cxp = r() < 0.5 ? fx : fx + fw - cs;
+          const cyp = r() < 0.5 ? fy : fy + fh - cs;
+          g.beginPath();
+          g.moveTo(cxp, cyp); g.lineTo(cxp + cs, cyp); g.lineTo(cxp, cyp + cs);
+          g.closePath(); g.fill();
         }
         p += bw;
       }
+      cOff += cH;
     }
 
     // The slab's own form: lit along the sun-facing edge, shaded opposite.
@@ -355,46 +447,111 @@ function buildWalls(w, h, rects, seed) {
 
 // Shadows the walls throw across the concrete. Drawn under the walls, in
 // the direction the sun dictates, so the light has visible consequences.
-function buildShadows(w, h, rects) {
-  const cv = newCanvas(w, h);
+function buildShadows(w, h, rects, pad, d = 1) {
+  const cv = newCanvas(w + pad * 2, h + pad * 2, d);
   const g = cv.getContext("2d");
-  const HEIGHT = 7;                       // how tall a wall reads
+  g.translate(pad, pad);
+  const HEIGHT = 9;                              // how tall a wall stands
   const ox = SHADOW.dx * HEIGHT, oy = SHADOW.dy * HEIGHT;
-  g.fillStyle = "rgba(24,26,28,0.30)";
-  for (const rc of rects) g.fillRect(rc.x + ox, rc.y + oy, rc.w, rc.h);
-  // A soft skirt so the edge isn't a hard cut.
-  g.globalAlpha = 0.16;
-  g.filter = "blur(2px)";
-  for (const rc of rects) g.fillRect(rc.x + ox * 1.5 - 1, rc.y + oy * 1.5 - 1, rc.w + 2, rc.h + 2);
-  g.filter = "none";
-  g.globalAlpha = 1;
-  return cv;
+
+  // A shadow is the wall SWEPT along the light — the box itself, the box
+  // displaced, and the volume joining them. Drawing only the displaced
+  // copy (which is what used to happen) leaves a floating rectangle with
+  // a gap where the wall meets the ground.
+  g.fillStyle = "rgba(20,22,25,0.34)";
+  for (const rc of rects) {
+    const { x, y, w: rw, h: rh } = rc;
+    const pts = [
+      [x, y], [x + rw, y], [x + rw, y + rh], [x, y + rh],
+      [x + ox, y + oy], [x + rw + ox, y + oy],
+      [x + rw + ox, y + rh + oy], [x + ox, y + rh + oy],
+    ];
+    // Convex hull of the two footprints = the swept volume.
+    const hull = convexHull(pts);
+    g.beginPath();
+    g.moveTo(hull[0][0], hull[0][1]);
+    for (let i = 1; i < hull.length; i++) g.lineTo(hull[i][0], hull[i][1]);
+    g.closePath();
+    g.fill();
+  }
+  // Contact shading: darkest right where the wall meets the floor, so it
+  // looks seated rather than floating.
+  g.fillStyle = "rgba(16,18,20,0.26)";
+  for (const rc of rects) {
+    g.fillRect(rc.x + ox * 0.16, rc.y + oy * 0.16, rc.w, rc.h);
+  }
+  return { cv, pad };
+}
+
+// Andrew's monotone chain — small and exact, which matters because the
+// hull IS the shadow's outline.
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  const upper = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper);
 }
 
 /* ---------- public ---------- */
 
 // Build (or reuse) the arena art. Keyed on size, layout and seed, so it
 // is generated once per round and simply blitted every frame after that.
-export function buildScene(worldW, worldH, rects, seed) {
-  const key = `${Math.round(worldW)}x${Math.round(worldH)}|${rects.length}|${seed}`;
+export function buildScene(worldW, worldH, rects, seed, viewScale = 1) {
+  // Bake at the density the arena is actually SHOWN at, so the concrete,
+  // the brickwork and the worn tracks are as sharp as the tanks standing
+  // on them. Baking at world size and letting the canvas magnify it is
+  // what left all of the fine detail soft.
+  // Round UP to the next half step: rounding to nearest can land below
+  // what the display actually needs and leave the detail soft, which is
+  // the whole thing being fixed here.
+  let d = Math.max(1, Math.min(2, Math.ceil(viewScale * 2) / 2));
+  // Enough surround to cover the letterbox on any sensible aspect; the
+  // flat backstop underneath catches anything beyond it.
+  const pad = Math.round(Math.max(worldW, worldH) * 0.24);
+  const fw = worldW + pad * 2, fh = worldH + pad * 2;
+  // Guard rail: a big arena at full density is a lot of memory, so drop
+  // back a step rather than allocate something absurd.
+  // Keep the whole set inside a sane memory budget — a big arena at full
+  // density is a lot of bitmap, and dropping half a step costs far less
+  // than the allocation would.
+  const BUDGET = 11e6;
+  while (d > 1 && fw * fh * d * d > BUDGET) d -= 0.5;
+
+  const key = `${Math.round(worldW)}x${Math.round(worldH)}|${rects.length}|${seed}|${d}`;
   if (cache && cache.key === key) return cache;
   cache = {
     key,
-    w: worldW, h: worldH,
-    floor: buildFloor(worldW, worldH, seed >>> 0),
-    walls: buildWalls(worldW, worldH, rects, seed >>> 0),
-    shadow: buildShadows(worldW, worldH, rects),
+    w: worldW, h: worldH, pad, density: d,
+    floor: buildFloor(fw, fh, seed >>> 0, pad, rects, d),
+    walls: buildWalls(worldW, worldH, rects, seed >>> 0, d),
+    shadow: buildShadows(worldW, worldH, rects, pad, 1),   // soft edges: density buys nothing
   };
   return cache;
 }
 
+const wu = (cv) => cv.__wu ?? { w: cv.width, h: cv.height };
+
 export function drawGround(ctx, scene) {
   if (!scene) return;
-  ctx.drawImage(scene.floor, 0, 0);
+  const u = wu(scene.floor);
+  ctx.drawImage(scene.floor, -scene.pad, -scene.pad, u.w, u.h);
 }
 
 export function drawWallLayer(ctx, scene) {
   if (!scene) return;
-  ctx.drawImage(scene.shadow, 0, 0);
-  ctx.drawImage(scene.walls, 0, 0);
+  const sh = wu(scene.shadow.cv);
+  ctx.drawImage(scene.shadow.cv, -scene.shadow.pad, -scene.shadow.pad, sh.w, sh.h);
+  const wl = wu(scene.walls);
+  ctx.drawImage(scene.walls, 0, 0, wl.w, wl.h);
 }

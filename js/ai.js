@@ -460,9 +460,22 @@ function plan(t, B, world, P, now) {
   }
 }
 
+// Only chase a crate that's actually worth having. A tank already
+// carrying a gun gains nothing from another, and going for it is what
+// makes a bot orbit a pickup it can't use — it arrives, can't take it,
+// and the goal never clears. Utility drops are always worth taking.
+const UTILITY_GEAR = new Set(["armour", "heal", "wall", "mud", "boost", "phase"]);
+
 function pickGear(t, B, world, P) {
+  const armed = !!t.weapon && t.weapon !== "normal";
+  const dryFlame = t.weapon === "flame" && (t.flameFuel ?? 1e9) < 500;
   let best = null, bd = Infinity;
   for (const g of world.gear ?? []) {
+    const utility = UTILITY_GEAR.has(g.type);
+    // Already armed? A replacement gun isn't worth crossing the map for.
+    if (!utility && armed && !dryFlame) continue;
+    // And don't chase a utility drop we already have equipped.
+    if (utility && (t.defense === g.type || t.agility === g.type)) continue;
     const d = Math.hypot(g.x - t.x, g.y - t.y);
     if (d > P.sight * world.cell) continue;
     if (d < bd) { bd = d; best = g; }
@@ -615,7 +628,7 @@ function navigate(t, B, world, P, now, gun) {
       th = B.threats[0];                        // the one arriving first
       B.dodgeKey = th.key;
       B.dodgeUntil = now + 520;
-      B.dodgeA = pickWeave(t, world, P, th, open, squeeze, B.dodgeA, B.dodgeKey != null);
+      B.dodgeA = pickWeave(t, world, P, th, open, squeeze, B.dodgeA, B.dodgeKey != null, B.threats);
     }
     const urgency = 1 - Math.min(1, th.t / Math.max(0.15, P.look));
     const w = 3.6 * P.dodge * (0.55 + urgency);
@@ -681,7 +694,7 @@ function navigate(t, B, world, P, now, gun) {
 //     there sooner and is worth more;
 //   • which side of the line we are already on, because continuing off
 //     that way is a shorter trip than crossing in front of the shot.
-function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev) {
+function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev, all) {
   const slotOf = (a) => {
     const n = ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
     return Math.round(n / (Math.PI * 2) * DIRS) % DIRS;
@@ -719,10 +732,33 @@ function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev) {
     // at a slower tempo. A sustained run across the line is both harder
     // to lead and what a person would actually do.
     const carry = hadPrev ? Math.max(0, Math.cos(angDiff(a, prevA))) * 1.1 : 0;
+    // WORST CASE across everything in the air. Scoring only the round
+    // being dodged is what fell apart when there was more than one: the
+    // bot would pick a heading that slipped this shot perfectly and put
+    // itself straight in front of the next. A heading is only as good as
+    // the round it handles worst.
+    let worst = 1;
+    if (all && all.length > 1) {
+      const spd = (world.moveSpeed ?? 130) * P.speed;
+      const R = world.tankR;
+      for (const o of all) {
+        if (o.kind === "beam") {
+          worst = Math.min(worst, Math.max(0, Math.cos(angDiff(a,
+            Math.atan2(t.y - o.y, t.x - o.x)))));
+          continue;
+        }
+        const lead = Math.min(P.look, Math.max(0.12, o.t));
+        const fx = t.x + Math.cos(a) * spd * lead;
+        const fy = t.y + Math.sin(a) * spd * lead;
+        const miss = segDist(fx, fy, o.x, o.y, o.x + o.vx * lead, o.y + o.vy * lead);
+        worst = Math.min(worst, Math.min(1, miss / (R * 3)));
+      }
+    }
     const v = open[i] * 2.4
             + squeeze[i] * 1.2                 // must be usable, not just open
             - turnCost * 1.6
             + carry
+            + worst * 3.4 * P.dodge            // clear of EVERY round, not one
             + (th.side === side ? 0.5 : 0);    // carry on off the side we're on
     if (v > bv) { bv = v; best = a; }
   }
@@ -1004,7 +1040,16 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
     const near = want * 0.34, far = want * 1.35;
 
     if (gun.dist > far) {
-      wantA = axis; wantM = 0.9;                       // close the gap
+      // Close the gap NOSE FIRST. Commanding the raw bearing when the
+      // hull happens to point away makes the game reverse rather than
+      // turn — the nose stays put and the tank drives backwards — and
+      // since the nose never comes round it reverses the entire way in.
+      // Clamping the command inside the forward arc forces a proper
+      // turn-and-drive.
+      const off = angDiff(t.a, axis);
+      const LIM = 1.45;                                // ~83°, inside reverse
+      wantA = Math.abs(off) > LIM ? t.a + Math.sign(off) * LIM : axis;
+      wantM = 0.9;                                     // close the gap
     } else if (gun.dist < near) {
       wantA = axis + Math.PI; wantM = 0.40;            // ease off, nose still on
     } else {

@@ -26,13 +26,16 @@ import {
   laserPath, castRay, castRaySlab, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
   WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
-import { SUN, SUN_DIR, buildScene, drawGround, drawWallLayer } from "./scene.js";
+import { SUN, SUN_DIR, SHADOW, buildScene, drawGround, drawWallLayer } from "./scene.js";
 import { sfx, setEngine, setFlame, startMusic, stopAll } from "./audio.js";
 
 /* ---------- tuning ---------- */
 
 const CELL = 96;                     // corridor spacing — walls are much more spread out
 const WALL_T = 10;
+const RENDER_W = 2560, RENDER_H = 1440;   // internal render resolution
+const ACCEL_TIME = 1.5;   // s from a standstill to full speed
+const BRAKE_TIME = 0.8;   // s from full speed back to a stop
 const U = 64;                        // tank & ballistics scale (unchanged — tanks stay the same size)
 const TANK_R = U * 0.27;             // base scale for the tank's size
 const TANK_HL = TANK_R * 0.95;       // hitbox half-LENGTH (along the barrel) — matches the drawn treads
@@ -1305,6 +1308,29 @@ function stepTanks(now, dt) {
       } else {
         if (acts.up) v += MOVE_SPEED * mul.speed * boostMul * mudMul;
         if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul;
+      }
+
+      // ---- inertia -------------------------------------------------
+      // `v` above is the speed the controls are ASKING for. A tank has
+      // mass, so it ramps toward that rather than snapping to it:
+      // 1.5 s from a standstill to full speed, and 0.8 s to roll to a
+      // stop once the gas is released. Braking is deliberately quicker
+      // than pulling away, which is how a tracked vehicle behaves.
+      {
+        const want = v;
+        const full = MOVE_SPEED * mul.speed;              // the reference speed
+        const cur = t.vel ?? 0;
+        // Rates are "reference speeds per second", so boost and mud
+        // change the target without changing how briskly it responds.
+        const accel = full / ACCEL_TIME;
+        const brake = full / BRAKE_TIME;
+        // Actively reversing direction counts as braking until we cross
+        // zero, so a direction change doesn't feel spongy.
+        const rate = (want === 0 || Math.sign(want) !== Math.sign(cur || want)) ? brake : accel;
+        const d = want - cur;
+        const stepV = rate * dt;
+        t.vel = Math.abs(d) <= stepV ? want : cur + Math.sign(d) * stepV;
+        v = t.vel;
       }
 
       // The engine is "running" whenever the tank drives OR turns in
@@ -4046,13 +4072,22 @@ function draw(now) {
   const ch = canvas.clientHeight;
   if (!cw || !ch) return;
 
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // Render at 2560x1440. The backing store is scaled up to fill that
+  // budget without exceeding it, so on a 16:9 display it lands exactly
+  // on 2560x1440 and on anything else it gets as close as the aspect
+  // allows. Bounded either way, so it can't run away on a big monitor.
+  const dpr = Math.max(1, Math.min(RENDER_W / Math.max(1, cw), RENDER_H / Math.max(1, ch)));
   if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
     canvas.width = Math.round(cw * dpr);
     canvas.height = Math.round(ch * dpr);
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cw, ch);
+  // Backstop: the ground texture runs well past the arena, but fill the
+  // whole viewport with the concrete's own tone first so there is no
+  // circumstance — any aspect, any arena shape — where bare canvas shows.
+  ctx.fillStyle = "#8e8e8a";
+  ctx.fillRect(0, 0, cw, ch);
 
   const pad = 8;
   const s = Math.min((cw - pad * 2) / S.worldW, (ch - pad * 2) / S.worldH);
@@ -4083,7 +4118,7 @@ function draw(now) {
   // The arena floor: aged concrete, generated once for the whole map at
   // its real size (see scene.js). Nothing here tiles — every crack,
   // stain and weed is placed individually across the world.
-  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1);
+  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s * dpr);
   drawGround(ctx, scene);
 
   // Tread marks go straight onto the floor — under the zone tint, under
@@ -4132,7 +4167,7 @@ function draw(now) {
 
   // Walls: stone brick, markedly darker than the floor, with the shadow
   // the sun casts from them laid down first.
-  drawWallLayer(ctx, buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1));
+  drawWallLayer(ctx, scene);
 
   // Shaped arena: lift the silhouette clip and draw the diagonal border
   // as ONE stroked polygon (round joins), so the corners connect
@@ -4175,7 +4210,10 @@ function draw(now) {
       ctx.arc(px, py, sz, 0, Math.PI * 2);
       ctx.fill();
     } else {
-      ctx.fillStyle = d.boost ? "#646974" : "#8b93a3"; // boosted = 20% darker again
+      // Pale, dry grit — it has to sit LIGHTER than the concrete under
+      // it. The old blue-grey was picked when the floor was white paper
+      // and simply vanished once the ground became grey.
+      ctx.fillStyle = d.boost ? "#e6ded0" : "#d8d2c4";
       // A puff is a few overlapping lobes that spread and drift apart as
       // it ages, so the silhouette is ragged like real kicked-up dust
       // rather than a clean circle.
@@ -4184,7 +4222,7 @@ function draw(now) {
       const spread = 1 + k * 1.5;
       const rot = (d.spin ?? 0) * k;
       const cs = Math.cos(rot), sn = Math.sin(rot);
-      ctx.globalAlpha = (d.boost ? 0.15 : 0.13) * (1 - k) * (1 - k * 0.35);
+      ctx.globalAlpha = (d.boost ? 0.42 : 0.34) * (1 - k) * (1 - k * 0.3);
       ctx.beginPath();
       for (const lo of d.lobes ?? [{ ox: 0, oy: 0, r: 1 }]) {
         const lx = (lo.ox * cs - lo.oy * sn) * R0 * spread;
@@ -4889,6 +4927,37 @@ function fillMaterial(color, R, hexOverride, ang) {
 function drawTank(t, now) {
   const hull = HULL[t.color];
   const R = TANK_R;
+
+  // ---- cast shadow -------------------------------------------------
+  // The tank's ACTUAL silhouette — hull plus barrel — displaced along
+  // the sun's direction by the tank's height. Not a circle underneath:
+  // a circle gives away that there's no real light, and with the sun
+  // this far off to the side the offset is plainly visible.
+  if (!t.dead && !t.gone && !(now < (t.phaseUntil ?? 0))) {
+    const wt = t.weapon || "normal";
+    const bar = BARRELS[wt] ?? BARRELS.normal;
+    const H = R * 0.62;                       // how tall a tank stands
+    ctx.save();
+    ctx.translate(t.x + SHADOW.dx * H, t.y + SHADOW.dy * H);
+    ctx.rotate(t.a);
+    ctx.fillStyle = "rgba(18,20,23,0.36)";
+    const hl = R * 0.95, hw = R * 0.83, rr = R * 0.2;
+    ctx.beginPath();
+    ctx.moveTo(-hl + rr, -hw);
+    ctx.lineTo(hl - rr, -hw);
+    ctx.quadraticCurveTo(hl, -hw, hl, -hw + rr);
+    ctx.lineTo(hl, hw - rr);
+    ctx.quadraticCurveTo(hl, hw, hl - rr, hw);
+    ctx.lineTo(-hl + rr, hw);
+    ctx.quadraticCurveTo(-hl, hw, -hl, hw - rr);
+    ctx.lineTo(-hl, -hw + rr);
+    ctx.quadraticCurveTo(-hl, -hw, -hl + rr, -hw);
+    ctx.closePath();
+    ctx.fill();
+    // the barrel, which is what makes the shape read as a TANK
+    ctx.fillRect(0, -bar.hw * R, bar.len * R, bar.hw * R * 2);
+    ctx.restore();
+  }
 
   ctx.save();
   // Phasing tanks are half-transparent.
