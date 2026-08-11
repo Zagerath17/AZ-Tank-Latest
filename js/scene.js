@@ -354,15 +354,39 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
     // the way a tank would take them, instead of hinging at right angles.
     let px = way[0][0], py = way[0][1];
     let ang = Math.atan2(way[1][1] - py, way[1][0] - px);
-    for (let k = 1; k < way.length; k++) {
+    // How far short of a junction to start swinging onto the next leg.
+    //
+    // The trail used to drive at each cell CENTRE and only give up on it
+    // once it was within a tread pitch. A tank cannot pivot on a point,
+    // so by the time the turn began the corner had passed and the arc
+    // swung wide — straight through the masonry on the outside of the
+    // bend, which is what you can see running into the walls. Releasing
+    // the waypoint early lets the curve start before the junction and
+    // finish inside it, which is how the corner is actually taken.
+    const LOOK = cell * 0.45;
+    let hitStone = false;
+    for (let k = 1; k < way.length && !hitStone; k++) {
       const [tx, ty] = way[k];
+      const last = k === way.length - 1;
       let guard = 0;
-      while (Math.hypot(tx - px, ty - py) > PITCH && guard++ < 400) {
+      // The final waypoint is driven all the way onto; the rest are let
+      // go of a lookahead early so the turn is already under way.
+      const release = last ? PITCH : LOOK;
+      while (Math.hypot(tx - px, ty - py) > release && guard++ < 400) {
         const want = Math.atan2(ty - py, tx - px);
         let da = ((want - ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
         ang += Math.max(-0.16, Math.min(0.16, da));   // a real turning circle
         const nx = px + Math.cos(ang) * PITCH, ny = py + Math.sin(ang) * PITCH;
         const ox = -Math.sin(ang), oy = Math.cos(ang);
+        // Last line of defence: if the hull centre has still wandered
+        // into stone, abandon the run rather than paint a track through
+        // a wall. Cheap, and it cannot be defeated by a tuning mistake.
+        let solid = false;
+        for (const rc of rects) {
+          if (nx > rc.x + pad - 1 && nx < rc.x + pad + rc.w + 1 &&
+              ny > rc.y + pad - 1 && ny < rc.y + pad + rc.h + 1) { solid = true; break; }
+        }
+        if (solid) { hitStone = true; break; }
         // Collected, not stroked here. Stroking every step separately
         // meant four canvas strokes per 6 px of track, which is most of
         // what made a round take a moment to start.
@@ -421,8 +445,13 @@ function buildWalls(w, h, rects, seed, d = 1) {
     if (rw <= 0 || rh <= 0) continue;
 
     g.save();
+    // Clipped to the WHOLE wall network, not to this one slab. Slabs
+    // overlap at every joint, and clipping each to its own rectangle cut
+    // every stone off dead straight at the seam — which is why wall ends
+    // looked sliced. Against the union, a stone laid near a junction runs
+    // on into the wall it meets.
     g.beginPath();
-    g.rect(x, y, rw, rh);
+    for (const o of rects) g.rect(o.x, o.y, o.w, o.h);
     g.clip();
 
     // Mortar bed first; the stones are then set into it.
@@ -503,6 +532,41 @@ function buildWalls(w, h, rects, seed, d = 1) {
     g.fillRect(x, y, rw, rh);
     g.restore();
   }
+
+  // ---- CHAMFER ------------------------------------------------------
+  // A cast slab has a broken edge, not a razor one. The bevel is taken
+  // from the silhouette of the whole network rather than from each
+  // rectangle, so it runs round the OUTSIDE of the masonry and never
+  // appears along an internal joint where two walls meet — which would
+  // just be the sliced look again in a different colour.
+  //
+  // Built by subtraction: the union, minus the union shifted, leaves the
+  // band of pixels along one side. Shifted away from the sun it gives
+  // the lit arris; shifted toward it, the shaded one.
+  const BEV = 2.2;
+  const lx = -sx, ly = -sy;                     // toward the sun, on screen
+  const band = newCanvas(w, h, d);
+  const bg = band.getContext("2d");
+  const bu = band.__wu ?? { w: band.width, h: band.height };
+  const paintUnion = (cx, ctxx, dx, dy, style) => {
+    ctxx.fillStyle = style;
+    for (const o of rects) ctxx.fillRect(o.x + dx, o.y + dy, o.w, o.h);
+  };
+  for (const [dx, dy, style, alpha] of [
+    [lx * BEV, ly * BEV, "rgba(228,230,232,1)", 0.30],   // lit edge
+    [-lx * BEV, -ly * BEV, "rgba(16,17,19,1)", 0.34],    // shaded edge
+  ]) {
+    bg.setTransform(1, 0, 0, 1, 0, 0);
+    bg.clearRect(0, 0, bu.w, bu.h);
+    bg.globalCompositeOperation = "source-over";
+    paintUnion(band, bg, 0, 0, style);
+    bg.globalCompositeOperation = "destination-out";
+    paintUnion(band, bg, dx, dy, "#000");
+    bg.globalCompositeOperation = "source-over";
+    g.globalAlpha = alpha;
+    g.drawImage(band, 0, 0, bu.w, bu.h);
+  }
+  g.globalAlpha = 1;
   return cv;
 }
 
@@ -511,15 +575,26 @@ function buildWalls(w, h, rects, seed, d = 1) {
 function buildShadows(w, h, rects, pad, d = 1) {
   const cv = newCanvas(w + pad * 2, h + pad * 2, d);
   const g = cv.getContext("2d");
-  g.translate(pad, pad);
   const HEIGHT = 20;                             // walls stand well above a tank
   const ox = SHADOW.dx * HEIGHT, oy = SHADOW.dy * HEIGHT;
 
+  // Built as a UNION, then laid down once.
+  //
+  // Wall rects deliberately overlap at every joint so the masonry has no
+  // gaps. Painting a translucent shadow per rect therefore stacked two
+  // and three deep wherever walls met, and those junctions came out
+  // markedly darker than the runs between them — a grid of dark patches
+  // that the eye reads immediately as a bug. Filling every shape at full
+  // opacity on a scratch layer and compositing THAT once means overlap
+  // costs nothing: a shadow is a shadow, however many walls agree on it.
+  const scratch = newCanvas(w + pad * 2, h + pad * 2, d);
+  const sg = scratch.getContext("2d");
+  sg.translate(pad, pad);
+
   // A shadow is the wall SWEPT along the light — the box itself, the box
   // displaced, and the volume joining them. Drawing only the displaced
-  // copy (which is what used to happen) leaves a floating rectangle with
-  // a gap where the wall meets the ground.
-  g.fillStyle = "rgba(20,22,25,0.34)";
+  // copy leaves a floating rectangle with a gap where wall meets ground.
+  sg.fillStyle = "#000";
   for (const rc of rects) {
     const { x, y, w: rw, h: rh } = rc;
     const pts = [
@@ -527,20 +602,27 @@ function buildShadows(w, h, rects, pad, d = 1) {
       [x + ox, y + oy], [x + rw + ox, y + oy],
       [x + rw + ox, y + rh + oy], [x + ox, y + rh + oy],
     ];
-    // Convex hull of the two footprints = the swept volume.
     const hull = convexHull(pts);
-    g.beginPath();
-    g.moveTo(hull[0][0], hull[0][1]);
-    for (let i = 1; i < hull.length; i++) g.lineTo(hull[i][0], hull[i][1]);
-    g.closePath();
-    g.fill();
+    sg.beginPath();
+    sg.moveTo(hull[0][0], hull[0][1]);
+    for (let i = 1; i < hull.length; i++) sg.lineTo(hull[i][0], hull[i][1]);
+    sg.closePath();
+    sg.fill();
   }
-  // Contact shading: darkest right where the wall meets the floor, so it
-  // looks seated rather than floating.
-  g.fillStyle = "rgba(16,18,20,0.26)";
-  for (const rc of rects) {
-    g.fillRect(rc.x + ox * 0.16, rc.y + oy * 0.16, rc.w, rc.h);
-  }
+  const su = scratch.__wu ?? { w: scratch.width, h: scratch.height };
+  g.globalAlpha = 0.34;
+  g.drawImage(scratch, 0, 0, su.w, su.h);
+
+  // Contact shading: darkest right where wall meets floor, so it looks
+  // seated rather than floating. Same treatment — one pass, one union.
+  sg.setTransform(1, 0, 0, 1, 0, 0);
+  sg.clearRect(0, 0, su.w, su.h);
+  sg.translate(pad, pad);
+  for (const rc of rects) sg.fillRect(rc.x + ox * 0.16, rc.y + oy * 0.16, rc.w, rc.h);
+  g.globalAlpha = 0.26;
+  g.drawImage(scratch, 0, 0, su.w, su.h);
+  g.globalAlpha = 1;
+
   return { cv, pad };
 }
 

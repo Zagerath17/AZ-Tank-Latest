@@ -511,11 +511,27 @@ export function wallRects(maze, cell, t) {
     !inside || (r >= 0 && r < maze.rows && c >= 0 && c < maze.cols && inside[r][c]);
   const keep = (a, b) => (shaped ? a && b : a || b);
 
+  // Every wall is centred on its grid line, so a wall ON the outer edge
+  // would sit half outside the world: only half its thickness would ever
+  // be drawn, and the arena border came out visibly thinner than the
+  // walls inside it. Worse, its shadow was cast from the full rect
+  // including the invisible half, so the shadow looked offset from the
+  // wall throwing it. Pushing the outermost lines inward by a half
+  // thickness makes every wall in the arena exactly `t` thick and fully
+  // on screen — the border included — and puts each shadow back under
+  // the wall that owns it.
+  const W = maze.cols * cell, H = maze.rows * cell;
+  const clampX = (x, wide) => Math.max(0, Math.min(W - wide, x));
+  const clampY = (y, tall) => Math.max(0, Math.min(H - tall, y));
+
   for (let r = 0; r <= maze.rows; r++) {
     for (let c = 0; c < maze.cols; c++) {
       // A horizontal wall (above row r) separates cell (c, r) and (c, r-1).
       if (maze.H[r][c] && keep(isIn(c, r), isIn(c, r - 1))) {
-        rects.push({ x: c * cell - half, y: r * cell - half, w: cell + t, h: t });
+        rects.push({
+          x: c * cell - half, y: clampY(r * cell - half, t),
+          w: cell + t, h: t,
+        });
       }
     }
   }
@@ -523,9 +539,20 @@ export function wallRects(maze, cell, t) {
     for (let c = 0; c <= maze.cols; c++) {
       // A vertical wall (left of col c) separates cell (c, r) and (c-1, r).
       if (maze.V[r][c] && keep(isIn(c, r), isIn(c - 1, r))) {
-        rects.push({ x: c * cell - half, y: r * cell - half, w: t, h: cell + t });
+        rects.push({
+          x: clampX(c * cell - half, t), y: r * cell - half,
+          w: t, h: cell + t,
+        });
       }
     }
+  }
+  // The long ends still overhang at the corners; trim those too so
+  // nothing pokes out of the arena.
+  for (const rc of rects) {
+    if (rc.x < 0) { rc.w += rc.x; rc.x = 0; }
+    if (rc.y < 0) { rc.h += rc.y; rc.y = 0; }
+    if (rc.x + rc.w > W) rc.w = W - rc.x;
+    if (rc.y + rc.h > H) rc.h = H - rc.y;
   }
   return rects;
 }

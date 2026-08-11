@@ -791,6 +791,15 @@ function clearance(t, world, ray, maxD, halfW) {
       if (dd < d) d = dd;
     }
   }
+  // Boundary slabs are solid to everything else in the game; they are
+  // solid to the steering compass now as well.
+  for (const sl of world.diag ?? []) {
+    const f = segHitsBox(t.x, t.y, x2, y2, sl, halfW);
+    if (f != null) {
+      const dd = f * maxD;
+      if (dd < d) d = dd;
+    }
+  }
   return Math.max(0, d);
 }
 
@@ -869,7 +878,17 @@ function bfsRoute(maze, from, to) {
 // open, otherwise at the furthest waypoint we can actually see.
 function routeHeading(t, B, world, goal, now) {
   const R = world.tankR;
-  if (clearLine(world, t.x, t.y, goal.x, goal.y, R * 0.62)) {
+  // ROUTE CLEARANCE. This asked whether a line was clear for a circle of
+  // 0.62 R — narrower than the hull's own half-width of 0.658 R, let
+  // alone the 0.95 R it needs while it is still turning. So the planner
+  // was allowed to answer "straight there" for gaps the tank physically
+  // cannot enter, point the bot at the wall, and leave the steering to
+  // grind against it. That is the bots driving into walls.
+  //
+  // Everywhere else in this file already probes with SQUEEZE (0.95 R)
+  // before committing to a way through; the router simply wasn't.
+  const ROUTE_W = R * 0.95;
+  if (clearLine(world, t.x, t.y, goal.x, goal.y, ROUTE_W)) {
     B.path = null;
     return Math.atan2(goal.y - t.y, goal.x - t.x);
   }
@@ -900,7 +919,7 @@ function routeHeading(t, B, world, goal, now) {
   const cy = (n) => (n.r + 0.5) * cell;
   let pick = 1;
   for (let i = B.path.length - 1; i >= 1; i--) {
-    if (clearLine(world, t.x, t.y, cx(B.path[i]), cy(B.path[i]), R * 0.62)) { pick = i; break; }
+    if (clearLine(world, t.x, t.y, cx(B.path[i]), cy(B.path[i]), ROUTE_W)) { pick = i; break; }
   }
   // Drop waypoints already behind us so the path is consumed.
   while (B.path.length > 2 &&
@@ -1309,6 +1328,15 @@ function clearLine(world, x1, y1, x2, y2, r) {
   for (const w of world.walls ?? []) {
     if ((w.hp ?? 1) <= 0) continue;
     if (segHitsBox(x1, y1, x2, y2, w, r)) return false;
+  }
+  // The ANGLED BOUNDARY of a shaped arena. Every round, laser and tank
+  // in the game collides with these slabs — and the bots were the only
+  // things that could not see them. The data was being handed to them
+  // and never read, so on any arena that isn't a plain rectangle they
+  // planned straight lines through the perimeter and drove into it.
+  // That is the walking-into-walls.
+  for (const sl of world.diag ?? []) {
+    if (segHitsBox(x1, y1, x2, y2, sl, r)) return false;
   }
   return true;
 }

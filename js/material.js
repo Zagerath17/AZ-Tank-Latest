@@ -422,6 +422,29 @@ export function materialTile(hex, finish, sizePx, ang) {
 
 // Paint a material across the CURRENT CLIP, centred on the local
 // origin. One drawImage: the whole per-frame cost.
+// Bake every orientation a paint will need, up front.
+//
+// Tiles are baked on demand, which means the FIRST time a tank presents
+// a new angle the game stops to shade a few thousand pixels. Spread over
+// a round that is a series of small hitches exactly when tanks start
+// turning — i.e. the moment the fighting starts. There is a three second
+// countdown doing nothing but counting, so the work goes there instead.
+export function prebakeCount(finish) {
+  return isMaterial(finish) ? bucketsFor(finish) : 0;
+}
+
+// Bake exactly ONE orientation. Baking a whole paint in a single call
+// takes long enough to stall a frame on its own, so the caller drains
+// these a few at a time against a time budget — the work still finishes
+// before the round starts, but nothing ever blocks.
+export function prebakeStep(hex, finish, sizePx, i) {
+  if (!isMaterial(finish)) return false;
+  const nb = bucketsFor(finish);
+  if (i < 0 || i >= nb) return false;
+  tileAt(hex, finish, sizePx, i, nb);
+  return true;
+}
+
 export function paintMaterial(ctx, hex, finish, R, ang = 0) {
   const want = R * 2.6;
   const nb = bucketsFor(finish);

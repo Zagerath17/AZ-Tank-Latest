@@ -27,6 +27,7 @@ import {
   WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
 import { SUN, SUN_DIR, SHADOW, buildScene, drawGround, drawWallLayer } from "./scene.js";
+import { prebakeCount, prebakeStep } from "./material.js";
 import { sfx, setEngine, setFlame, startMusic, stopAll } from "./audio.js";
 
 /* ---------- tuning ---------- */
@@ -763,6 +764,11 @@ function startRound(seed) {
   // 3-2-1 countdown: everyone frozen, arena blurred, then GO.
   S.freezeUntil = performance.now() + 3000;
   S.cdLast = 4; // last number we ticked for (4 = none yet)
+  // Everything expensive that the round is about to need gets built NOW,
+  // during the count, rather than on the first frame anyone moves.
+  // Everything expensive the round needs is queued here and drained a
+  // few milliseconds at a time while the numbers are on screen.
+  planPrewarm();
   S.gearNextAt = S.freezeUntil + GEAR_FIRST_MS;
   // ---- Closing zone ----
   // A creeping "red zone" eats the arena from the outside in. Each
@@ -1026,6 +1032,12 @@ function frame(now) {
   if (!S) return;
   const dt = Math.min((now - S.lastT) / 1000, 0.05);
   S.lastT = now;
+
+  // Chip away at the round's asset queue. While the countdown is up
+  // nobody can move, so a generous slice costs nothing; once play starts
+  // anything left is finished off in small bites rather than stalling a
+  // frame. In practice the queue is empty well before GO.
+  if (S.prewarm) stepPrewarm(now < (S.freezeUntil ?? 0) ? 8 : 2);
 
   // Shared per-frame data: laser aiming lines (drawn for everyone,
   // dodged by bots) and the hazard list bots treat as bullets.
@@ -4120,6 +4132,11 @@ function draw(now) {
 
   const pad = 8;
   const s = Math.min((cw - pad * 2) / S.worldW, (ch - pad * 2) / S.worldH);
+  // Remembered so the countdown prewarm can bake at exactly the density
+  // the round will be shown at — bake at the wrong one and it is all
+  // thrown away and done again on the first frame.
+  S.viewScale = s;
+  S.viewDpr = dpr;
   const ox = (cw - S.worldW * s) / 2;
   const oy = (ch - S.worldH * s) / 2;
   // Remember the transform (CSS-pixel space) so pointer events can map
@@ -4299,6 +4316,8 @@ function draw(now) {
   for (const A of S.sniperAims ?? []) drawSniperAim(A);
   drawTankShadows(now);   // all shadows first, so none lands on a hull
   for (const t of S.tanks) if (!t.dead && !t.gone) drawTank(t, now);
+  // Walls throw their shadows across the tanks too, not just the floor.
+  castWallShadowsOnTanks(scene);
 
   // Lofted mortar shells fly ABOVE everything (they're up in the air).
   for (const m of S.mortars) drawMortarShell(m, now);
@@ -5017,6 +5036,112 @@ function drawTankShadows(now) {
     ctx.fill("nonzero");
   }
   ctx.restore();
+}
+
+// A tank driving into the shade of a wall goes into shade.
+//
+// The wall shadows are baked into one layer over the whole arena, and
+// the floor gets them for free because it is drawn underneath. Tanks are
+// drawn after, so they were coming out fully lit inside a shadow — a
+// gold hull blazing away in a patch of shade, which is the single
+// clearest way to make an object look pasted on rather than standing
+// there.
+//
+// So the same layer is laid over the hulls afterwards, clipped to each
+// tank, in MULTIPLY. Multiply is the right operator for this and not
+// just a darkening trick: shadow means less light arriving, and every
+// term in the material — the diffuse, the environment, and crucially
+// the specular — scales down together. A mirror in shade shows a dark
+// reflection, not a bright one, so the PBR highlight is crushed exactly
+// as it should be rather than sitting on top of the shadow.
+function castWallShadowsOnTanks(scene) {
+  if (!scene?.shadow?.cv || !S.tanks.length) return;
+  const sh = scene.shadow.cv;
+  const u = sh.__wu ?? { w: sh.width, h: sh.height };
+  const pad = scene.shadow.pad;
+  const R = TANK_R;
+  for (const t of S.tanks) {
+    if (t.dead || t.gone) continue;
+    // Cheap reject: nothing to do for a tank standing in full sun.
+    ctx.save();
+    ctx.beginPath();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.a);
+    // The hull plus the turret disc and barrel — the tank's whole
+    // footprint, so the shade runs across the gun as well.
+    if (ctx.roundRect) ctx.roundRect(-R * 0.95, -R * 0.62, R * 1.9, R * 1.24, R * 0.24);
+    else ctx.rect(-R * 0.95, -R * 0.62, R * 1.9, R * 1.24);
+    ctx.moveTo(R * 1.3, -R * 0.13);
+    ctx.arc(0, 0, R * 0.46, 0, Math.PI * 2);
+    ctx.rect(0, -R * 0.13, R * 1.3, R * 0.26);
+    ctx.clip();
+    ctx.rotate(-t.a);
+    ctx.translate(-t.x, -t.y);
+    ctx.globalCompositeOperation = "multiply";
+    ctx.drawImage(sh, -pad, -pad, u.w, u.h);
+    ctx.restore();
+  }
+  ctx.globalCompositeOperation = "source-over";
+}
+
+// Build the round's heavy assets during the countdown.
+//
+// Two things used to be paid for at the worst possible moment. The arena
+// art — concrete, masonry, worn tracks, wall shadows — is generated once
+// per layout, and that happened on the first frame the arena was drawn,
+// which is the first frame of the round. And each tank's material is
+// shaded per orientation on demand, so the first time a hull presented a
+// new angle the game stopped to bake it: a burst of small hitches
+// arriving precisely as everyone started turning.
+//
+// Both are deterministic and neither depends on anything that happens
+// during the count, so both are built in the three seconds while the
+// numbers are on screen — but drained against a TIME BUDGET rather than
+// done in one go. Baking a single paint takes long enough to stall a
+// frame by itself, so doing the lot at once would simply move the hitch
+// from the start of the round to the start of the countdown.
+function planPrewarm() {
+  const jobs = [];
+  jobs.push({ kind: "scene" });
+  const want = TANK_R * 2.6 * (S.viewScale ?? 1) * (S.viewDpr ?? 1);
+  const seen = new Set();
+  for (const t of S.tanks ?? []) {
+    for (const id of [t.color, ...(t.patColors ?? [])]) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const n = prebakeCount(skinFinish(id));
+      for (let i = 0; i < n; i++) {
+        jobs.push({ kind: "tile", hex: HULL[id] ?? HULL.red, fin: skinFinish(id), size: want, i });
+      }
+    }
+  }
+  S.prewarm = jobs;
+  S.prewarmAt = 0;
+}
+
+// Drain the queue for at most `budgetMs`. Called every frame while the
+// countdown is running.
+function stepPrewarm(budgetMs = 4) {
+  const jobs = S.prewarm;
+  if (!jobs || !jobs.length) return;
+  const t0 = performance.now();
+  while (jobs.length && performance.now() - t0 < budgetMs) {
+    const j = jobs.shift();
+    try {
+      if (j.kind === "scene") {
+        let s2 = S.viewScale, dpr = S.viewDpr;
+        if (!s2) {
+          const cw = canvas.clientWidth || 1280, ch = canvas.clientHeight || 720;
+          dpr = dpr ?? Math.max(1, Math.min(RENDER_W / Math.max(1, cw), RENDER_H / Math.max(1, ch)));
+          s2 = Math.min((cw - 16) / S.worldW, (ch - 16) / S.worldH);
+        }
+        buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s2 * (dpr ?? 1), S.maze, CELL);
+      } else {
+        prebakeStep(j.hex, j.fin, j.size, j.i);
+      }
+    } catch (e) { /* the draw path builds anything that failed */ }
+  }
+  if (!jobs.length) S.prewarm = null;
 }
 
 function drawTank(t, now) {
