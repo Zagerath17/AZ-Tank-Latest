@@ -582,7 +582,7 @@ function renderLobbyCode(code, lobby) {
 
   const btn = document.getElementById("lobby-hide");
   if (btn) {
-    btn.textContent = hidden ? "👁 SHOW CODE" : "🙈 HIDE CODE";
+    btn.textContent = hidden ? "SHOW CODE" : "HIDE CODE";
     btn.hidden = !host || matched;      // host of a custom lobby only
   }
   // The host keeps Copy either way (they know their own code); everyone
@@ -1298,6 +1298,23 @@ function renderLobby(code, lobby) {
     updateChatColors(colorMap);
   }
 
+  // Paint bought or equipped in the Shop only ever reached the lobby at
+  // JOIN time, so changing it while sitting in a lobby updated the Shop
+  // preview and nothing else — the tank kept its old colour. Push the
+  // equipped paint up whenever it has actually changed.
+  if (!lobby.matched) {
+    const worn = social.getSkin();
+    if (worn && worn !== current.sentPaint) {
+      const meRow = (lobby.players ?? {})[me];
+      if (meRow && !meRow.bot && meRow.color !== worn) {
+        current.sentPaint = worn;
+        write(`players/${me}/color`, worn);
+      } else if (meRow && meRow.color === worn) {
+        current.sentPaint = worn;
+      }
+    }
+  }
+
   const mine = entries.find(([id]) => id === me);
   // Keep the color our outgoing chat lines are stamped with in sync.
   if (!lobby.matched) window.__myLobbyColor = resolved[me] ?? window.__myLobbyColor;
@@ -1394,7 +1411,13 @@ export function initOnline() {
   // to the lobby node, so every client's snapshot hides it together.
   const hideBtn = document.getElementById("lobby-hide");
   hideBtn.addEventListener("click", () => {
-    if (!current?.isHost) return; // guests don't get a say (button is hidden anyway)
+    if (!current) return;
+    // Work the host test out from the lobby itself. `current.isHost` is
+    // only filled in once a lobby render has run, so on the first click
+    // after entering it could still be undefined — and the whole handler
+    // bailed out, which is why the button did nothing at all.
+    const host = current.lastLobby ? current.lastLobby.hostId === myId() : !!current.isHost;
+    if (!host) return;
     const next = !current?.lastLobby?.hideCode;
     localStorage.setItem("tank.hideCode.v1", next ? "1" : "0"); // remembered for my next lobby
     if (current.lastLobby) current.lastLobby.hideCode = next;   // instant local paint

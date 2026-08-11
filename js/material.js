@@ -100,14 +100,20 @@ function sampleEnv(r, rough, out) {
   // The horizon sharpens as roughness falls: that hard sky/ground join
   // is what says "polished" rather than "grey paint".
   const edge = sat((t - 0.5) / Math.max(0.02, blur * 0.9 + 0.02) * 0.5 + 0.5);
-  const skyR = 0.34 + 0.62 * t, skyG = 0.35 + 0.63 * t, skyB = 0.38 + 0.64 * t;
-  const g = 0.028;
+  // A real room is bright above and dark below with a crisp join. That
+  // CONTRAST is what the eye reads as polish — a low-contrast room makes
+  // even a perfect BRDF look like grey paint.
+  const skyR = 0.30 + 0.95 * t, skyG = 0.31 + 0.97 * t, skyB = 0.35 + 1.00 * t;
+  const g = 0.015;
   out[0] = g + (skyR - g) * edge;
   out[1] = g + (skyG - g) * edge;
   out[2] = g + (skyB - g) * edge;
 
-  const band = Math.exp(-Math.pow((up - 0.10) / (0.14 + blur * 0.5), 2)) * (0.34 - rough * 0.18);
-  out[0] += band; out[1] += band; out[2] += band * 1.03;
+  // (A narrow Gaussian glow used to sit just above the horizon here. On a
+  // near-flat hull it swept across the whole piece as the tank turned and
+  // showed up as a hard white bar at certain angles. The sky/ground join
+  // above already gives the horizon its definition, so the extra stripe
+  // was doing nothing but that.)
 
   const lz = LIGHT_Z, lr = Math.sqrt(Math.max(0, 1 - lz * lz));
   const L = [Math.cos(LIGHT_A) * lr, Math.sin(LIGHT_A) * lr, lz];
@@ -233,7 +239,29 @@ function renderTile(hex, finish, size, ang) {
       const dx = h(sdRoundBox(lxp + e, lyp, hx, hy, corner)) - h(sdRoundBox(lxp - e, lyp, hx, hy, corner));
       const dy = h(sdRoundBox(lxp, lyp + e, hx, hy, corner)) - h(sdRoundBox(lxp, lyp - e, hx, hy, corner));
       const ns = dome * 0.55 / e;
-      const N = norm3([-dx * ns, -dy * ns, 1]);
+      let nx = -dx * ns, ny = -dy * ns;
+
+      // The edge roll-off above FLATTENS OUT once you are more than
+      // `dome` from the rim — every pixel across the middle of the piece
+      // ended up with the same normal (0,0,1), reflecting one single
+      // direction of the room and coming back one flat colour. That is
+      // the whole reason these read as matte no matter how good the BRDF
+      // underneath is. A gentle curvature across the entire casting makes
+      // the reflection sweep from sky to ground the way it does on a real
+      // panel, which is what actually looks like metal.
+      const ux = lxp / hx, uy = lyp / hy;          // -1..1 across the piece
+      const CURVE = 1.35;
+      nx += ux * CURVE;
+      ny += uy * CURVE;
+
+      // Fine brushed grain, so the reflection has something to break up
+      // on. Rough finishes get more of it; a mirror gets almost none.
+      const grainAmt = 0.05 + aRough * 0.55;
+      const gph = lxp * 0.9 + lyp * 0.15;
+      nx += Math.sin(gph) * 0.012 * grainAmt;
+      ny += Math.cos(gph * 1.7) * 0.010 * grainAmt;
+
+      const N = norm3([nx, ny, 1]);
 
       const NoV = sat(dot3(N, V));
       const NoL = dot3(N, L);

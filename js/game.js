@@ -50,8 +50,8 @@ const TRACK_MAX = 1400;                  // hard cap, oldest dropped first (a fu
 const TRACK_HALF = TANK_R * 0.62;        // tread centre, either side of the hull
 const TRACK_WIDTH = TANK_R * 0.42;       // how wide a tread sits on the ground
 const TRACK_CLEAT = TANK_R * 0.21;       // half a cleat bar, across the tread
-const MOVE_SPEED = U * 2.1;
-const REVERSE_SPEED = U * 1.45;
+const MOVE_SPEED = U * 1.89;      // 10% slower
+const REVERSE_SPEED = U * 1.305;  // 10% slower, in step with forward
 const TURN_SPEED = 3.2 * 1.05; // tanks turn 5% quicker
 const TURRET_TURN_SPEED = TURN_SPEED * 1.2 * 0.9; // 1.2× hull, then a 10% turret debuff
 
@@ -84,7 +84,12 @@ const ZONE_DMG_PERIOD = 2000;  // red cells deal 1 dmg every 2 s
 const ZONE_DMG = 1;            // damage per tick
 const ZONE_INSIDE_FRAC = 0.30; // a tank must be >30% into a red cell to be hit
 
-const BULLET_SPEED = U * 3.2;
+const BULLET_SPEED = U * 2.88;    // 10% slower. Every other round —
+                                  // MG, sniper, homing missile and the
+                                  // big cannon — is a multiple of this,
+                                  // so they all come down 10% with it.
+                                  // The mortar sets its own speed in
+                                  // cells/sec and is deliberately left.
 const BULLET_R = U * 0.085;
 const BULLET_LIFE = 6000;   // ms a bullet keeps bouncing
 
