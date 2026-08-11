@@ -1064,7 +1064,12 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
       // fell by a third. With the gun welded to the hull, holding the
       // line IS the right play; the movement has to come from choosing
       // better ground, not from fidgeting on the spot.
-      wantA = axis; wantM = 0.22;
+      // Hold the pocket. A token 0.22 throttle used to be harmless when
+      // speed was instant, but against real inertia it is a permanent
+      // near-stationary creep — the tank shuffles on the spot while the
+      // hull swings, which is exactly the wiggle. Either commit to a
+      // reposition or genuinely sit still and shoot.
+      wantA = axis; wantM = 0;
     }
     // Never drive into something just to keep a shot.
     const slot = Math.round(((wantA % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * DIRS) % DIRS;

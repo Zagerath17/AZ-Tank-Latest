@@ -299,20 +299,28 @@ function segBlocked(rects, x1, y1, x2, y2) {
 
 function paintOldTracks(g, w, h, seed, pad, rects) {
   const r = rng(seed);
-  const HALF = 10.7, WIDTH = 7.3, PITCH = 5.9;   // matches a real tank's treads
-  const runs = Math.max(8, Math.floor((w * h) / 30000));
+  const HALF = 10.7, WIDTH = 7.3, PITCH = 5.9;   // a real tank's tread spacing
+  // The arena proper, in this canvas's coordinates. Tracks live ONLY in
+  // here: the ground beyond the outer wall is the same concrete, but
+  // nothing has ever driven on it.
+  const aw = w - pad * 2, ah = h - pad * 2;
+  const runs = Math.max(22, Math.floor((aw * ah) / 8000));
   g.save();
   for (let i = 0; i < runs; i++) {
-    let x = r() * w - pad, y = r() * h - pad;
+    let x = r() * aw, y = r() * ah;
     let a = r() * Math.PI * 2;
-    const len = 40 + r() * 150;
-    const fade = 0.05 + r() * 0.07;
+    // Some runs are a long sweeping arc rather than a near-straight
+    // line: a tank that was turning while it drove.
+    const arcing = r() < 0.55;
+    const curve = arcing ? (r() - 0.5) * 0.055 : 0;
+    const len = 30 + r() * (arcing ? 220 : 130);
+    const fade = 0.045 + r() * 0.075;
     for (let d = 0; d < len; d++) {
-      a += (r() - 0.5) * 0.09;
+      a += curve + (r() - 0.5) * 0.055;
       const nx = x + Math.cos(a) * PITCH, ny = y + Math.sin(a) * PITCH;
-      // Inside the arena proper, a track must not cross masonry.
-      const inside = nx > 0 && ny > 0 && nx < w - pad * 2 && ny < h - pad * 2;
-      if (inside && segBlocked(rects, x, y, nx, ny)) break;
+      // Off the arena, or into masonry, and the trail simply ends.
+      if (nx < 0 || ny < 0 || nx > aw || ny > ah) break;
+      if (segBlocked(rects, x, y, nx, ny)) break;
       const px = -Math.sin(a), py = Math.cos(a);
       for (const side of [-1, 1]) {
         const cx = nx + px * HALF * side + pad, cy = ny + py * HALF * side + pad;
@@ -518,7 +526,7 @@ export function buildScene(worldW, worldH, rects, seed, viewScale = 1) {
   let d = Math.max(1, Math.min(2, Math.ceil(viewScale * 2) / 2));
   // Enough surround to cover the letterbox on any sensible aspect; the
   // flat backstop underneath catches anything beyond it.
-  const pad = Math.round(Math.max(worldW, worldH) * 0.24);
+  const pad = Math.round(Math.max(worldW, worldH) * 0.30);
   const fw = worldW + pad * 2, fh = worldH + pad * 2;
   // Guard rail: a big arena at full density is a lot of memory, so drop
   // back a step rather than allocate something absurd.

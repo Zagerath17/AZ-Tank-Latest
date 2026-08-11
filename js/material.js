@@ -385,7 +385,20 @@ function renderTile(hex, finish, size, ang) {
 function bucketsFor(finish) {
   const M = matOf(finish);
   if ((M.metal ?? 0) >= 1 || M.absorb) return BUCKETS;   // specials: full
-  return 12;                                             // painted: coarse
+  return 16;                             // painted: blended, so coarse is fine
+}
+
+// Fetch (or bake) one specific orientation.
+function tileAt(hex, finish, sizePx, b, nb) {
+  const size = Math.max(24, Math.min(256, 1 << Math.ceil(Math.log2(sizePx))));
+  const key = `${finish}|${hex}|${size}|${b}/${nb}`;
+  let tile = cache.get(key);
+  if (tile) return tile;
+  tile = renderTile(hex, finish, size, (b / nb) * Math.PI * 2);
+  cacheBytes += size * size * 4;
+  if (cacheBytes > CACHE_LIMIT) { cache.clear(); cacheBytes = size * size * 4; }
+  cache.set(key, tile);
+  return tile;
 }
 
 export function materialTile(hex, finish, sizePx, ang) {
@@ -411,9 +424,27 @@ export function materialTile(hex, finish, sizePx, ang) {
 // origin. One drawImage: the whole per-frame cost.
 export function paintMaterial(ctx, hex, finish, R, ang = 0) {
   const want = R * 2.6;
-  const tile = materialTile(hex, finish, want, ang);
-  if (!tile) return false;
-  ctx.drawImage(tile, -want / 2, -want / 2, want, want);
+  const nb = bucketsFor(finish);
+  const two = Math.PI * 2;
+  const f = ((((ang % two) + two) % two) / two) * nb;
+  const b0 = Math.floor(f) % nb, b1 = (b0 + 1) % nb;
+  const mix = f - Math.floor(f);
+  const t0 = tileAt(hex, finish, want, b0, nb);
+  if (!t0) return false;
+  ctx.drawImage(t0, -want / 2, -want / 2, want, want);
+  // CROSS-FADE into the next orientation. Snapping from one baked angle
+  // to the next is what made the highlight jump around in steps like
+  // stop-motion; blending the two nearest makes the reflection travel
+  // continuously at whatever frame rate the game is running.
+  if (mix > 0.02) {
+    const t1 = tileAt(hex, finish, want, b1, nb);
+    if (t1) {
+      const a0 = ctx.globalAlpha;
+      ctx.globalAlpha = a0 * mix;
+      ctx.drawImage(t1, -want / 2, -want / 2, want, want);
+      ctx.globalAlpha = a0;
+    }
+  }
   return true;
 }
 

@@ -34,8 +34,10 @@ import { sfx, setEngine, setFlame, startMusic, stopAll } from "./audio.js";
 const CELL = 96;                     // corridor spacing — walls are much more spread out
 const WALL_T = 10;
 const RENDER_W = 2560, RENDER_H = 1440;   // internal render resolution
-const ACCEL_TIME = 1.5;   // s from a standstill to full speed
+const ACCEL_TIME = 0.5;   // s from a standstill to full speed
 const BRAKE_TIME = 0.8;   // s from full speed back to a stop
+const SPIN_UP = 0.28;     // s for the hull to reach full turn rate
+const SPIN_DOWN = 0.16;   // s for it to stop turning
 const U = 64;                        // tank & ballistics scale (unchanged — tanks stay the same size)
 const TANK_R = U * 0.27;             // base scale for the tank's size
 const TANK_HL = TANK_R * 0.95;       // hitbox half-LENGTH (along the barrel) — matches the drawn treads
@@ -1275,8 +1277,16 @@ function stepTanks(now, dt) {
           diff = angleDiff(t.a, acts.moveAngle + Math.PI);
           dirReverse = true;
         }
-        const maxStep = TURN_SPEED * mul.turn * dt;
-        const step = Math.max(-maxStep, Math.min(maxStep, diff));
+        // The hull has rotational inertia too. Snapping straight to full
+        // turn rate while forward motion ramps made steering feel
+        // disconnected from driving.
+        const maxRate = TURN_SPEED * mul.turn;
+        const wantRate = Math.max(-maxRate, Math.min(maxRate, diff / Math.max(dt, 1e-3)));
+        const spinRate = Math.abs(wantRate) > Math.abs(t.spin ?? 0) ? maxRate / SPIN_UP : maxRate / SPIN_DOWN;
+        const dS = wantRate - (t.spin ?? 0);
+        const stepS = spinRate * dt;
+        t.spin = Math.abs(dS) <= stepS ? wantRate : (t.spin ?? 0) + Math.sign(dS) * stepS;
+        const step = t.spin * dt;
         const na = t.a + step;
         if (phasing || !tankHitsAnyWall(t, t.x, t.y, na)) t.a = na;
         turn = Math.sign(step) * (Math.abs(step) > 1e-4 ? 1 : 0);
@@ -1287,8 +1297,14 @@ function stepTanks(now, dt) {
       } else {
         // Keyboard tank-style turn.
         turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
-        if (turn !== 0) {
-          const na = t.a + turn * TURN_SPEED * mul.turn * dt;
+        const maxRate = TURN_SPEED * mul.turn;
+        const wantRate = turn * maxRate;
+        const spinRate = Math.abs(wantRate) > Math.abs(t.spin ?? 0) ? maxRate / SPIN_UP : maxRate / SPIN_DOWN;
+        const dS = wantRate - (t.spin ?? 0);
+        const stepS = spinRate * dt;
+        t.spin = Math.abs(dS) <= stepS ? wantRate : (t.spin ?? 0) + Math.sign(dS) * stepS;
+        if (t.spin !== 0) {
+          const na = t.a + t.spin * dt;
           if (phasing || !tankHitsAnyWall(t, t.x, t.y, na)) t.a = na;
         }
       }
@@ -1326,7 +1342,12 @@ function stepTanks(now, dt) {
         const brake = full / BRAKE_TIME;
         // Actively reversing direction counts as braking until we cross
         // zero, so a direction change doesn't feel spongy.
-        const rate = (want === 0 || Math.sign(want) !== Math.sign(cur || want)) ? brake : accel;
+        // Braking only when genuinely reversing at speed. Testing the
+        // raw signs made a tank crawling at walking pace brake every
+        // time the command wobbled across zero, so it never built any
+        // speed at all — it just shuffled on the spot.
+        const reversing = want * cur < 0 && Math.abs(cur) > full * 0.05;
+        const rate = (Math.abs(want) < Math.abs(cur) || reversing) ? brake : accel;
         const d = want - cur;
         const stepV = rate * dt;
         t.vel = Math.abs(d) <= stepV ? want : cur + Math.sign(d) * stepV;
@@ -4265,6 +4286,7 @@ function draw(now) {
   for (const t of S.tanks) if (t.dead && !t.gone) drawWreck(t);
   for (const L of S.laserPaths ?? []) drawLaserPreview(L);
   for (const A of S.sniperAims ?? []) drawSniperAim(A);
+  drawTankShadows(now);   // all shadows first, so none lands on a hull
   for (const t of S.tanks) if (!t.dead && !t.gone) drawTank(t, now);
 
   // Lofted mortar shells fly ABOVE everything (they're up in the air).
@@ -4924,40 +4946,60 @@ function fillMaterial(color, R, hexOverride, ang) {
 // facets. The caller has already clipped to the piece being painted.
 
 
+// Every tank's shadow, laid down in ONE pass before any tank is drawn.
+// Done per-tank inside drawTank it landed on top of tanks already
+// painted, so shadows piled over each other and over hulls. And it is
+// SWEPT from the tank's own footprint out to the offset copy rather than
+// being a detached silhouette sitting away from it — a floating shadow
+// with a gap under the tank is what makes it look like it is hovering.
+function tankShadowPath(t, ox, oy) {
+  const R = TANK_R;
+  const bar = BARRELS[t.weapon || "normal"] ?? BARRELS.normal;
+  const hl = R * 0.95, hw = R * 0.83;
+  const bl = bar.len * R, bw = bar.hw * R;
+  const c = Math.cos(t.a), sn = Math.sin(t.a);
+  const pts = [];
+  const add = (lx, ly) => {
+    const wx = t.x + lx * c - ly * sn, wy = t.y + lx * sn + ly * c;
+    pts.push([wx, wy], [wx + ox, wy + oy]);      // footprint AND its offset
+  };
+  add(-hl, -hw); add(hl, -hw); add(hl, hw); add(-hl, hw);
+  add(bl, -bw); add(bl, bw);
+  return convexHull2(pts);
+}
+
+function convexHull2(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], hi = [];
+  for (const q of p) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i];
+    while (hi.length >= 2 && cr(hi[hi.length - 2], hi[hi.length - 1], q) <= 0) hi.pop(); hi.push(q); }
+  lo.pop(); hi.pop();
+  return lo.concat(hi);
+}
+
+function drawTankShadows(now) {
+  const H = TANK_R * 0.62;
+  const ox = SHADOW.dx * H, oy = SHADOW.dy * H;
+  ctx.save();
+  ctx.fillStyle = "rgba(18,20,23,0.34)";
+  for (const t of S.tanks) {
+    if (t.dead || t.gone || now < (t.phaseUntil ?? 0)) continue;
+    const hull = tankShadowPath(t, ox, oy);
+    if (!hull.length) continue;
+    ctx.beginPath();
+    ctx.moveTo(hull[0][0], hull[0][1]);
+    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i][0], hull[i][1]);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawTank(t, now) {
   const hull = HULL[t.color];
   const R = TANK_R;
-
-  // ---- cast shadow -------------------------------------------------
-  // The tank's ACTUAL silhouette — hull plus barrel — displaced along
-  // the sun's direction by the tank's height. Not a circle underneath:
-  // a circle gives away that there's no real light, and with the sun
-  // this far off to the side the offset is plainly visible.
-  if (!t.dead && !t.gone && !(now < (t.phaseUntil ?? 0))) {
-    const wt = t.weapon || "normal";
-    const bar = BARRELS[wt] ?? BARRELS.normal;
-    const H = R * 0.62;                       // how tall a tank stands
-    ctx.save();
-    ctx.translate(t.x + SHADOW.dx * H, t.y + SHADOW.dy * H);
-    ctx.rotate(t.a);
-    ctx.fillStyle = "rgba(18,20,23,0.36)";
-    const hl = R * 0.95, hw = R * 0.83, rr = R * 0.2;
-    ctx.beginPath();
-    ctx.moveTo(-hl + rr, -hw);
-    ctx.lineTo(hl - rr, -hw);
-    ctx.quadraticCurveTo(hl, -hw, hl, -hw + rr);
-    ctx.lineTo(hl, hw - rr);
-    ctx.quadraticCurveTo(hl, hw, hl - rr, hw);
-    ctx.lineTo(-hl + rr, hw);
-    ctx.quadraticCurveTo(-hl, hw, -hl, hw - rr);
-    ctx.lineTo(-hl, -hw + rr);
-    ctx.quadraticCurveTo(-hl, -hw, -hl + rr, -hw);
-    ctx.closePath();
-    ctx.fill();
-    // the barrel, which is what makes the shape read as a TANK
-    ctx.fillRect(0, -bar.hw * R, bar.len * R, bar.hw * R * 2);
-    ctx.restore();
-  }
 
   ctx.save();
   // Phasing tanks are half-transparent.
