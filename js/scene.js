@@ -223,7 +223,7 @@ function paintGrass(g, r, x, y, scale) {
   g.fill();
 }
 
-function buildFloor(w, h, seed, pad = 0, rects = [], d = 1) {
+function buildFloor(w, h, seed, pad = 0, rects = [], d = 1, maze = null, cell = 96) {
   const cv = newCanvas(w, h, d);
   const g = cv.getContext("2d");
   paintBase(g, w, h, seed, d);
@@ -279,7 +279,7 @@ function buildFloor(w, h, seed, pad = 0, rects = [], d = 1) {
     g.arc(x, y, rad, 0, Math.PI * 2);
     g.fill();
   }
-  paintOldTracks(g, w, h, seed ^ 0x33cd, pad, rects);
+  paintOldTracks(g, w, h, seed ^ 0x33cd, pad, rects, maze, cell);
   return cv;
 }
 
@@ -297,49 +297,102 @@ function segBlocked(rects, x1, y1, x2, y2) {
   return false;
 }
 
-function paintOldTracks(g, w, h, seed, pad, rects) {
+function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
+  if (!maze || !maze.H || !maze.V || !cell) return;
   const r = rng(seed);
   const HALF = 10.7, WIDTH = 7.3, PITCH = 5.9;   // a real tank's tread spacing
-  // The arena proper, in this canvas's coordinates. Tracks live ONLY in
-  // here: the ground beyond the outer wall is the same concrete, but
-  // nothing has ever driven on it.
-  const aw = w - pad * 2, ah = h - pad * 2;
-  const runs = Math.max(22, Math.floor((aw * ah) / 8000));
+  const { cols, rows } = maze;
+
+  // Tracks are ROUTED down the maze's open passages rather than fired
+  // off in a straight line and cut short when they meet stone. Walking
+  // the passage graph means a trail only ever appears where a tank could
+  // actually have driven, and it never runs up to a wall and stops dead
+  // against it.
+  const open = (c, rw, dir) => {
+    if (dir === 0) return rw > 0 && !maze.H[rw][c];              // north
+    if (dir === 1) return rw < rows - 1 && !maze.H[rw + 1][c];   // south
+    if (dir === 2) return c > 0 && !maze.V[rw][c];               // west
+    return c < cols - 1 && !maze.V[rw][c + 1];                   // east
+  };
+  const inside = (c, rw) =>
+    c >= 0 && c < cols && rw >= 0 && rw < rows && (!maze.inside || maze.inside[rw][c]);
+  const DC = [0, 0, -1, 1], DR = [-1, 1, 0, 0];
+
+  // Scale with the MAZE, not the pixel area: a bigger map has more
+  // corridors, so it wants proportionally more history on the floor.
+  const openCells = cols * rows;
+  const runs = Math.max(10, Math.round(openCells * 1.1));
+
   g.save();
+  g.lineCap = "butt";
   for (let i = 0; i < runs; i++) {
-    let x = r() * aw, y = r() * ah;
-    let a = r() * Math.PI * 2;
-    // Some runs are a long sweeping arc rather than a near-straight
-    // line: a tank that was turning while it drove.
-    const arcing = r() < 0.55;
-    const curve = arcing ? (r() - 0.5) * 0.055 : 0;
-    const len = 30 + r() * (arcing ? 220 : 130);
-    const fade = 0.045 + r() * 0.075;
-    for (let d = 0; d < len; d++) {
-      a += curve + (r() - 0.5) * 0.055;
-      const nx = x + Math.cos(a) * PITCH, ny = y + Math.sin(a) * PITCH;
-      // Off the arena, or into masonry, and the trail simply ends.
-      if (nx < 0 || ny < 0 || nx > aw || ny > ah) break;
-      if (segBlocked(rects, x, y, nx, ny)) break;
-      const px = -Math.sin(a), py = Math.cos(a);
-      for (const side of [-1, 1]) {
-        const cx = nx + px * HALF * side + pad, cy = ny + py * HALF * side + pad;
-        g.strokeStyle = `rgba(96,96,94,${fade})`;
-        g.lineWidth = WIDTH;
-        g.lineCap = "butt";
-        g.beginPath();
-        g.moveTo(cx - Math.cos(a) * PITCH, cy - Math.sin(a) * PITCH);
-        g.lineTo(cx, cy);
-        g.stroke();
-        g.strokeStyle = `rgba(70,70,68,${fade * 1.5})`;
-        g.lineWidth = 1.6;
-        g.beginPath();
-        g.moveTo(cx - px * (WIDTH / 2), cy - py * (WIDTH / 2));
-        g.lineTo(cx + px * (WIDTH / 2), cy + py * (WIDTH / 2));
-        g.stroke();
+    let c = (r() * cols) | 0, rw = (r() * rows) | 0;
+    if (!inside(c, rw)) continue;
+    const hops = 2 + ((r() * 7) | 0);
+    // Cell centres, in canvas coordinates.
+    const way = [[(c + 0.5) * cell + pad, (rw + 0.5) * cell + pad]];
+    let last = -1;
+    for (let hnum = 0; hnum < hops; hnum++) {
+      const opts = [];
+      for (let d = 0; d < 4; d++) {
+        if (d === last) continue;                   // don't double back
+        if (!open(c, rw, d)) continue;
+        if (!inside(c + DC[d], rw + DR[d])) continue;
+        opts.push(d);
       }
-      x = nx; y = ny;
+      if (!opts.length) break;
+      const d = opts[(r() * opts.length) | 0];
+      c += DC[d]; rw += DR[d];
+      last = d ^ 1;                                  // the way back
+      way.push([(c + 0.5) * cell + pad, (rw + 0.5) * cell + pad]);
     }
+    if (way.length < 2) continue;
+
+    const fade = 0.045 + r() * 0.08;
+    const bandL = [], bandR = [], cleats = [];
+    // Walk the route as a smooth curve so turns through a junction arc
+    // the way a tank would take them, instead of hinging at right angles.
+    let px = way[0][0], py = way[0][1];
+    let ang = Math.atan2(way[1][1] - py, way[1][0] - px);
+    for (let k = 1; k < way.length; k++) {
+      const [tx, ty] = way[k];
+      let guard = 0;
+      while (Math.hypot(tx - px, ty - py) > PITCH && guard++ < 400) {
+        const want = Math.atan2(ty - py, tx - px);
+        let da = ((want - ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        ang += Math.max(-0.16, Math.min(0.16, da));   // a real turning circle
+        const nx = px + Math.cos(ang) * PITCH, ny = py + Math.sin(ang) * PITCH;
+        const ox = -Math.sin(ang), oy = Math.cos(ang);
+        // Collected, not stroked here. Stroking every step separately
+        // meant four canvas strokes per 6 px of track, which is most of
+        // what made a round take a moment to start.
+        bandL.push([nx + ox * HALF * -1, ny + oy * HALF * -1]);
+        bandR.push([nx + ox * HALF, ny + oy * HALF]);
+        cleats.push([nx, ny, ox, oy]);
+        px = nx; py = ny;
+      }
+    }
+    // Two strokes for the bands and one for every cleat on this run.
+    g.lineWidth = WIDTH;
+    g.strokeStyle = `rgba(96,96,94,${fade})`;
+    for (const band of [bandL, bandR]) {
+      if (band.length < 2) continue;
+      g.beginPath();
+      g.moveTo(band[0][0], band[0][1]);
+      for (let k = 1; k < band.length; k++) g.lineTo(band[k][0], band[k][1]);
+      g.stroke();
+    }
+    g.lineWidth = 1.6;
+    g.strokeStyle = `rgba(70,70,68,${fade * 1.5})`;
+    g.beginPath();
+    for (const [cx2, cy2, ox2, oy2] of cleats) {
+      for (const side of [-1, 1]) {
+        const bx = cx2 + ox2 * HALF * side, by = cy2 + oy2 * HALF * side;
+        g.moveTo(bx - ox2 * (WIDTH / 2), by - oy2 * (WIDTH / 2));
+        g.lineTo(bx + ox2 * (WIDTH / 2), by + oy2 * (WIDTH / 2));
+      }
+    }
+    g.stroke();
   }
   g.restore();
 }
@@ -459,7 +512,7 @@ function buildShadows(w, h, rects, pad, d = 1) {
   const cv = newCanvas(w + pad * 2, h + pad * 2, d);
   const g = cv.getContext("2d");
   g.translate(pad, pad);
-  const HEIGHT = 9;                              // how tall a wall stands
+  const HEIGHT = 20;                             // walls stand well above a tank
   const ox = SHADOW.dx * HEIGHT, oy = SHADOW.dy * HEIGHT;
 
   // A shadow is the wall SWEPT along the light — the box itself, the box
@@ -515,7 +568,7 @@ function convexHull(pts) {
 
 // Build (or reuse) the arena art. Keyed on size, layout and seed, so it
 // is generated once per round and simply blitted every frame after that.
-export function buildScene(worldW, worldH, rects, seed, viewScale = 1) {
+export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = null, cell = 96) {
   // Bake at the density the arena is actually SHOWN at, so the concrete,
   // the brickwork and the worn tracks are as sharp as the tanks standing
   // on them. Baking at world size and letting the canvas magnify it is
@@ -541,7 +594,7 @@ export function buildScene(worldW, worldH, rects, seed, viewScale = 1) {
   cache = {
     key,
     w: worldW, h: worldH, pad, density: d,
-    floor: buildFloor(fw, fh, seed >>> 0, pad, rects, d),
+    floor: buildFloor(fw, fh, seed >>> 0, pad, rects, d, maze, cell),
     walls: buildWalls(worldW, worldH, rects, seed >>> 0, d),
     shadow: buildShadows(worldW, worldH, rects, pad, 1),   // soft edges: density buys nothing
   };

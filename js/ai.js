@@ -551,7 +551,11 @@ function navigate(t, B, world, P, now, gun) {
     // easiest to shoot. Reverse is still cheap enough to use when the
     // way out really is behind; it is no longer the default.
     const along = Math.cos(angDiff(RAY[i].a, t.a));
-    score[i] += Math.max(0, along) * 1.05 + Math.max(0, -along) * 0.40;
+    // Widened further: bots were still choosing to trundle backwards at
+    // the enemy, which is both the most readable thing they can do and
+    // the easiest thing to shoot. Reverse stays available for a genuine
+    // break-off; it is no longer competitive for an approach.
+    score[i] += Math.max(0, along) * 1.9 + Math.max(0, -along) * 0.18;
     // Openness is a MULTIPLIER on desire, not a veto: a direction that
     // is merely tight stays available, one that is solid stops being
     // attractive. This is what keeps a bot off walls without ever
@@ -644,12 +648,17 @@ function navigate(t, B, world, P, now, gun) {
   // Near-ties between neighbouring directions used to flip every frame,
   // which reads as a bot vibrating. Carrying on costs nothing; turning
   // has to be worth it.
+  // A junction is the worst case for this: three or four ways out score
+  // almost identically, the pick flips between them every frame, and the
+  // bot pirouettes on the spot instead of taking one. Carrying on has to
+  // be worth appreciably more than turning, and the bonus reaches wider.
   if (B.lastDir != null) {
     for (let i = 0; i < DIRS; i++) {
       const off = Math.min(Math.abs(i - B.lastDir), DIRS - Math.abs(i - B.lastDir));
-      if (off === 0) score[i] += 0.5;
-      else if (off === 1) score[i] += 0.28;
-      else if (off === 2) score[i] += 0.1;
+      if (off === 0) score[i] += 1.2;
+      else if (off === 1) score[i] += 0.8;
+      else if (off === 2) score[i] += 0.45;
+      else if (off === 3) score[i] += 0.2;
     }
   }
 
@@ -872,7 +881,10 @@ function routeHeading(t, B, world, goal, now) {
   const to = { c: cellIdx(goal.x, cell, maze.cols), r: cellIdx(goal.y, cell, maze.rows) };
   const from = { c: cellIdx(t.x, cell, maze.cols), r: cellIdx(t.y, cell, maze.rows) };
 
-  const stale = !B.path || now - B.pathAt > 900 ||
+  // Re-planning while standing in a junction is the other half of the
+  // spin: a fresh route can pick a different exit each time it is run.
+  // Hold a route long enough to actually leave the intersection.
+  const stale = !B.path || now - B.pathAt > 2200 ||
     !B.pathTo || B.pathTo.c !== to.c || B.pathTo.r !== to.r;
   if (stale) {
     B.path = bfsRoute(maze, from, to);

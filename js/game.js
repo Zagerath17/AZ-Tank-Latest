@@ -35,7 +35,7 @@ const CELL = 96;                     // corridor spacing — walls are much more
 const WALL_T = 10;
 const RENDER_W = 2560, RENDER_H = 1440;   // internal render resolution
 const ACCEL_TIME = 0.5;   // s from a standstill to full speed
-const BRAKE_TIME = 0.8;   // s from full speed back to a stop
+const BRAKE_TIME = 0.2;   // s from full speed back to a stop
 const SPIN_UP = 0.28;     // s for the hull to reach full turn rate
 const SPIN_DOWN = 0.16;   // s for it to stop turning
 const U = 64;                        // tank & ballistics scale (unchanged — tanks stay the same size)
@@ -1282,7 +1282,8 @@ function stepTanks(now, dt) {
         // disconnected from driving.
         const maxRate = TURN_SPEED * mul.turn;
         const wantRate = Math.max(-maxRate, Math.min(maxRate, diff / Math.max(dt, 1e-3)));
-        const spinRate = Math.abs(wantRate) > Math.abs(t.spin ?? 0) ? maxRate / SPIN_UP : maxRate / SPIN_DOWN;
+        const spinOpposing = wantRate * (t.spin ?? 0) < 0;
+        const spinRate = (spinOpposing || Math.abs(wantRate) < Math.abs(t.spin ?? 0)) ? maxRate / SPIN_DOWN : maxRate / SPIN_UP;
         const dS = wantRate - (t.spin ?? 0);
         const stepS = spinRate * dt;
         t.spin = Math.abs(dS) <= stepS ? wantRate : (t.spin ?? 0) + Math.sign(dS) * stepS;
@@ -1299,7 +1300,8 @@ function stepTanks(now, dt) {
         turn = (acts.right ? 1 : 0) - (acts.left ? 1 : 0);
         const maxRate = TURN_SPEED * mul.turn;
         const wantRate = turn * maxRate;
-        const spinRate = Math.abs(wantRate) > Math.abs(t.spin ?? 0) ? maxRate / SPIN_UP : maxRate / SPIN_DOWN;
+        const spinOpposing = wantRate * (t.spin ?? 0) < 0;
+        const spinRate = (spinOpposing || Math.abs(wantRate) < Math.abs(t.spin ?? 0)) ? maxRate / SPIN_DOWN : maxRate / SPIN_UP;
         const dS = wantRate - (t.spin ?? 0);
         const stepS = spinRate * dt;
         t.spin = Math.abs(dS) <= stepS ? wantRate : (t.spin ?? 0) + Math.sign(dS) * stepS;
@@ -1346,8 +1348,14 @@ function stepTanks(now, dt) {
         // raw signs made a tank crawling at walking pace brake every
         // time the command wobbled across zero, so it never built any
         // speed at all — it just shuffled on the spot.
-        const reversing = want * cur < 0 && Math.abs(cur) > full * 0.05;
-        const rate = (Math.abs(want) < Math.abs(cur) || reversing) ? brake : accel;
+        // An input that OPPOSES the current motion is the driver actively
+        // braking, not coasting — so it bites at the braking rate rather
+        // than waiting for the tank to coast down first. That wait is
+        // what made forward-to-reverse feel like the stick had been
+        // ignored for a moment.
+        const opposing = want * cur < 0;
+        const easingOff = Math.abs(want) < Math.abs(cur);
+        const rate = (opposing || easingOff) ? brake : accel;
         const d = want - cur;
         const stepV = rate * dt;
         t.vel = Math.abs(d) <= stepV ? want : cur + Math.sign(d) * stepV;
@@ -4129,6 +4137,14 @@ function draw(now) {
   // zone tint, interior walls) to the silhouette polygon: the area
   // outside simply shows the page background — no dark filler cells,
   // and the angled edge reads clean. Rect arenas fill the whole box.
+  // The ground goes down FIRST and UNCLIPPED. On a shaped arena the
+  // silhouette clip below used to cut the concrete to the play area, so
+  // everything outside an angled edge fell back to flat grey — which is
+  // why some maps had bare background beyond the wall. The ground is the
+  // world; only the things standing on it get clipped.
+  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s * dpr, S.maze, CELL);
+  drawGround(ctx, scene);
+
   let clippedToShape = false;
   if (S.polyWorld) {
     ctx.save();
@@ -4136,11 +4152,6 @@ function draw(now) {
     ctx.clip();
     clippedToShape = true;
   }
-  // The arena floor: aged concrete, generated once for the whole map at
-  // its real size (see scene.js). Nothing here tiles — every crack,
-  // stain and weed is placed individually across the world.
-  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s * dpr);
-  drawGround(ctx, scene);
 
   // Tread marks go straight onto the floor — under the zone tint, under
   // the walls, and under everything that moves.
@@ -4952,47 +4963,58 @@ function fillMaterial(color, R, hexOverride, ang) {
 // SWEPT from the tank's own footprint out to the offset copy rather than
 // being a detached silhouette sitting away from it — a floating shadow
 // with a gap under the tank is what makes it look like it is hovering.
-function tankShadowPath(t, ox, oy) {
+// The tank's real outline — rounded hull plus barrel — smeared from
+// where it stands out to where the sun throws it. A convex hull of the
+// two footprints (what this used to do) fills in the notch either side
+// of the barrel and squares off the rounded corners, which is exactly
+// why it came out as a box. Stamping the true silhouette at a few points
+// along the offset keeps the shape and still joins up.
+function tankSilhouette(ctx2, t, dx, dy) {
   const R = TANK_R;
   const bar = BARRELS[t.weapon || "normal"] ?? BARRELS.normal;
-  const hl = R * 0.95, hw = R * 0.83;
+  const hl = R * 0.95, hw = R * 0.83, rr = R * 0.26;
   const bl = bar.len * R, bw = bar.hw * R;
   const c = Math.cos(t.a), sn = Math.sin(t.a);
-  const pts = [];
-  const add = (lx, ly) => {
-    const wx = t.x + lx * c - ly * sn, wy = t.y + lx * sn + ly * c;
-    pts.push([wx, wy], [wx + ox, wy + oy]);      // footprint AND its offset
-  };
-  add(-hl, -hw); add(hl, -hw); add(hl, hw); add(-hl, hw);
-  add(bl, -bw); add(bl, bw);
-  return convexHull2(pts);
-}
-
-function convexHull2(pts) {
-  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const lo = [], hi = [];
-  for (const q of p) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
-  for (let i = p.length - 1; i >= 0; i--) { const q = p[i];
-    while (hi.length >= 2 && cr(hi[hi.length - 2], hi[hi.length - 1], q) <= 0) hi.pop(); hi.push(q); }
-  lo.pop(); hi.pop();
-  return lo.concat(hi);
+  const X = (lx, ly) => t.x + dx + lx * c - ly * sn;
+  const Y = (lx, ly) => t.y + dy + lx * sn + ly * c;
+  // hull, with its corners actually rounded
+  ctx2.moveTo(X(-hl + rr, -hw), Y(-hl + rr, -hw));
+  ctx2.lineTo(X(hl - rr, -hw), Y(hl - rr, -hw));
+  ctx2.quadraticCurveTo(X(hl, -hw), Y(hl, -hw), X(hl, -hw + rr), Y(hl, -hw + rr));
+  ctx2.lineTo(X(hl, hw - rr), Y(hl, hw - rr));
+  ctx2.quadraticCurveTo(X(hl, hw), Y(hl, hw), X(hl - rr, hw), Y(hl - rr, hw));
+  ctx2.lineTo(X(-hl + rr, hw), Y(-hl + rr, hw));
+  ctx2.quadraticCurveTo(X(-hl, hw), Y(-hl, hw), X(-hl, hw - rr), Y(-hl, hw - rr));
+  ctx2.lineTo(X(-hl, -hw + rr), Y(-hl, -hw + rr));
+  ctx2.quadraticCurveTo(X(-hl, -hw), Y(-hl, -hw), X(-hl + rr, -hw), Y(-hl + rr, -hw));
+  ctx2.closePath();
+  // barrel
+  ctx2.moveTo(X(0, -bw), Y(0, -bw));
+  ctx2.lineTo(X(bl, -bw), Y(bl, -bw));
+  ctx2.lineTo(X(bl, bw), Y(bl, bw));
+  ctx2.lineTo(X(0, bw), Y(0, bw));
+  ctx2.closePath();
 }
 
 function drawTankShadows(now) {
-  const H = TANK_R * 0.62;
+  // A tank is a low, squat thing next to a wall — so its shadow is much
+  // the shorter of the two. This used to be TALLER than the wall height,
+  // which read as the tanks looming over the masonry.
+  const H = TANK_R * 0.30;
   const ox = SHADOW.dx * H, oy = SHADOW.dy * H;
   ctx.save();
   ctx.fillStyle = "rgba(18,20,23,0.34)";
+  const STEPS = 5;                     // enough to read as one solid smear
   for (const t of S.tanks) {
     if (t.dead || t.gone || now < (t.phaseUntil ?? 0)) continue;
-    const hull = tankShadowPath(t, ox, oy);
-    if (!hull.length) continue;
+    // Every stamp goes into ONE path and is filled once, so the overlaps
+    // don't darken where they pile up.
     ctx.beginPath();
-    ctx.moveTo(hull[0][0], hull[0][1]);
-    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i][0], hull[i][1]);
-    ctx.closePath();
-    ctx.fill();
+    for (let i = 0; i <= STEPS; i++) {
+      const f = i / STEPS;
+      tankSilhouette(ctx, t, ox * f, oy * f);
+    }
+    ctx.fill("nonzero");
   }
   ctx.restore();
 }

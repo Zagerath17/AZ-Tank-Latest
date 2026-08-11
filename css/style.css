@@ -1080,6 +1080,7 @@ body {
 }
 .shrink-timer.warn { color: #ff5147; }
 .sc-card .sc-name {
+  color: #fff;
   display: block;
   font-size: .62rem;
   font-weight: 700;
@@ -1112,7 +1113,10 @@ body {
   font-family: "Black Ops One", system-ui;
   font-size: 1.05rem;
   line-height: 1;
-  color: var(--p);
+  /* White for everyone. Tinting the number to the tank made the darker
+     paints hard to read against the bar, and the sprite beside it
+     already says whose score it is. */
+  color: #fff;
   text-shadow: 0 2px 0 rgba(0, 0, 0, .5);
 }
 
