@@ -560,16 +560,35 @@ async function removeBot(id) {
 // real code for whoever already has it.
 function renderLobbyCode(code, lobby) {
   const hidden = !!lobby?.hideCode;
+  // Am I the host? Prefer the snapshot, but fall back to what we
+  // already worked out. This used to read the snapshot ALONE, so the
+  // very first paint — which happens on entering the lobby, before any
+  // snapshot has arrived, with lobby === null — hid the button, and if
+  // a later render didn't run the host never got it back. That is the
+  // failure mode where the host simply has no hide button.
+  const host = lobby ? lobby.hostId === myId() : !!current?.isHost;
+  // Matchmade 1v1 lobbies have no code worth hiding.
+  const matched = !!(lobby ?? current?.lastLobby)?.matched;
+
   const el = document.getElementById("lobby-code");
   if (el) el.textContent = hidden ? "••••" : (code ?? "····");
+
+  const label = document.getElementById("lobby-code-label");
+  if (label) {
+    label.textContent = hidden
+      ? (host ? "Lobby code — hidden from everyone" : "Lobby code — hidden by the host")
+      : "Lobby code — share it with friends";
+  }
+
   const btn = document.getElementById("lobby-hide");
   if (btn) {
-    btn.textContent = hidden ? "SHOW" : "HIDE";
-    // Host only — everyone else just sees the result.
-    btn.hidden = !lobby || lobby.hostId !== myId();
+    btn.textContent = hidden ? "👁 SHOW CODE" : "🙈 HIDE CODE";
+    btn.hidden = !host || matched;      // host of a custom lobby only
   }
+  // The host keeps Copy either way (they know their own code); everyone
+  // else loses it while the code is hidden, or hiding would be pointless.
   const copy = document.getElementById("lobby-copy");
-  if (copy) copy.hidden = hidden && lobby?.hostId !== myId();
+  if (copy) copy.hidden = hidden && !host;
 }
 
 /* ---------- custom-lobby match settings (host-controlled) ---------- */
@@ -577,12 +596,40 @@ function renderLobbyCode(code, lobby) {
 const SIZE_KEYS = ["small", "medium", "large", "xl"];
 const SIZE_LABEL = { small: "Small", medium: "Medium", large: "Large", xl: "Extra large" };
 
-function defaultSettings() {
+// The host's match settings, remembered between lobbies. They used to
+// reset to the defaults on every lobby you made, so a host who liked
+// (say) large maps with no rockets had to set it up again every single
+// time they pressed Create.
+const LS_HOST_SET = "tank.hostSettings.v1";
+
+function baseSettings() {
   const gear = {};
   for (const w of WEAPON_TYPES) gear[w] = true;
   const sizes = {};
   for (const k of SIZE_KEYS) sizes[k] = true;
   return { sizes, gear, gearMax: 24, zone: false, zoneSec: 30 };
+}
+
+export function saveHostSettings(s) {
+  try { localStorage.setItem(LS_HOST_SET, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+function defaultSettings() {
+  const d = baseSettings();
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(LS_HOST_SET) || "{}") ?? {}; } catch { saved = {}; }
+  const sizes = {};
+  for (const k of SIZE_KEYS) sizes[k] = saved.sizes?.[k] ?? d.sizes[k];
+  // Never restore a state with nothing enabled — that can't start a match.
+  if (!SIZE_KEYS.some((k) => sizes[k])) for (const k of SIZE_KEYS) sizes[k] = true;
+  const gear = {};
+  for (const w of WEAPON_TYPES) gear[w] = saved.gear?.[w] ?? d.gear[w];
+  return {
+    sizes, gear,
+    gearMax: Math.max(1, Math.min(30, saved.gearMax ?? d.gearMax)),
+    zone: saved.zone ?? d.zone,
+    zoneSec: Math.max(10, Math.min(60, saved.zoneSec ?? d.zoneSec)),
+  };
 }
 
 // Normalize whatever's on the lobby into a complete settings object —
@@ -623,6 +670,9 @@ function renderSettings(lobby, isHost) {
   panel.hidden = !isHost || !!lobby.matched;
   if (panel.hidden) return;
   const s = readSettings(lobby);
+  // Remember whatever the host currently has set, so their next lobby
+  // opens with the same rules instead of the defaults.
+  saveHostSettings(s);
 
   const sizesEl = document.getElementById("set-sizes");
   sizesEl.innerHTML = SIZE_KEYS.map((k) => `

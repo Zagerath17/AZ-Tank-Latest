@@ -20,7 +20,7 @@
 
 // The families, weakest first. Position in this list IS the
 // progression: a colour's prerequisite is the same hue one family back.
-export const FAMILY_ORDER = ["base", "dark", "light", "pastel", "neon"];
+export const FAMILY_ORDER = ["base", "dark", "light", "pastel", "neon", "mono"];
 
 export const FAMILY_LABEL = {
   base: "Primaries",
@@ -28,6 +28,7 @@ export const FAMILY_LABEL = {
   light: "Light",
   pastel: "Pastel",
   neon: "Neon",
+  mono: "Greyscale",
 };
 
 // The same families as an adjective, for sentences like "Own every
@@ -39,6 +40,7 @@ const FAMILY_ADJ = {
   light: "light",
   pastel: "pastel",
   neon: "neon",
+  mono: "greyscale",
 };
 
 // The paint you start with, free, forever.
@@ -105,6 +107,25 @@ export const SKINS = {
   neonIndigo: { name: "Neon Indigo", hex: "#4400ff", cost: 50, finish: "flat", fam: "neon", hue: "indigo" },
   neonViolet: { name: "Neon Violet", hex: "#d400ff", cost: 50, finish: "flat", fam: "neon", hue: "violet" },
 
+  // ---- Greyscale — 60 tags each, needs the neon of that hue ---------
+  // A seven-step ramp from white to near-black. It sits at the end of
+  // the colour chain and is what Ruby is earned from, so each entry
+  // still hangs off a hue: the chain is unbroken, the shelf just isn't
+  // coloured any more.
+  //
+  // Neither end is taken to its absolute limit on purpose. The arena
+  // floor is pure #ffffff, so a #ffffff tank would vanish into it, and
+  // the Impossible bot's reserved paint is a near-black — a player in
+  // true black would be mistaken for one. Chalk and Onyx are as far as
+  // the ramp can go and still leave a tank you can see and identify.
+  monoChalk: { name: "Chalk", hex: "#f4f6f8", cost: 60, finish: "flat", fam: "mono", hue: "red" },
+  monoBone: { name: "Bone", hex: "#d2d6da", cost: 60, finish: "flat", fam: "mono", hue: "orange" },
+  monoAsh: { name: "Ash", hex: "#aeb3b8", cost: 60, finish: "flat", fam: "mono", hue: "yellow" },
+  monoGrey: { name: "Grey", hex: "#8a8f95", cost: 60, finish: "flat", fam: "mono", hue: "green" },
+  monoSlate: { name: "Slate", hex: "#666b71", cost: 60, finish: "flat", fam: "mono", hue: "blue" },
+  monoCharcoal: { name: "Charcoal", hex: "#43474d", cost: 60, finish: "flat", fam: "mono", hue: "indigo" },
+  monoOnyx: { name: "Onyx", hex: "#2b2f36", cost: 60, finish: "flat", fam: "mono", hue: "violet" },
+
   // ---- THE MATERIALS ------------------------------------------------
   // One per family, unlocked by completing that family. These aren't
   // colours with an effect painted on top — the tank is MADE of the
@@ -132,15 +153,22 @@ export const SKINS = {
     finish: "diamond", fam: "material", special: "neon",
   },
 
-  // ---- RUBY: the last thing in the shop. Not a family reward — it
-  // needs the whole catalogue behind it, materials included.
+  // ---- RUBY: the reward for finishing the greyscale shelf, which is
+  // itself the end of every hue's chain — so it still sits at the very
+  // bottom of the shop, just earned the same way as the other five
+  // rather than by a rule of its own.
   ruby: {
     name: "Ruby", hex: "#b0132b", cost: 500,
-    finish: "ruby", fam: "material", special: "all",
+    finish: "ruby", fam: "material", special: "mono",
   },
 
   // ---- reserved: the Impossible bot's paint, not for sale ----
-  black: { name: "Black", hex: "#20242e", cost: 0, finish: "flat", fam: "reserved", reserved: true },
+  // The Impossible bot's paint, never sold. Pushed darker now that the
+  // greyscale shelf ends in Onyx: at #20242e the two were within a
+  // dozen values of each other and a player in Onyx read as an
+  // Impossible bot at a glance. This keeps the bot the darkest thing on
+  // the field, which is the point of it.
+  black: { name: "Black", hex: "#101219", cost: 0, finish: "flat", fam: "reserved", reserved: true },
 };
 
 // Everything the shop lists, in catalogue order.
@@ -232,30 +260,30 @@ export function freeBotSkin(taken) {
 // price list plus metadata.
 export const PATTERNS = {
   solid: { name: "Solid", cost: 0, colors: 1 },
-  // --- cheap and graphic: read instantly, simple to draw -------------
+  // --- cheap: one idea, cleanly executed ----------------------------
+  twoTone: { name: "Two Tone", cost: 30, colors: 2 },
   checker: { name: "Checker", cost: 35, colors: 2 },
-  splotchy: { name: "Splotchy", cost: 40, colors: 2 },
-  twoTone: { name: "Two Tone", cost: 40, colors: 2 },
-  stripes: { name: "Racing Stripes", cost: 45, colors: 2 },
+  stripes: { name: "Racing Stripes", cost: 40, colors: 2 },
+  splotchy: { name: "Splotchy", cost: 45, colors: 2 },
   hazard: { name: "Hazard", cost: 50, colors: 2 },
   chevron: { name: "Chevron", cost: 55, colors: 2 },
-  // --- mid: proper motifs with some structure to them ----------------
-  camo: { name: "Camo", cost: 60, colors: 2 },
-  hexScale: { name: "Hex Scale", cost: 65, colors: 2 },
-  plaid: { name: "Plaid", cost: 65, colors: 2 },
-  flames: { name: "Flames", cost: 70, colors: 2 },
-  splatter: { name: "Splatter", cost: 70, colors: 2 },
-  modernCamo: { name: "Modern Camo", cost: 80, colors: 2 },
-  carbon: { name: "Carbon Fibre", cost: 80, colors: 2 },
-  circuit: { name: "Circuit", cost: 85, colors: 2 },
-  // --- dear: fiddly, layered, or just very showy ---------------------
-  tiger: { name: "Tiger", cost: 90, colors: 2 },
-  scales: { name: "Scales", cost: 90, colors: 2 },
-  lightning: { name: "Lightning", cost: 100, colors: 2 },
-  topo: { name: "Topographic", cost: 100, colors: 2 },
-  shatter: { name: "Shatter", cost: 115, colors: 2 },
-  galaxy: { name: "Galaxy", cost: 120, colors: 2 },
-  aurora: { name: "Aurora", cost: 135, colors: 2 },
+  // --- mid: real motifs with structure to them ----------------------
+  camo: { name: "Camo", cost: 65, colors: 2 },
+  plaid: { name: "Plaid", cost: 70, colors: 2 },
+  hexScale: { name: "Hex Scale", cost: 75, colors: 2 },
+  splatter: { name: "Splatter", cost: 80, colors: 2 },
+  tiger: { name: "Tiger", cost: 85, colors: 2 },
+  modernCamo: { name: "Digital Camo", cost: 90, colors: 2 },
+  carbon: { name: "Carbon Fibre", cost: 95, colors: 2 },
+  scales: { name: "Scales", cost: 100, colors: 2 },
+  // --- dear: layered, fiddly, or alive ------------------------------
+  flames: { name: "Flames", cost: 105, colors: 2 },
+  circuit: { name: "Circuit", cost: 110, colors: 2 },
+  topo: { name: "Topographic", cost: 115, colors: 2 },
+  shatter: { name: "Shatter", cost: 125, colors: 2 },
+  lightning: { name: "Lightning", cost: 140, colors: 2 },
+  galaxy: { name: "Galaxy", cost: 150, colors: 2 },
+  aurora: { name: "Aurora", cost: 165, colors: 2 },
 };
 
 export const DEFAULT_PATTERN = "solid";

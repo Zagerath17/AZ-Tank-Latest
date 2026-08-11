@@ -569,6 +569,10 @@ body {
 /* ---------- lobby ---------- */
 .code-card { display: grid; gap: 8px; }
 .code-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* The host's hide toggle sits under the code on its own line, full
+   width, so it reads as a control rather than as decoration next to
+   the digits. */
+.code-hide { width: 100%; justify-content: center; }
 .code-big {
   font-family: "Black Ops One", system-ui;
   font-size: 2.4rem;

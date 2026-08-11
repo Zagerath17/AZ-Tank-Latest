@@ -18,7 +18,7 @@
 // it, tap something you can afford to buy it.
 // ================================================================
 
-import { onEnter, toast } from "./main.js";
+import { onEnter, toast, showScreen } from "./main.js";
 import {
   SKINS, SHOP_SKINS, FAMILY_ORDER, FAMILY_LABEL, DEFAULT_SKIN,
   skinFinish, skinUnlocked, lockReason, requirements, isMaterialSkin,
@@ -348,7 +348,18 @@ function pickTab(which) {
 }
 
 export function initShop() {
-  onEnter("screen-shop", () => pickTab(tab));
+  // Where Back should go. The Shop is reachable from the menu, from a
+  // custom lobby and from the local setup screen, and dumping someone
+  // back at the menu from a lobby would quietly drop them out of it —
+  // so remember where they came from and return them there.
+  let cameFrom = "screen-menu";
+  onEnter("screen-shop", (prev) => {
+    if (prev && prev !== "screen-shop") cameFrom = prev;
+    pickTab(tab);
+  });
+  document.getElementById("shop-back")?.addEventListener("click", () => {
+    showScreen(cameFrom || "screen-menu");
+  });
 
   document.getElementById("shop-tab-colours")?.addEventListener("click", () => pickTab("colours"));
   document.getElementById("shop-tab-patterns")?.addEventListener("click", () => pickTab("patterns"));

@@ -31,6 +31,7 @@ import { DEFAULT_SKIN } from "./skins.js";
 const hooks = { enter: {}, leave: {} };
 let activeScreen = "screen-menu";
 
+// fn is called with the screen the player just left.
 export function onEnter(id, fn) { (hooks.enter[id] ??= []).push(fn); }
 export function onLeave(id, fn) { (hooks.leave[id] ??= []).push(fn); }
 
@@ -43,7 +44,10 @@ export function showScreen(id) {
   activeScreen = id;
   const el = document.getElementById(id);
   el.classList.add("is-active");
-  (hooks.enter[id] ?? []).forEach((fn) => fn());
+  // Enter hooks are told where the player came FROM, so a screen that
+  // several places link to (the Shop) can send them back where they
+  // were instead of always dropping them at the menu.
+  (hooks.enter[id] ?? []).forEach((fn) => fn(prevScreen));
   el.querySelector("[data-autofocus]")?.focus();
 
   // The soundtrack follows the screen: menus get the title theme,

@@ -144,6 +144,8 @@ function brain(t, now) {
       driveA: t.a,          // smoothed heading actually being driven
       driveM: 0,
       lastDir: null,        // sticky steering slot
+      orbitDir: 1,          // which way round the target we're circling
+      orbitAt: 0,
       dodgeKey: null,       // the shot currently being evaded
       dodgeA: 0,            // the ONE escape committed to for it
       dodgeUntil: 0,
@@ -248,7 +250,8 @@ function sense(t, B, world, P, now) {
     const hit = interceptsMe(t, s, world, horizon, r);
     if (!hit) return;
     B.threats.push({
-      kind: "shot", key, x: s.x, y: s.y, vx: s.vx, vy: s.vy,
+      kind: "shot", key, x: s.x, y: s.y,
+      vx: s.vx, vy: s.vy,
       t: hit.t, side: hit.side,
     });
   };
@@ -298,6 +301,19 @@ function sense(t, B, world, P, now) {
 
 // Closest approach of a projectile, in its own frame. Returns when it
 // arrives and which way to step off the line (+1/-1 across its path).
+// Will this shot reach me, and when? Closest approach along the round's
+// current heading, clamped to the lookahead.
+//
+// MEASURED AND REJECTED: walking the round forward through the arena
+// instead, reflecting off walls, so that ricochets were predicted
+// exactly and rounds blocked by a wall were ignored. It is the more
+// correct model and it lost — 75 hits per 100 rounds became 78 with one
+// bounce modelled and 79 with none. The reason is that this loose test
+// is already catching most ricochets by accident: a round heading for a
+// wall near us has a near closest-approach on its CURRENT heading too,
+// so it registers as danger early, while the exact version only saw it
+// after the bounce, leaving no time to move. Being approximately right
+// a long way out beats being exactly right too late.
 function interceptsMe(t, s, world, horizon, r) {
   const rx = t.x - s.x, ry = t.y - s.y;
   const vx = -(s.vx ?? 0), vy = -(s.vy ?? 0);
@@ -373,7 +389,32 @@ function plan(t, B, world, P, now) {
       const g = gunOf(t.weapon || "normal");
       const want = Math.min(P.standoff, g.bestCells) * cell;
       const a = Math.atan2(t.y - best.y, t.x - best.x);
-      B.goal = { x: best.x + Math.cos(a) * want, y: best.y + Math.sin(a) * want };
+
+      // ARC ROUND, don't push straight out.
+      //
+      // The standoff point used to sit directly outward from the target
+      // through the tank. Any time the bot was closer than its preferred
+      // range — which, in a maze of 96px cells with a 2.3-cell standoff,
+      // is most of a fight — that point lay BEHIND it, and "drive to the
+      // goal" became "reverse in a straight line". Nearly two thirds of
+      // all the reversing these bots did came from this one line, and it
+      // is exactly the trundling-backwards that reads as stupid.
+      //
+      // Offsetting the goal around the circle turns the same correction
+      // into a sidestep: the bot still ends up at the range it wants,
+      // but it gets there by circling, which keeps it moving across its
+      // opponent's aim instead of straight down it. How far round to
+      // aim eases off when the range is badly wrong, so closing a big
+      // gap is still mostly direct.
+      const cur = Math.hypot(t.x - best.x, t.y - best.y);
+      const radiusErr = Math.min(1, Math.abs(cur - want) / Math.max(1, want));
+      if (!B.orbitAt || now > B.orbitAt) {
+        B.orbitAt = now + 2200 + Math.random() * 2400;
+        B.orbitDir = Math.random() < 0.5 ? -1 : 1;
+      }
+      const step = (0.55 + 0.35 * P.aggression) * Math.max(0.2, 1 - radiusErr);
+      const arc = a + (B.orbitDir ?? 1) * step;
+      B.goal = { x: best.x + Math.cos(arc) * want, y: best.y + Math.sin(arc) * want };
     }
   } else if (B.behaviour === "collect" && gearPick) {
     B.goal = { x: gearPick.x, y: gearPick.y };
@@ -490,8 +531,14 @@ function navigate(t, B, world, P, now, gun) {
     // situation kept changing, is the "dance" this used to do under
     // fire. Magnitude is what matters; the small extra term keeps a mild
     // preference for leading with the nose.
+    // Reversing costs no turning, so for a while this scored forward and
+    // back as equals. Mechanically true, but it meant roughly half of
+    // all movement was backwards — a tank trundling away in a straight
+    // line, which is both the most readable thing it can do and the
+    // easiest to shoot. Reverse is still cheap enough to use when the
+    // way out really is behind; it is no longer the default.
     const along = Math.cos(angDiff(RAY[i].a, t.a));
-    score[i] += Math.abs(along) * 0.9 + Math.max(0, along) * 0.18;
+    score[i] += Math.max(0, along) * 1.05 + Math.max(0, -along) * 0.40;
     // Openness is a MULTIPLIER on desire, not a veto: a direction that
     // is merely tight stays available, one that is solid stops being
     // attractive. This is what keeps a bot off walls without ever
@@ -556,8 +603,16 @@ function navigate(t, B, world, P, now, gun) {
   // held until that shot is gone. Committing is what makes it read as
   // dodging rather than as flinching.
   if (B.threats.length) {
-    const th = B.threats[0];                    // the one arriving first
-    if (B.dodgeKey !== th.key || now > B.dodgeUntil) {
+    // STAY ON ONE DODGE. Seeing more of the danger — ricochets included
+    // — means several rounds are often live at once, and whichever is
+    // "soonest" can swap from tick to tick as they close. Re-deciding on
+    // each swap threw away the commitment that stops the shimmy, and the
+    // bot thrashed between two half-dodges and got hit by both. So the
+    // chosen threat is followed until it is gone or the window runs out,
+    // even if another briefly looks nearer.
+    let th = B.threats.find((x) => x.key === B.dodgeKey);
+    if (!th || now > B.dodgeUntil) {
+      th = B.threats[0];                        // the one arriving first
       B.dodgeKey = th.key;
       B.dodgeUntil = now + 520;
       B.dodgeA = pickWeave(t, world, P, th, open, squeeze, B.dodgeA, B.dodgeKey != null);
@@ -637,7 +692,18 @@ function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev) {
   const base = th.kind === "beam"
     ? Math.atan2(t.y - th.y, t.x - th.x)
     : Math.atan2(th.vy, th.vx) + Math.PI / 2;
-  const cands = th.kind === "beam" ? [base, base + Math.PI] : [base, base + Math.PI];
+  // Straight across the line of fire buys the most miss distance, but
+  // it is also the one heading a tank cannot take without a full 90°
+  // swing — so a bot that only ever considered the two perpendiculars
+  // spent the whole dodge turning and got hit mid-pivot. Offering the
+  // diagonals as well lets it slide across AND along at once: less
+  // sideways gain per metre, but it actually gets there, which is the
+  // difference between jinking and pirouetting.
+  const cands = [
+    base, base + Math.PI,
+    base + 0.7, base - 0.7,
+    base + Math.PI + 0.7, base + Math.PI - 0.7,
+  ];
 
   let best = base, bv = -Infinity;
   for (let k = 0; k < cands.length; k++) {
@@ -646,7 +712,7 @@ function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev) {
     // Reverse is free, so the cost of a heading is how far it is from
     // the hull's AXIS, not from its nose.
     const turnCost = 1 - Math.abs(Math.cos(angDiff(a, t.a)));
-    const side = k === 0 ? 1 : -1;
+    const side = (k % 2 === 0) ? 1 : -1;
     // Keep sliding the SAME way if it's still working. Shots from one
     // place arrive one after another, and picking a fresh side for each
     // turns a slide into an alternation — which is the dance again, just
@@ -802,7 +868,7 @@ function routeHeading(t, B, world, goal, now) {
    ================================================================ */
 
 function gunnery(t, B, world, P, now) {
-  const out = { want: false, aim: t.a, dist: Infinity, canFire: false, hold: false };
+  const out = { want: false, aim: t.a, dist: Infinity, canFire: false, hold: false, dry: false };
   const target = B.target;
   if (!target || !target.visible) { B.lockId = null; return out; }
 
@@ -858,8 +924,10 @@ function gunnery(t, B, world, P, now) {
   if (!g.indirect && !g.hold) {
     let live = 0;
     for (const b of world.bullets ?? []) if (b.by === t.id) live++;
-    if (live >= (world.magSize ?? 3)) return out;
-    if (now - B.shotAt < (world.magGap ?? 500) * 0.9) return out;
+    // `dry` means the gun is the thing stopping us, not the aim — which
+    // makes this the moment to be somewhere else.
+    if (live >= (world.magSize ?? 3)) { out.dry = true; return out; }
+    if (now - B.shotAt < (world.magGap ?? 500) * 0.9) { out.dry = true; return out; }
   }
   // Flame runs on fuel and only reaches so far.
   if (t.weapon === "flame") {
@@ -919,8 +987,9 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
   const evading = B.threats.length > 0 && urgent;
 
   let wantA = nav.a, wantM = nav.mag;
+  const firing = gun.want && !evading && !nav.forced;
 
-  if (gun.want && !evading && !nav.forced) {
+  if (firing) {
     // Firing posture. The hull has to point at the target, so movement is
     // restricted to the target axis — and which way we go along it is
     // decided by RANGE, not by a score that can flip frame to frame.
@@ -928,15 +997,28 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
     const g = gunOf(t.weapon || "normal");
     const want = Math.min(P.standoff, g.bestCells) * cell;
     const axis = gun.bearing ?? gun.aim;
-    const near = want * 0.55, far = want * 1.35;
+    // The old close-range band started at 55% of the preferred range,
+    // which in a 96px-cell maze meant anything inside about three tank
+    // lengths — most of a fight. The bot spent it reversing. Give ground
+    // only when genuinely crowded, and gently.
+    const near = want * 0.34, far = want * 1.35;
 
     if (gun.dist > far) {
       wantA = axis; wantM = 0.9;                       // close the gap
     } else if (gun.dist < near) {
-      wantA = axis + Math.PI; wantM = 0.75;            // back off, nose still on
+      wantA = axis + Math.PI; wantM = 0.40;            // ease off, nose still on
     } else {
       // In the pocket: hold the line, just enough throttle to keep the
       // hull swinging onto the shot.
+      //
+      // TRIED AND REJECTED: breaking sideways during the reload window,
+      // to spend less time sitting on the axis the enemy is aiming down.
+      // It measured badly — the hull has to swing ~65° off target and
+      // then swing back before the next shot, and at this turn rate it
+      // never finishes either move. Stalling tripled and the fire rate
+      // fell by a third. With the gun welded to the hull, holding the
+      // line IS the right play; the movement has to come from choosing
+      // better ground, not from fidgeting on the spot.
       wantA = axis; wantM = 0.22;
     }
     // Never drive into something just to keep a shot.
@@ -945,20 +1027,43 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
     if (room < 0.3) { wantA = nav.a; wantM = nav.mag; }
   }
 
-  // Ease onto the heading. Nothing ever snaps — a bot that teleports its
-  // steering looks like it is correcting a mistake every frame.
-  const rate = nav.forced ? 10 : 4.5 + 5 * P.dodge;
+  // Ease onto the heading. Nothing ever snaps while NAVIGATING — a bot
+  // that teleports its steering looks like it is correcting a mistake
+  // every frame.
+  //
+  // But aiming is not navigating. This tank aims by pointing its whole
+  // hull, and the trigger only releases once the hull is within a few
+  // degrees of the target. Feeding the hull a heading that has itself
+  // been smoothed toward the bearing puts TWO lags in series: the
+  // smoothed heading trails the target, and the hull trails the
+  // smoothed heading. Against anything that moves, the gun then never
+  // quite arrives — which is why these bots circled a fight at a
+  // hundred degrees a second and fired about a quarter as often as
+  // their magazine allowed. When there is a shot on, the exact bearing
+  // is commanded and the hull converges on it.
+  // A sidestep that eases on over half a second is not a sidestep. When
+  // something is incoming, get onto the escape heading quickly; when
+  // merely navigating, keep the smooth steering that stops bots looking
+  // twitchy.
+  const rate = nav.forced ? 10 : evading ? 12 + 6 * P.dodge : 4.5 + 5 * P.dodge;
   B.driveA += angDiff(B.driveA, wantA) * Math.min(1, dt * rate);
   B.driveM += (wantM - B.driveM) * Math.min(1, dt * 7);
 
   if (B.driveM > 0.04) {
-    acts.moveAngle = B.driveA;
-    acts.moveMag = Math.max(0.2, Math.min(1, B.driveM));
+    acts.moveAngle = firing ? wantA : B.driveA;
+    // Creeping forever also costs shots: it keeps changing the geometry
+    // the gun is solving for. Lined up and in the pocket, plant and
+    // shoot instead of shuffling.
+    acts.moveMag = Math.max(firing ? 0.04 : 0.2, Math.min(1, B.driveM));
   } else if (gun.want) {
     // Standing but still needs to bring the gun round.
     acts.moveAngle = gun.bearing ?? gun.aim;
-    acts.moveMag = 0.2;
+    acts.moveMag = 0.06;
   }
+  // Keep the smoothed heading honest while firing, so the moment the
+  // shot is over navigation resumes from where the hull actually is
+  // rather than snapping back to a stale heading.
+  if (firing) B.driveA = wantA;
 
   if (gun.canFire) {
     acts.shoot = true;

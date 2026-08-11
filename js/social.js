@@ -852,6 +852,7 @@ export async function toggleInvitePanel() {
         </button>
       </li>`).join("");
     panel.querySelectorAll("[data-invite]").forEach((btn) => {
+      const p = invitable.find((x) => x.key === btn.dataset.invite) ?? { name: "them" };
       btn.addEventListener("click", async () => {
         try {
           const f2 = await ensureFirebase();
@@ -859,8 +860,12 @@ export async function toggleInvitePanel() {
             code: lobbyInfo()?.code,
             at: Date.now(),
           });
-          toast("Invite sent.");
+          toast(`Invite sent to ${p.name}.`);
           btn.disabled = true;
+          // Job done — fold the list away again. Leaving it open covers
+          // the lobby roster, which is the thing you actually want to
+          // watch after inviting someone: their arrival.
+          panel.hidden = true;
         } catch (e) { toast("Couldn't send the invite."); }
       });
     });

@@ -128,13 +128,15 @@ export const MORTAR = {
   // half-cells out, steered with your movement controls while the tank
   // is planted.
   minHalfCells: 2,
-  maxHalfCells: 7,   // one cell further than before
+  maxHalfCells: 9,   // +2 half-cells of reach
   blastCells: 1.0,      // blast RADIUS in cells → 2-cell span → 2x2 cells
   baseCellsPerSec: 1.5, // launch speed (25% slower than before)
   accelPerCell: 0.4,    // +40% of base per cell traveled (linear ramp)
   cloudMs: 1100,        // the dark cloud lingers this long
   // Kept for the AI's range checks: the furthest it can ever land.
-  rangeCells: 3.5,
+  // Must stay maxHalfCells / 2 — bots gate their firing on this, so a
+  // stale value here means the extra reach exists but is never used.
+  rangeCells: 4.5,
 };
 
 // Total flight time (ms) to cover `distCells`:

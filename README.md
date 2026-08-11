@@ -129,55 +129,42 @@ Kills pay **tags** (💀), and tags are the only currency. What you can
 *buy* depends on what you already own, not on how good you are:
 
 - Each shade needs the same hue one step back:
-  `red → dark red → light red → pastel red → neon red`. Red is free, so
-  dark red is open from your very first tag; blue has to be bought
-  before dark blue is.
+  `red → dark red → light red → pastel red → neon red → greyscale`. Red
+  is free, so dark red is open from your very first tag; blue has to be
+  bought before dark blue is.
+- The last shelf is **Greyscale**: a seven-step ramp from Chalk down to
+  Onyx. It isn't coloured, but it still hangs off the hues, so the chain
+  is unbroken — Slate is what comes after Neon Blue.
 - The six paid primaries (orange, yellow, green, blue, indigo, violet)
   are open from the start.
 - A **material** needs its whole family finished — Bronze wants every
   primary, Silver every dark, Gold every light, Platinum every pastel,
   Diamond every neon.
-- **Ruby** needs the entire rest of the catalogue behind it.
+- **Ruby** caps the Greyscale shelf, the same way the other five cap
+  theirs — and since Greyscale is the end of every hue's chain, it still
+  sits at the very bottom of the shop.
 
-The materials aren't colours with an effect painted on top: the tank is
-made of the stuff, shaded with real physically-based rendering
-(`js/material.js`) — a surface normal derived from the hull's own
-signed distance field, a Cook-Torrance microfacet BRDF with GGX
-distribution and Schlick Fresnel, the measured specular reflectance of
-each metal, and a procedural environment sampled by the reflection
-vector. Metals carry their colour in their specular and have no diffuse
-at all, which is why gold's highlight is gold; the gems have cut facets
-that flash in turn as the stone rotates.
+The materials aren't colours with an effect painted on top, and they
+aren't patterns either: each is a SINGLE flat colour, and everything you
+see on it is lighting. `js/material.js` shades every pixel from a real
+surface — normals taken from the hull's own signed distance field, a
+Cook-Torrance microfacet BRDF (GGX distribution, Smith masking, Schlick
+Fresnel), and an environment sampled by the reflection vector. What
+separates gold from silver is F0; what separates polished from satin is
+roughness; what separates a stone from a metal is that light travels
+through the stone. Nothing is decorated or drawn on top.
 
 None of it is animated. Every material is baked once per orientation
-into a cached tile, so a parked tank is perfectly still and a turning
-one sweeps its reflection exactly as real metal does — and painting a
-tank costs a single image draw rather than the hundred-odd canvas
-operations the old imitation needed.
+into a cached tile, so a parked tank is perfectly still while a turning
+one sweeps its reflection as real metal does — and painting a tank costs
+one image draw rather than the hundred-odd canvas operations the earlier
+imitation needed.
 
 **Patterns** are pure economy: no gates and no prerequisites, just a
 price. A two-tone pattern is worn with any two colours you own. There
-are 22, from Checker at 35 tags up to Aurora at 135 — the cheap ones are
-bold and graphic (Checker, Hazard, Chevron), the middle of the range
-carries proper motifs (Camo, Plaid, Splatter, Carbon Fibre, Circuit),
-and the dear end is the fiddly, layered work (Scales, Topographic,
-Shatter, Galaxy, Aurora).
+are 22, priced by how much work each one is: Two Tone at 30 tags up to
+Aurora at 165.
 
-## How online lobbies work
-
-Data lives at `lobbies/{code}` in the Realtime Database:
-
-```
-lobbies/8341: {
-  createdAt: <server timestamp>,
-  hostId: "<player id>",
-  state: "waiting" | "starting",
-  matched: true,        // came from the 1v1 queue, not a shared code
-  players: { "<player id>": { joinedAt, name, ukey, color, pattern } }
-}
-```
-
-- Codes are random 1000–9999; creation rerolls if a code is taken.
 - Max 8 players (bots count). Everyone wears the paint they bought; if
   two players equipped the same colour, the earlier joiner keeps it and
   the later one is bumped to a free primary, resolved identically on
@@ -234,7 +221,8 @@ netlify.toml          Netlify config (no build step)
     hits a tank — it bursts into 22 shrapnel pieces that phase through
     walls and never expire.
   - **Mortar**: indirect fire. Plants the tank while you aim, arcs over
-    everything, lands where you put the reticle.
+    everything, lands where you put the reticle. Reach is 2–9 half-cells
+    (1 to 4.5 cells), steered with your movement controls.
 - **Defense and agility**: brick walls, armour, heal pads and mud pits;
   boost and phase.
 - **Barrel hitboxes**: the barrel is part of the tank. It blocks against

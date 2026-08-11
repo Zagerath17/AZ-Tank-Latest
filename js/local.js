@@ -151,7 +151,29 @@ function renderLocalSettings() {
 //   <tier> — a bot at that difficulty
 // Seat 1 starts as a human so the screen is never empty.
 const SEATS = COLORS;                    // red, green, blue, yellow
-const seat = { red: "human", green: "off", blue: "off", yellow: "off" };
+// The table you set up last time. Sizes and abilities were already
+// remembered; the SEATS were not, so every visit reset you to one human
+// and three empty chairs and you had to rebuild the same line-up of
+// bots before every session.
+const LS_LOCAL_SEATS = "tank.localSeats.v1";
+const SEAT_KINDS = ["off", "human", "easy", "medium", "hard", "impossible"];
+function loadSeats() {
+  const d = { red: "human", green: "off", blue: "off", yellow: "off" };
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(LS_LOCAL_SEATS) || "{}") ?? {}; } catch { saved = {}; }
+  const out = {};
+  for (const k of Object.keys(d)) {
+    out[k] = SEAT_KINDS.includes(saved[k]) ? saved[k] : d[k];
+  }
+  // Seat 1 always belongs to whoever is sitting down: never restore it
+  // as empty or you'd load into a table you can't play at.
+  if (out.red === "off") out.red = "human";
+  return out;
+}
+const seat = loadSeats();
+function saveSeats() {
+  try { localStorage.setItem(LS_LOCAL_SEATS, JSON.stringify(seat)); } catch { /* ignore */ }
+}
 
 // Shop paint and patterns do NOT carry into local play — everyone picks
 // a primary colour here, and no two tanks at the table may share one.
@@ -280,6 +302,7 @@ function render() {
       e.stopPropagation();
       const slot = btn.dataset.seat;
       seat[slot] = SEAT_CYCLE[(SEAT_CYCLE.indexOf(seat[slot]) + 1) % SEAT_CYCLE.length];
+      saveSeats();
       paint[slot] = null;      // fresh coat for the new occupant
       ensureAllPaint();
       render();
@@ -306,6 +329,7 @@ function render() {
 function seatPlayer(slot) {
   if (seat[slot] === "human") return false; // already in
   seat[slot] = "human";
+  saveSeats();
   paint[slot] = null;      // fresh coat for the new occupant
   ensureAllPaint();
   render();

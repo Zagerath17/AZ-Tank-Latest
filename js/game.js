@@ -23,7 +23,7 @@ import { botActions, AI_PARAMS } from "./ai.js";
 import {
   WEAPON_TYPES, BARRELS, LASER, MG, ROCKET, CANNON, SNIPER, BOOST, PHASE, WALL,
   ARMOUR, HEAL, MUD, MORTAR, FLAME, mortarFlightMs, mortarDistAt,
-  laserPath, castRaySlab, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
+  laserPath, castRay, castRaySlab, rocketSeekStep, stepShrap, bounceCircle, bounceSlab, drawBarrel, drawGear,
   WEAPON_CATEGORY, WEAPON_LABEL, GEAR_RIM,
 } from "./weapons.js";
 import { sfx, setEngine, setFlame, startMusic, stopAll } from "./audio.js";
@@ -140,6 +140,9 @@ const NET_EXTRAP_MS = 160;     // max dead-reckoning past the buffer
 const NET_BUF_MAX = 24;        // ~1.8 s of history
 const NET_SNAP_DIST = CELL * 2.5;   // beyond this, catch up aggressively
 const NET_TELEPORT_DIST = CELL * 6; // only THIS is a real discontinuity
+// Never replay more than this much wire time into a projectile: past it
+// the packet is so old that guessing is worse than just showing it.
+const NET_CATCHUP_MAX = 450;
 // Hard ceiling on tanks in one match. Custom lobbies fill up to this;
 // offline and 1v1 use fewer. Must match online.js's MAX_PLAYERS.
 export const MAX_TANKS = 8;
@@ -515,7 +518,14 @@ export function onlineLobbyUpdate(lobby) {
           seen.add(key);
           // A shot from a round that's already over must not spawn now.
           if (sh && sh.r != null && sh.r !== S.roundN) continue;
-          spawnShot(t.id, sh);
+          // How stale is this packet? Fast-forward the projectile by
+          // that much so it appears where the shooter's already is,
+          // rather than a latency behind it.
+          let age = 0;
+          if (typeof sh?.t === "number" && S.netClock) {
+            age = Math.max(0, Math.min(NET_CATCHUP_MAX, S.netClock() - sh.t));
+          }
+          spawnShot(t.id, sh, performance.now(), age);
         }
       }
     }
@@ -549,6 +559,7 @@ export function onlineLobbyUpdate(lobby) {
         if (!victim.dead && !victim.gone) {
           victim.lastHitAt = performance.now();
           damageTank(victim, h.d ?? 1, h.by ?? t.id);
+          absorbShot(victim, h.by ?? t.id);
         }
       }
     }
@@ -562,6 +573,7 @@ export function onlineLobbyUpdate(lobby) {
         if (!t.dead && !t.gone) {
           t.lastHitAt = performance.now();
           damageTank(t, h.d ?? 1, h.by ?? null);
+          absorbShot(t, h.by ?? null);
         }
       }
     }
@@ -1765,7 +1777,18 @@ function sendTypedShot(t, payload, now) {
   (S.seenShots[t.id] ??= new Set()).add(key);
   // Stamp the round, so a peer never spawns last round's shots into the
   // new one (packets outlive a round on the wire).
-  S.sendShot?.(t.id, key, { ...payload, r: S.roundN ?? 0 });
+  // Stamp the shot on the SHARED clock. Without this a peer had no way
+  // to know how old a packet was, so it spawned the round at the muzzle
+  // the moment it arrived — one latency behind where the shooter's round
+  // already was. At 420 px/s even 100 ms of lag puts it most of a tank
+  // length out, and every wall bounce multiplies the gap. This is the
+  // single biggest cause of rounds appearing in different places on
+  // different screens.
+  S.sendShot?.(t.id, key, {
+    ...payload,
+    r: S.roundN ?? 0,
+    t: Math.floor(S.netClock ? S.netClock() : Date.now()),
+  });
 }
 
 function clearWeapon(t, now) {
@@ -2125,7 +2148,11 @@ function fireAgility(t, now) {
 }
 
 // Online receive: one dispatcher for every shot type.
-function spawnShot(byId, sh, now = performance.now()) {
+function spawnShot(byId, sh, now = performance.now(), ageMs = 0) {
+  // Anything that flies is rewound to when it was actually fired and
+  // then replayed forward, so it lands where the shooter has it.
+  const before = S.bullets.length;
+  const beforeC = S.cannons.length;
   switch (sh.w) {
     case "snipe": spawnSnipe(byId, sh.x, sh.y, sh.a, now); break;
     case "boost": {
@@ -2174,12 +2201,45 @@ function spawnShot(byId, sh, now = performance.now()) {
       }
       break;
     }
-    case "mini": spawnBullet(byId, sh.x, sh.y, sh.a, now, true); break;
+    case "mini": spawnBullet(byId, sh.x, sh.y, sh.a, now - ageMs, true); break;
     case "laser": fireLaser(byId, sh.x, sh.y, sh.a, now); break;
     case "rocket": spawnRocket(byId, sh.x, sh.y, sh.a, now); break;
     case "cannon": spawnCannon(byId, sh.x, sh.y, sh.a, now); break;
-    default: spawnBullet(byId, sh.x, sh.y, sh.a, now);
+    default: spawnBullet(byId, sh.x, sh.y, sh.a, now - ageMs);
   }
+  if (ageMs > 4) {
+    for (let i = before; i < S.bullets.length; i++) catchUpBullet(S.bullets[i], ageMs, now);
+    for (let i = beforeC; i < S.cannons.length; i++) catchUpBallistic(S.cannons[i], ageMs);
+  }
+}
+
+// Replay a just-spawned projectile forward through the time its packet
+// spent on the wire, using the SAME substepping and wall bounces the
+// live simulation uses — so a round that has already ricocheted arrives
+// mid-ricochet rather than starting fresh at the muzzle. No tank hits
+// are tested during catch-up: hits are shooter-authoritative, and
+// re-resolving them here would double-count the damage.
+function catchUpBullet(b, ageMs, now) {
+  let left = ageMs / 1000;
+  const speed = Math.hypot(b.vx, b.vy) || 1;
+  while (left > 0) {
+    const dt = Math.min(left, 5 / speed);   // ≤5px per step, as stepBullets does
+    left -= dt;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    if (hitWall(b.x, b.y, b.r ?? BULLET_R, b.mini ? "mg" : "basic", now)) { b.dead = true; break; }
+    bounceCircle(b, S.rects, b.r ?? BULLET_R);
+    bounceSlab(b, S.diag, b.r ?? BULLET_R);
+  }
+  if (b.dead) S.bullets = S.bullets.filter((x) => x !== b);
+}
+
+// Cannon balls travel straight and slowly; the same idea, cheaper.
+function catchUpBallistic(c, ageMs) {
+  if (!c) return;
+  const sec = ageMs / 1000;
+  c.x += (c.vx ?? 0) * sec;
+  c.y += (c.vy ?? 0) * sec;
 }
 
 function spawnBullet(byId, x, y, a, now = performance.now(), mini = false) {
@@ -2223,6 +2283,16 @@ function stepBullets(now, dt) {
         // Fresh shots can't clip their own barrel on the way out —
         // but the window is short, so point-blank wall bounces bite.
         if (t.id === b.by && now - b.born < 75) continue;
+        // A round the shooter has already resolved against us: swallow
+        // it near the hull rather than letting it fly on having
+        // "missed" something it has already been paid for.
+        if (t.local && b.by !== t.id &&
+            (t.x - b.x) ** 2 + (t.y - b.y) ** 2 < (TANK_RAD * 2.4) ** 2 &&
+            absorbedBy(t, b, now)) {
+          alive = false;
+          addFade(b.x, b.y, b.r ?? BULLET_R, now);
+          break;
+        }
         if (tankHitPoint(t, b.x, b.y, b.r ?? BULLET_R)) {
           alive = false;
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
@@ -3014,6 +3084,40 @@ function stepShrapnel(now, dt) {
 // A projectile connected with a tank. The FLASH, SPARKS, and SOUND
 // play on EVERY client (each simulates the collision locally); the
 // actual damage is applied only by the tank's authoritative client.
+// GHOST ROUNDS.
+//
+// Hits are shooter-authoritative: their client decides a round
+// connected, deletes it on their screen, and tells us. But OUR copy of
+// that round is at a slightly different place — everyone else's tank is
+// interpolated a frame or two behind — so on our screen it sails past
+// and keeps going. The player sees health drop, sparks fly, and the
+// bullet carry on as though nothing happened, which reads as the game
+// cheating.
+//
+// So when inbound damage lands, arm a short absorption: the next round
+// from that shooter to come near this tank is quietly consumed and
+// shown bursting on the hull. The window covers a round that has
+// already gone past as well as one that hasn't arrived yet, and it
+// deals no further damage — the damage is already applied.
+function absorbShot(victim, byId) {
+  if (!victim || S.mode === "local") return;
+  (victim.absorb ??= []).push({ by: byId ?? null, until: performance.now() + 400 });
+}
+
+// Take the pending absorption if this projectile matches one.
+function absorbedBy(t, b, now) {
+  const list = t.absorb;
+  if (!list || !list.length) return false;
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    if (now > a.until) { list.splice(i--, 1); continue; }
+    if (a.by && b.by && a.by !== b.by) continue;
+    list.splice(i, 1);
+    return true;
+  }
+  return false;
+}
+
 function applyHit(t, amount, byId, now = performance.now(), kind = "bullet") {
   t.lastHitAt = now;           // red damage flash (drawTank)
   addHitSparks(t.x, t.y, now); // metal sparks at the hull
@@ -3535,10 +3639,49 @@ function separate(a, b) {
 // cone if, in the turret frame, it sits between the nozzle and the
 // reach, within a half-width that grows linearly from skinny to a full
 // tank radius at the tip (plus the target's own radius).
+// How far the stream gets before something solid stops it. Fire does
+// not go through brickwork: the cone is cut short at the first wall,
+// and the same figure drives BOTH the damage test and the drawing, so
+// what you see burning is exactly what burns.
+//
+// Three casts across the width of the cone rather than one down the
+// middle, because a stream is wide at the tip — a single centre ray
+// would let the edges of the flame lick through a wall corner the
+// middle happens to miss.
+function flameReach(t) {
+  const aim = t.turret ?? t.a;
+  const full = FLAME.reachCells * CELL;
+  const nozzle = BARRELS.flame.len * TANK_R * 0.5;
+  const ox = t.x + Math.cos(aim) * nozzle;
+  const oy = t.y + Math.sin(aim) * nozzle;
+  const span = full - nozzle;
+  if (span <= 0) return 0;
+  let shortest = span;
+  for (const off of [-0.5, 0, 0.5]) {
+    const a2 = aim + off * 0.34;                 // spread across the cone
+    const dx = Math.cos(a2), dy = Math.sin(a2);
+    let r = castRay(ox, oy, dx, dy, S.rects, span);
+    for (const slab of S.diag ?? []) {
+      const s2 = castRaySlab(ox, oy, dx, dy, slab, r.hit ? r.d : span);
+      if (s2 && s2.d < (r.hit ? r.d : span)) r = s2;
+    }
+    // Player-built brick walls stop it too.
+    for (const w of S.walls ?? []) {
+      const s3 = castRaySlab(ox, oy, dx, dy,
+        { x: w.x, y: w.y, a: w.a, hx: w.hx, hy: w.hy }, r.hit ? r.d : span);
+      if (s3 && s3.d < (r.hit ? r.d : span)) r = s3;
+    }
+    if (r.hit && r.d < shortest) shortest = r.d;
+  }
+  return Math.max(0, shortest);
+}
+
 function tankInFlameCone(t, o) {
   const aim = t.turret ?? t.a;
-  const reach = FLAME.reachCells * CELL;
   const nozzle = BARRELS.flame.len * TANK_R * 0.5; // stream starts just off the muzzle
+  // Only as far as the fire actually gets — a wall between us means no
+  // damage, however close the target looks on the compass.
+  const reach = nozzle + flameReach(t);
   const dx = o.x - t.x, dy = o.y - t.y;
   const c = Math.cos(aim), s = Math.sin(aim);
   const lx = dx * c + dy * s;   // along the stream
@@ -3668,7 +3811,10 @@ function drawFlameStream(t, now) {
   const fade = t.flameOn
     ? 1
     : Math.max(0, Math.min(1, 1 - (now - (t.flameOffAt ?? 0)) / FLAME_FADE_MS));
-  const len = (reach - nozzle) * grow * fade;
+  // Clamp to whatever the stream can actually reach: the animation
+  // stops dead at a wall instead of painting fire on the far side of
+  // it. Same figure the damage test uses, so they can never disagree.
+  const len = Math.min((reach - nozzle) * grow, flameReach(t)) * fade;
   if (len <= 1) return;
 
   const tipHalf = TANK_R * 1.05;
@@ -5326,35 +5472,53 @@ function drawPattern(id, col, R, now, seedId, hexOverride, ang = 0) {
   ctx.strokeStyle = paint;
   const W = R * 1.8, H = R * 1.16;
   const L = -R * 0.9, T = -R * 0.58;
+  // Patterns must cover the WHOLE tank, not just the hull rectangle.
+  // This same routine paints the barrel as well, and clipping a pattern
+  // to the hull box left the outer half of the barrel bare — a plain
+  // stripe down the gun that catches the eye every time the tank turns.
+  // The caller has already clipped to whichever piece it is painting,
+  // so covering the entire footprint is both correct and simpler.
+  const CL = -R * 1.35, CT = -R * 1.35, CW = R * 2.7, CH = R * 2.7;
 
   if (id === "twoTone") {
     // Clean split: the rear half of the hull in the second colour.
     ctx.fillRect(L, T, W * 0.5, H);
 
   } else if (id === "splotchy") {
-    // A scatter of soft round blobs.
+    // Organic blotches: several overlapping lobed shapes rather than
+    // plain circles, so it reads as spilled paint instead of polka dots.
     const rng = patRng(seedId + "splotch");
-    for (let i = 0; i < 7; i++) {
-      const bx = L + rng() * W;
-      const by = T + rng() * H;
-      const br = R * (0.16 + rng() * 0.22);
+    for (let i = 0; i < 20; i++) {
+      const bx = CL + rng() * CW, by = CT + rng() * CH;
+      const br = R * (0.13 + rng() * 0.18);
       ctx.beginPath();
-      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      const lobes = 9;
+      for (let k = 0; k <= lobes; k++) {
+        const a2 = (k / lobes) * Math.PI * 2;
+        const rad = br * (0.7 + rng() * 0.6);
+        const px = bx + Math.cos(a2) * rad, py = by + Math.sin(a2) * rad;
+        if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
       ctx.fill();
     }
 
   } else if (id === "camo") {
-    // Classic camo: a few large organic patches (overlapping blobs).
+    // Proper woodland camo: big irregular interlocking patches with
+    // ragged edges, dense enough to actually break up the silhouette.
+    // The old version dropped three lonely blobs on a bare hull, which
+    // is not camouflage — it is spots.
     const rng = patRng(seedId + "camo");
-    for (let i = 0; i < 5; i++) {
-      const cx = L + rng() * W, cy = T + rng() * H;
+    for (let i = 0; i < 22; i++) {
+      const bx = CL + rng() * CW, by = CT + rng() * CH;
+      const rx = R * (0.20 + rng() * 0.30), ry = R * (0.16 + rng() * 0.26);
       ctx.beginPath();
-      const lobes = 5 + Math.floor(rng() * 3);
-      for (let k = 0; k <= lobes; k++) {
-        const ang = (k / lobes) * Math.PI * 2;
-        const rad = R * (0.2 + rng() * 0.22);
-        const px = cx + Math.cos(ang) * rad;
-        const py = cy + Math.sin(ang) * rad * 0.8;
+      const n = 10;
+      for (let k = 0; k <= n; k++) {
+        const a2 = (k / n) * Math.PI * 2;
+        const j = 0.62 + rng() * 0.72;                 // ragged edge
+        const px = bx + Math.cos(a2) * rx * j;
+        const py = by + Math.sin(a2) * ry * j;
         if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
       ctx.closePath();
@@ -5362,62 +5526,61 @@ function drawPattern(id, col, R, now, seedId, hexOverride, ang = 0) {
     }
 
   } else if (id === "modernCamo") {
-    // Digital/pixel camo: a grid of randomly-filled cells.
-    const rng = patRng(seedId + "modern");
-    const cols = 7, rows = 5;
-    const cw = W / cols, ch = H / rows;
-    for (let r = 0; r < rows; r++) {
+    // Digital camo: a pixel grid, filled in clusters so the blocks form
+    // connected shapes rather than random confetti.
+    const rng = patRng(seedId + "digi");
+    const px2 = R * 0.20;
+    const cols = Math.ceil(CW / px2), rows = Math.ceil(CH / px2);
+    const grid = new Uint8Array(cols * rows);
+    for (let s2 = 0; s2 < 34; s2++) {
+      let c = Math.floor(rng() * cols), r2 = Math.floor(rng() * rows);
+      const runLen = 4 + Math.floor(rng() * 9);
+      for (let k = 0; k < runLen; k++) {                // a random walk
+        if (c >= 0 && c < cols && r2 >= 0 && r2 < rows) grid[r2 * cols + c] = 1;
+        if (rng() < 0.5) c += rng() < 0.5 ? 1 : -1; else r2 += rng() < 0.5 ? 1 : -1;
+      }
+    }
+    for (let r2 = 0; r2 < rows; r2++) {
       for (let c = 0; c < cols; c++) {
-        if (rng() < 0.4) ctx.fillRect(L + c * cw, T + r * ch, cw + 0.5, ch + 0.5);
+        if (grid[r2 * cols + c]) ctx.fillRect(CL + c * px2, CT + r2 * px2, px2 + 0.5, px2 + 0.5);
       }
     }
 
   } else if (id === "lightning") {
-    // A proper lightning bolt: one bold jagged spine running across the
-    // hull with a couple of forked branches, drawn with a soft outer
-    // glow under a bright core. The jag is DETERMINISTIC (seeded once)
-    // so it doesn't stutter; a gentle sine only breathes the glow.
-    const rng = patRng(seedId + "bolt2");
-    // Build the main bolt path as a list of points, left → right.
-    const pts = [];
-    const segs = 7;
-    let y = T + H * (0.35 + 0.3 * rng());
-    for (let s = 0; s <= segs; s++) {
-      const x = L + (W * s) / segs;
-      pts.push([x, y]);
-      // step the zig with a bounded random walk, kept inside the hull
-      y += (rng() - 0.5) * H * 0.7;
-      y = Math.max(T + H * 0.12, Math.min(T + H * 0.88, y));
-    }
-    // Forks: short branches peeling off a couple of interior nodes.
-    const forks = [];
-    for (let s = 2; s < segs - 1; s++) {
-      if (rng() < 0.5) {
-        const [bx, by] = pts[s];
-        const fx = bx + W * (0.10 + rng() * 0.12);
-        const fy = by + (rng() < 0.5 ? -1 : 1) * H * (0.18 + rng() * 0.16);
-        forks.push([[bx, by], [fx, Math.max(T + H * 0.06, Math.min(T + H * 0.94, fy))]]);
+    // A forked bolt: a jagged main channel with shorter branches, drawn
+    // in the CHOSEN colour (the old one washed out to near-white, which
+    // is why it looked grey whatever you picked). It flickers, which is
+    // most of why it costs what it does.
+    const rng = patRng(seedId + "bolt");
+    const flick = 0.72 + 0.28 * Math.abs(Math.sin(now / 90));
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const bolt = (x0, y0, x1, y1, w2, depth) => {
+      const segs = 6;
+      const pts = [];
+      for (let i = 0; i <= segs; i++) {
+        const u = i / segs;
+        const jx = (i === 0 || i === segs) ? 0 : (rng() - 0.5) * R * 0.38;
+        const jy = (i === 0 || i === segs) ? 0 : (rng() - 0.5) * R * 0.30;
+        pts.push([x0 + (x1 - x0) * u + jx, y0 + (y1 - y0) * u + jy]);
       }
-    }
-    const drawBolt = (w, alpha) => {
-      ctx.globalAlpha = alpha;
-      ctx.lineWidth = w;
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
+      ctx.globalAlpha = flick;
+      ctx.lineWidth = w2;
       ctx.beginPath();
-      ctx.moveTo(pts[0][0], pts[0][1]);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-      for (const [a, b] of forks) { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+      pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
       ctx.stroke();
+      if (depth > 0) {
+        for (let b = 0; b < 2; b++) {
+          const at = pts[1 + Math.floor(rng() * (pts.length - 2))];
+          bolt(at[0], at[1],
+               at[0] + (rng() - 0.5) * R * 1.1, at[1] + (rng() - 0.5) * R * 1.1,
+               w2 * 0.5, depth - 1);
+        }
+      }
+      ctx.globalAlpha = 1;
     };
-    const breathe = 0.75 + 0.25 * Math.sin(now / 380); // slow, smooth
-    // Outer glow (soft, wide, the second colour), then a bright white core.
-    ctx.strokeStyle = paint;
-    drawBolt(Math.max(4, R * 0.34), 0.30 * breathe);
-    drawBolt(Math.max(2.5, R * 0.18), 0.65 * breathe);
-    ctx.strokeStyle = "#ffffff";
-    drawBolt(Math.max(1.2, R * 0.07), 0.9 * breathe);
-    ctx.globalAlpha = 1;
+    bolt(CL + R * 0.15, CT + R * 0.2, CL + CW - R * 0.15, CT + CH - R * 0.2, R * 0.13, 1);
+    bolt(CL + R * 0.2, CT + CH - R * 0.25, CL + CW - R * 0.2, CT + R * 0.25, R * 0.10, 1);
 
   } else if (id === "stripes") {
     // Racing stripes: two bold diagonal bands sweeping across the hull.
@@ -5466,84 +5629,75 @@ function drawPattern(id, col, R, now, seedId, hexOverride, ang = 0) {
     ctx.restore();
 
   } else if (id === "flames") {
-    // Flame licks reaching forward from the rear of the hull.
+    // Hot-rod flames: licks streaming BACK from the nose, each a long
+    // tapering tongue with a curled tip. The old one filled the rear of
+    // the hull with a single jagged mass, which read as damage rather
+    // than as fire.
     const rng = patRng(seedId + "flame");
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(L, T, W, H);
-    ctx.clip();
-    ctx.fillStyle = paint;
-    const tongues = 5;
-    for (let i = 0; i < tongues; i++) {
-      const y0 = T + H * ((i + 0.5) / tongues);
-      const reach = W * (0.35 + rng() * 0.4);        // how far forward
-      const hh = H * (0.10 + rng() * 0.06);          // tongue half-height
+    for (let i = 0; i < 7; i++) {
+      const y0 = CT + CH * (0.08 + (i / 6) * 0.84) + (rng() - 0.5) * R * 0.1;
+      const len = R * (0.75 + rng() * 1.15);
+      const thick = R * (0.10 + rng() * 0.13);
+      const x0 = R * 1.15;                       // start at the nose
+      const curl = (rng() - 0.5) * R * 0.5;
       ctx.beginPath();
-      ctx.moveTo(L, y0 - hh);
-      // wavy upper edge to a point, then back — a licking flame
-      ctx.quadraticCurveTo(L + reach * 0.5, y0 - hh * 2.2, L + reach, y0);
-      ctx.quadraticCurveTo(L + reach * 0.5, y0 + hh * 2.2, L, y0 + hh);
+      ctx.moveTo(x0, y0 - thick);
+      ctx.quadraticCurveTo(x0 - len * 0.45, y0 - thick * 1.5,
+                           x0 - len, y0 + curl);
+      ctx.quadraticCurveTo(x0 - len * 0.4, y0 + thick * 1.4, x0, y0 + thick);
       ctx.closePath();
       ctx.fill();
     }
-    ctx.restore();
 
   } else if (id === "circuit") {
-    // Circuit board: right-angle traces with solder nodes.
+    // A board trace layout: rails running the length of the hull with
+    // right-angled branches off them, junction pads where they meet and
+    // vias dotted along. Previously a handful of stray lines floating in
+    // space, which looked unfinished rather than technical.
     const rng = patRng(seedId + "circ");
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(L, T, W, H);
-    ctx.clip();
-    ctx.strokeStyle = paint;
-    ctx.fillStyle = paint;
-    ctx.lineWidth = Math.max(1, R * 0.05);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    const lines = 6;
-    for (let i = 0; i < lines; i++) {
-      let x = L + rng() * W, y = T + rng() * H;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      const legs = 2 + Math.floor(rng() * 3);
-      for (let k = 0; k < legs; k++) {
-        if (rng() < 0.5) x += (rng() - 0.5) * W * 0.5;
-        else y += (rng() - 0.5) * H * 0.6;
-        x = Math.max(L, Math.min(L + W, x));
-        y = Math.max(T, Math.min(T + H, y));
-        ctx.lineTo(x, y);
+    ctx.lineWidth = Math.max(1, R * 0.055);
+    ctx.lineCap = "square";
+    const rails = 4;
+    for (let i = 0; i < rails; i++) {
+      const y = CT + CH * ((i + 0.6) / (rails + 0.2));
+      ctx.beginPath(); ctx.moveTo(CL + R * 0.1, y); ctx.lineTo(CL + CW - R * 0.1, y); ctx.stroke();
+      const branches = 2 + Math.floor(rng() * 3);
+      for (let b = 0; b < branches; b++) {
+        const x = CL + R * 0.25 + rng() * (CW - R * 0.5);
+        const dy = (rng() < 0.5 ? -1 : 1) * R * (0.16 + rng() * 0.24);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + dy);
+        ctx.lineTo(x + (rng() < 0.5 ? -1 : 1) * R * (0.12 + rng() * 0.2), y + dy);
+        ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, y, R * 0.055, 0, Math.PI * 2); ctx.fill();
       }
-      ctx.stroke();
-      // solder node at the end
-      ctx.beginPath();
-      ctx.arc(x, y, R * 0.06, 0, Math.PI * 2);
-      ctx.fill();
     }
-    ctx.restore();
+    for (let v = 0; v < 9; v++) {
+      const x = CL + rng() * CW, y = CT + rng() * CH;
+      ctx.beginPath(); ctx.arc(x, y, R * 0.045, 0, Math.PI * 2); ctx.fill();
+    }
 
   } else if (id === "tiger") {
-    // Tiger stripes: tapered vertical claw-marks down the flanks.
+    // Real tiger striping: tapered bars running ACROSS the hull, each
+    // pinched to a point at one end and some of them forked. Straight
+    // even bands were just Racing Stripes wearing a different hat.
     const rng = patRng(seedId + "tiger");
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(L, T, W, H);
-    ctx.clip();
-    ctx.fillStyle = paint;
-    const stripes = 7;
-    for (let i = 0; i < stripes; i++) {
-      const x = L + W * ((i + 0.5) / stripes) + (rng() - 0.5) * W * 0.06;
-      const topW = R * (0.05 + rng() * 0.05);
-      const botW = R * (0.02 + rng() * 0.03);
-      const bend = (rng() - 0.5) * R * 0.5;
+    const stripe = (yc, w2, lean, len, flip) => {
       ctx.beginPath();
-      ctx.moveTo(x - topW, T);
-      ctx.quadraticCurveTo(x + bend - botW, T + H * 0.5, x - botW, T + H);
-      ctx.lineTo(x + botW, T + H);
-      ctx.quadraticCurveTo(x + bend + botW, T + H * 0.5, x + topW, T);
+      ctx.moveTo(-len * flip, yc - w2);
+      ctx.quadraticCurveTo(lean * 0.3, yc - w2 * 1.25, len * flip, yc - w2 * 0.12);
+      ctx.quadraticCurveTo(lean * 0.3, yc + w2 * 1.25, -len * flip, yc + w2);
       ctx.closePath();
       ctx.fill();
+    };
+    for (let i = 0; i < 11; i++) {
+      const yc = CT + CH * ((i + 0.5) / 11) + (rng() - 0.5) * R * 0.08;
+      const w2 = R * (0.055 + rng() * 0.075);
+      const len = R * (0.55 + rng() * 0.75);
+      stripe(yc, w2, (rng() - 0.5) * R, len, i % 2 ? 1 : -1);
+      if (rng() < 0.30) stripe(yc + w2 * 2.4, w2 * 0.55, 0, len * 0.55, i % 2 ? 1 : -1);
     }
-    ctx.restore();
 
   } else if (id === "galaxy") {
     // GALAXY (the flashy Diamond one): a deep nebula wash in the second
@@ -5613,141 +5767,127 @@ function drawPattern(id, col, R, now, seedId, hexOverride, ang = 0) {
     }
 
   } else if (id === "hazard") {
-    // Industrial caution barring: heavy diagonals with a clean band top
-    // and bottom, so it reads as machinery rather than as racing.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    // Industrial caution barring: heavy diagonals with a clean band at
+    // each end. No clip — the bars run the full length of the barrel too.
     const step = R * 0.42;
-    for (let x = L - H; x < L + W + H; x += step * 2) {
+    for (let x = CL - CH; x < CL + CW + CH; x += step * 2) {
       ctx.beginPath();
-      ctx.moveTo(x, T); ctx.lineTo(x + step, T);
-      ctx.lineTo(x + step + H, T + H); ctx.lineTo(x + H, T + H);
+      ctx.moveTo(x, CT); ctx.lineTo(x + step, CT);
+      ctx.lineTo(x + step + CH, CT + CH); ctx.lineTo(x + CH, CT + CH);
       ctx.closePath(); ctx.fill();
     }
-    ctx.fillRect(L, T, W, H * 0.14);
-    ctx.fillRect(L, T + H * 0.86, W, H * 0.14);
-    ctx.restore();
+    ctx.fillRect(CL, T, CW, H * 0.14);
+    ctx.fillRect(CL, T + H * 0.86, CW, H * 0.14);
 
   } else if (id === "chevron") {
-    // Nested arrowheads pointing down the barrel — directional, so the
-    // tank reads as aimed even when it's sitting still.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    // Nested arrowheads pointing down the barrel, so the tank reads as
+    // aimed even standing still.
     ctx.lineWidth = R * 0.15;
     ctx.lineJoin = "miter";
-    for (let i = 0; i < 5; i++) {
-      const x = L + W * 0.08 + i * R * 0.36;
+    for (let i = 0; i < 8; i++) {
+      const x = CL + R * 0.1 + i * R * 0.34;
       ctx.beginPath();
-      ctx.moveTo(x, T + H * 0.06);
-      ctx.lineTo(x + R * 0.30, T + H * 0.5);
-      ctx.lineTo(x, T + H * 0.94);
+      ctx.moveTo(x, CT + CH * 0.08);
+      ctx.lineTo(x + R * 0.30, CT + CH * 0.5);
+      ctx.lineTo(x, CT + CH * 0.92);
       ctx.stroke();
     }
-    ctx.restore();
 
   } else if (id === "plaid") {
-    // Woven tartan: bands both ways, and where they cross the overlap
-    // doubles up — which is what makes real cloth read as woven rather
-    // than as a grid drawn on top.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
-    ctx.globalAlpha = 0.55;
-    for (let i = 0; i < 5; i++) {
-      const x = L + (i + 0.5) * (W / 5);
-      ctx.fillRect(x - R * 0.13, T, R * 0.26, H);
-      ctx.fillRect(x - R * 0.30, T, R * 0.05, H);
+    // Woven tartan: bands both ways with a thin companion line, and the
+    // crossings doubling up the way real cloth does.
+    ctx.globalAlpha = 0.5;
+    for (let i = 0; i < 7; i++) {
+      const x = CL + (i + 0.5) * (CW / 7);
+      ctx.fillRect(x - R * 0.13, CT, R * 0.26, CH);
+      ctx.fillRect(x - R * 0.30, CT, R * 0.05, CH);
     }
-    for (let i = 0; i < 3; i++) {
-      const y = T + (i + 0.5) * (H / 3);
-      ctx.fillRect(L, y - R * 0.13, W, R * 0.26);
-      ctx.fillRect(L, y - R * 0.30, W, R * 0.05);
+    for (let i = 0; i < 7; i++) {
+      const y = CT + (i + 0.5) * (CH / 7);
+      ctx.fillRect(CL, y - R * 0.13, CW, R * 0.26);
+      ctx.fillRect(CL, y - R * 0.30, CW, R * 0.05);
     }
     ctx.globalAlpha = 1;
-    ctx.restore();
 
   } else if (id === "splatter") {
-    // Thrown paint: a few hard-edged blots, each with a short tail of
-    // droplets flung off it. Deliberately sharp, so it never gets
-    // confused with the soft blobs of Splotchy.
+    // Thrown paint: hard-edged blots with droplet trails flung off them.
     const rng = patRng(seedId + "splat");
-    for (let i = 0; i < 5; i++) {
-      const bx = L + rng() * W, by = T + rng() * H;
-      const br = R * (0.12 + rng() * 0.16);
+    for (let i = 0; i < 15; i++) {
+      const bx = CL + rng() * CW, by = CT + rng() * CH;
+      const br = R * (0.10 + rng() * 0.14);
       ctx.beginPath();
-      const lobes = 8;
+      const lobes = 9;
       for (let k = 0; k <= lobes; k++) {
         const a2 = (k / lobes) * Math.PI * 2;
-        const rad = br * (0.65 + rng() * 0.7);
+        const rad = br * (0.6 + rng() * 0.8);
         const px = bx + Math.cos(a2) * rad, py = by + Math.sin(a2) * rad;
         if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
       ctx.closePath(); ctx.fill();
       const dir = rng() * Math.PI * 2;
-      for (let d = 1; d <= 4; d++) {
-        const dd = br * (1.3 + d * 0.75);
+      for (let d = 1; d <= 5; d++) {
+        const dd = br * (1.25 + d * 0.62);
         ctx.beginPath();
         ctx.arc(bx + Math.cos(dir) * dd, by + Math.sin(dir) * dd,
-                br * (0.30 - d * 0.05), 0, Math.PI * 2);
+                Math.max(0.6, br * (0.32 - d * 0.05)), 0, Math.PI * 2);
         ctx.fill();
       }
     }
 
   } else if (id === "carbon") {
-    // Carbon-fibre twill: pairs of tows crossing over and under in a
-    // 2×2 basket. The alternating direction per cell is the weave.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
-    const cell = R * 0.30;
-    for (let y = T; y < T + H; y += cell) {
-      for (let x = L; x < L + W; x += cell) {
-        const gx = Math.round((x - L) / cell), gy = Math.round((y - T) / cell);
-        if ((gx + gy) % 2) continue;
-        ctx.globalAlpha = 0.75;
-        ctx.fillRect(x, y, cell * 0.94, cell * 0.44);
-        ctx.globalAlpha = 0.45;
-        ctx.fillRect(x, y + cell * 0.5, cell * 0.44, cell * 0.44);
+    // Carbon twill: a proper 2×2 basket weave. Every cell is filled —
+    // each holds a pair of tows, and the pair alternates direction from
+    // cell to cell, which is what makes a weave look woven. The old
+    // version skipped every other cell and left bare gaps.
+    const cell2 = R * 0.26;
+    const cols2 = Math.ceil(CW / cell2), rows2 = Math.ceil(CH / cell2);
+    for (let r2 = 0; r2 < rows2; r2++) {
+      for (let c = 0; c < cols2; c++) {
+        const x = CL + c * cell2, y = CT + r2 * cell2;
+        const flip = (c + r2) % 2 === 0;
+        ctx.globalAlpha = flip ? 0.85 : 0.5;
+        if (flip) {
+          ctx.fillRect(x, y, cell2 * 0.96, cell2 * 0.46);
+          ctx.fillRect(x, y + cell2 * 0.5, cell2 * 0.96, cell2 * 0.46);
+        } else {
+          ctx.fillRect(x, y, cell2 * 0.46, cell2 * 0.96);
+          ctx.fillRect(x + cell2 * 0.5, y, cell2 * 0.46, cell2 * 0.96);
+        }
       }
     }
     ctx.globalAlpha = 1;
-    ctx.restore();
 
   } else if (id === "scales") {
-    // Overlapping reptile scales: rounded, layered front-to-back and
-    // offset row to row, so each row tucks under the one ahead.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
-    const sw = R * 0.36, sh = R * 0.30;
+    // Overlapping reptile scales, offset row to row so each tucks under
+    // the one ahead.
+    const sw = R * 0.34, sh = R * 0.28;
     let row = 0;
-    for (let y = T - sh; y < T + H + sh; y += sh * 0.62, row++) {
+    for (let y = CT - sh; y < CT + CH + sh; y += sh * 0.6, row++) {
       const off = (row % 2) * sw * 0.5;
-      for (let x = L - sw; x < L + W + sw; x += sw) {
+      for (let x = CL - sw; x < CL + CW + sw; x += sw) {
         ctx.beginPath();
         ctx.moveTo(x + off, y);
         ctx.quadraticCurveTo(x + off + sw * 0.5, y + sh * 1.35, x + off + sw, y);
         ctx.closePath();
-        ctx.globalAlpha = 0.42 + (row % 2) * 0.2;
+        ctx.globalAlpha = 0.4 + (row % 2) * 0.22;
         ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
-    ctx.restore();
 
   } else if (id === "topo") {
-    // Survey-map contour lines: nested rings around a couple of peaks,
-    // each ring a fixed height step. Thin, technical, unmistakable.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    // Survey contours: nested rings around a couple of peaks, each ring
+    // a fixed height step.
     ctx.lineWidth = Math.max(0.8, R * 0.045);
-    const rng = patRng(seedId + "topo");
     const peaks = [
-      { x: L + W * 0.30, y: T + H * 0.42 },
-      { x: L + W * 0.72, y: T + H * 0.60 },
+      { x: CL + CW * 0.32, y: CT + CH * 0.40 },
+      { x: CL + CW * 0.70, y: CT + CH * 0.62 },
     ];
     for (const pk of peaks) {
-      for (let k = 1; k <= 7; k++) {
+      for (let k = 1; k <= 9; k++) {
         const rad = k * R * 0.17;
         ctx.beginPath();
-        const steps = 22;
+        const steps = 24;
         for (let i2 = 0; i2 <= steps; i2++) {
           const a2 = (i2 / steps) * Math.PI * 2;
           const wob = 1 + Math.sin(a2 * 3 + k) * 0.13 + Math.sin(a2 * 5 - k * 2) * 0.07;
@@ -5759,29 +5899,24 @@ function drawPattern(id, col, R, now, seedId, hexOverride, ang = 0) {
         ctx.stroke();
       }
     }
-    rng();
-    ctx.restore();
 
   } else if (id === "shatter") {
-    // Cracked glass: shards radiating from an impact point, with the
-    // fracture lines drawn over them. Angular and irregular — the
-    // opposite of every soft pattern in the list.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
+    // Cracked glass: shards radiating from an impact point with the
+    // fracture lines drawn over them.
     const rng = patRng(seedId + "shatter");
-    const hx2 = L + W * 0.42, hy2 = T + H * 0.5;
-    const n = 11;
+    const hx2 = 0, hy2 = 0;
+    const n = 13;
     const rad = [];
-    for (let i = 0; i <= n; i++) rad.push(R * (0.8 + rng() * 1.5));
+    for (let i = 0; i <= n; i++) rad.push(R * (0.9 + rng() * 1.7));
     for (let i = 0; i < n; i++) {
+      if (i % 2) continue;
       const a0 = (i / n) * Math.PI * 2, a1 = ((i + 1) / n) * Math.PI * 2;
-      if (i % 2) continue;                       // alternate shards filled
       ctx.beginPath();
       ctx.moveTo(hx2, hy2);
       ctx.lineTo(hx2 + Math.cos(a0) * rad[i], hy2 + Math.sin(a0) * rad[i]);
       ctx.lineTo(hx2 + Math.cos(a1) * rad[i + 1], hy2 + Math.sin(a1) * rad[i + 1]);
       ctx.closePath();
-      ctx.globalAlpha = 0.55;
+      ctx.globalAlpha = 0.5;
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -5793,52 +5928,64 @@ function drawPattern(id, col, R, now, seedId, hexOverride, ang = 0) {
       ctx.lineTo(hx2 + Math.cos(a0) * rad[i], hy2 + Math.sin(a0) * rad[i]);
       ctx.stroke();
     }
-    for (let ring = 1; ring <= 2; ring++) {
+    for (let ring = 1; ring <= 3; ring++) {
       ctx.beginPath();
       for (let i = 0; i <= n; i++) {
-        const a0 = (i % n / n) * Math.PI * 2;
-        const rr2 = rad[i % n] * (ring === 1 ? 0.42 : 0.74);
+        const a0 = ((i % n) / n) * Math.PI * 2;
+        const rr2 = rad[i % n] * (0.3 + ring * 0.24);
         const px = hx2 + Math.cos(a0) * rr2, py = hy2 + Math.sin(a0) * rr2;
         if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
       ctx.closePath(); ctx.stroke();
     }
-    ctx.restore();
 
   } else if (id === "aurora") {
-    // Ribbons of light: several curtains sweeping across the hull, each
-    // fading out at its top and bottom edge. The most involved of the
-    // set, and the most expensive.
-    ctx.save();
-    ctx.beginPath(); ctx.rect(L, T, W, H); ctx.clip();
-    const rng = patRng(seedId + "aurora");
-    for (let b = 0; b < 5; b++) {
-      const phase = rng() * Math.PI * 2;
-      const amp = H * (0.14 + rng() * 0.16);
-      const yBase = T + H * (0.18 + rng() * 0.64);
-      const thick = R * (0.14 + rng() * 0.22);
-      const g2 = ctx.createLinearGradient(0, yBase - amp - thick, 0, yBase + amp + thick);
-      g2.addColorStop(0, paintHexToRGBA(colHex, 0));
-      g2.addColorStop(0.5, paintHexToRGBA(colHex, 0.85));
-      g2.addColorStop(1, paintHexToRGBA(colHex, 0));
+    // The most expensive thing on the shelf, so it has to earn it:
+    // layered curtains of light, each fading out along its own length
+    // as well as top and bottom, drifting slowly, with a scatter of
+    // stars behind them. The old one was a single flat swathe of colour
+    // — which is precisely why it looked like it belonged near the
+    // bottom of the price list.
+    const rng = patRng(seedId + "aur");
+    const drift = now / 2600;
+    for (let st = 0; st < 14; st++) {
+      const sx = CL + rng() * CW, sy = CT + rng() * CH;
+      ctx.globalAlpha = 0.25 + rng() * 0.5;
+      ctx.beginPath();
+      ctx.arc(sx, sy, R * (0.018 + rng() * 0.030), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    for (let b = 0; b < 6; b++) {
+      const phase = rng() * Math.PI * 2 + drift * (0.5 + rng());
+      const amp = CH * (0.10 + rng() * 0.15);
+      const yBase = CT + CH * (0.16 + rng() * 0.68);
+      const thick = R * (0.10 + rng() * 0.18);
+      const g2 = ctx.createLinearGradient(0, yBase - amp - thick * 2, 0, yBase + amp + thick * 2);
+      g2.addColorStop(0.00, paintHexToRGBA(colHex, 0));
+      g2.addColorStop(0.42, paintHexToRGBA(colHex, 0.95));
+      g2.addColorStop(0.58, paintHexToRGBA(colHex, 0.95));
+      g2.addColorStop(1.00, paintHexToRGBA(colHex, 0));
       ctx.fillStyle = g2;
       ctx.beginPath();
-      const steps = 16;
+      const steps = 20;
       for (let i2 = 0; i2 <= steps; i2++) {
-        const x = L + (i2 / steps) * W;
-        const y = yBase + Math.sin(phase + (i2 / steps) * Math.PI * 2.2) * amp;
-        if (i2 === 0) ctx.moveTo(x, y - thick); else ctx.lineTo(x, y - thick);
+        const x = CL + (i2 / steps) * CW;
+        const y = yBase + Math.sin(phase + (i2 / steps) * Math.PI * 2.4) * amp;
+        const t2 = thick * (0.35 + Math.sin((i2 / steps) * Math.PI) * 0.85);
+        if (i2 === 0) ctx.moveTo(x, y - t2); else ctx.lineTo(x, y - t2);
       }
       for (let i2 = steps; i2 >= 0; i2--) {
-        const x = L + (i2 / steps) * W;
-        const y = yBase + Math.sin(phase + (i2 / steps) * Math.PI * 2.2) * amp;
-        ctx.lineTo(x, y + thick);
+        const x = CL + (i2 / steps) * CW;
+        const y = yBase + Math.sin(phase + (i2 / steps) * Math.PI * 2.4) * amp;
+        const t2 = thick * (0.35 + Math.sin((i2 / steps) * Math.PI) * 0.85);
+        ctx.lineTo(x, y + t2);
       }
       ctx.closePath();
       ctx.fill();
     }
     ctx.fillStyle = paint;
-    ctx.restore();
+
   }
 }
 

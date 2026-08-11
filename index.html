@@ -42,6 +42,7 @@
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>Local</h2>
+        <button class="btn btn-small" data-go="screen-shop" aria-label="Shop">💀 Shop</button>
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
       </header>
       <div class="slots" id="local-slots"></div>
@@ -126,6 +127,7 @@
       <header class="bar">
         <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
         <h2>1v1</h2>
+        <button class="btn btn-small" data-go="screen-shop" aria-label="Shop">💀 Shop</button>
       </header>
       <div class="duel-card">
         <p class="duel-blurb">One opponent, first to <b>3</b> round wins.</p>
@@ -138,7 +140,7 @@
     <!-- ============ SHOP ============ -->
     <section class="screen" id="screen-shop" aria-label="Shop">
       <header class="bar">
-        <button class="btn btn-back" data-go="screen-menu">‹ Back</button>
+        <button class="btn btn-back" id="shop-back">‹ Back</button>
         <h2>Shop</h2>
         <span class="tag-purse" id="shop-purse" aria-label="Your tags">
           <span class="tag-coin" aria-hidden="true">💀</span><b id="shop-tags">0</b>
@@ -269,19 +271,24 @@
       <header class="bar">
         <button class="btn btn-back" id="lobby-leave">‹ Leave</button>
         <h2>Lobby</h2>
+        <button class="btn btn-small" data-go="screen-shop" aria-label="Shop">💀 Shop</button>
         <button class="btn btn-small" data-go="screen-settings" aria-label="Settings">⚙</button>
         <button class="btn btn-small bar-end" id="lobby-social" type="button" hidden>👥 Invite</button>
       </header>
       <div class="lobby-grid">
         <div class="lobby-main">
           <div class="panel code-card">
-            <span class="code-label">Lobby code — share it with friends</span>
+            <span class="code-label" id="lobby-code-label">Lobby code — share it with friends</span>
             <div class="code-line">
-              <button class="btn btn-small" id="lobby-hide" type="button"
-                      aria-label="Hide lobby code">👁</button>
               <span class="code-big" id="lobby-code">····</span>
               <button class="btn btn-small" id="lobby-copy">Copy</button>
             </div>
+            <!-- Host only: hides the code for EVERY player in the room.
+                 Starts hidden and is switched on once we know we're the
+                 host, so a guest never sees it flash up. -->
+            <button class="btn btn-small code-hide" id="lobby-hide" type="button" hidden>
+              🙈 HIDE CODE
+            </button>
           </div>
           <ul class="lobby-list lobby-popover" id="lobby-social-list" hidden></ul>
           <ul class="lobby-list" id="lobby-players"></ul>
