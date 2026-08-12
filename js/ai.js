@@ -154,6 +154,8 @@ function brain(t, now) {
       shotAt: 0,
       abAt: 0, abSince: {}, abSaw: {},
       histX: t.x, histY: t.y, histAt: now, stuckUntil: 0, stuckA: 0,
+      flameOn: 0,           // when the burn started, for trigger hysteresis
+      burnUntil: 0,         // trigger latch for held weapons
       roamAt: 0,
       path: null, pathAt: 0, pathTo: null,
     };
@@ -284,7 +286,10 @@ function sense(t, B, world, P, now) {
   // Checked over a short window and against what was actually ASKED
   // for: a bot at full throttle that has travelled a fraction of a hull
   // length is grinding on something, whatever the steering believes.
-  const window = 380;
+  // Checked more often: at 380 ms a bot could sit against a wall for
+  // over a third of a second before anything noticed, which is long
+  // enough to look broken.
+  const window = 220;
   if (now - B.histAt > window) {
     const moved = Math.hypot(t.x - B.histX, t.y - B.histY);
     const expect = (world.moveSpeed ?? 130) * P.speed * (window / 1000) * B.driveM;
@@ -292,8 +297,12 @@ function sense(t, B, world, P, now) {
         now > B.stuckUntil) {
       // Back out the way we came — that direction is known to be open,
       // because we just drove down it.
-      B.stuckUntil = now + 600;
+      B.stuckUntil = now + 520;
       B.stuckA = bestOpening(t, world, B.driveA + Math.PI);
+      // Give up on the cached route as well. Backing out of a jam and
+      // then following the very same path straight back into it is why
+      // bots got stuck in the same corner again and again.
+      B.path = null;
     }
     B.histX = t.x; B.histY = t.y; B.histAt = now;
   }
@@ -676,9 +685,14 @@ function navigate(t, B, world, P, now, gun) {
   const denom = Math.abs(score[l]) + Math.abs(score[r]) + Math.abs(score[bi]) + 1e-3;
   const a = RAY[bi].a + ((score[r] - score[l]) / denom) * (Math.PI / DIRS);
 
-  // Throttle: full when the way is clear, easing off into clutter and on
-  // approach, so it settles rather than overshooting and correcting.
-  let mag = 0.95 * (0.6 + 0.4 * open[bi]);
+  // Throttle eases off as the way ahead closes up.
+  //
+  // MEASURED: dropping the floor further than this backfires. At 0.12 a
+  // bot facing a wall barely moves, which does cut the time it spends
+  // jammed — but it then creeps everywhere, covering 12 cells where it
+  // used to cover 22 and spending far MORE of its life in contact with
+  // stone. Half throttle into clutter came out best on both counts.
+  let mag = 0.95 * (0.5 + 0.5 * open[bi]);
   if (B.goal) {
     const gd = Math.hypot(B.goal.x - t.x, B.goal.y - t.y);
     if (gd < R * 2.5) mag *= Math.max(0.15, gd / (R * 2.5));
@@ -978,7 +992,23 @@ function gunnery(t, B, world, P, now) {
   // A phasing tank cannot be hit at all; anyone competent waits it out.
   if (P.ability > 0.35 && target.ref && now < (target.ref.phaseUntil ?? 0)) return out;
 
-  if (Math.abs(angDiff(t.a, out.aim)) > P.aimTol) return out;
+  // How square the hull has to be depends on the WEAPON, not just the
+  // tier. A shell is a point and needs the tier's precision. The
+  // flamethrower is a cone about 20° wide at the tip — gating it on the
+  // same few degrees meant a bot only had the trigger down in the
+  // instants it happened to be perfectly lined up, so it stuttered the
+  // flame on and off instead of holding a burn on someone. Anywhere
+  // inside the cone is a hit, so anywhere inside the cone is good enough
+  // to fire.
+  let tol = P.aimTol;
+  if (g.hold && t.weapon === "flame") {
+    const cone = Math.atan2((world.tankR ?? 22) * 1.9, Math.max(1, dist));
+    tol = Math.max(P.aimTol, Math.min(0.34, cone));
+    // Hysteresis: once it is burning, keep burning while the target
+    // drifts about in the cone rather than chopping at the boundary.
+    if (B.flameOn && now - B.flameOn < 400) tol *= 1.35;
+  }
+  if (Math.abs(angDiff(t.a, out.aim)) > tol) return out;
 
   // Line of fire: no walls, no team-mates. Mortars arc over everything.
   if (!g.indirect) {
@@ -1146,9 +1176,28 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
   // rather than snapping back to a stale heading.
   if (firing) B.driveA = wantA;
 
+  // A HELD weapon gets a held trigger.
+  //
+  // Firing was re-decided from scratch every single frame, so the
+  // flamethrower came on and off again as the target drifted a degree or
+  // the range estimate wobbled — 176 separate presses averaging 27 ms
+  // each, which is a stutter, not a burn. A player pulls the trigger and
+  // keeps it down. Once a burn starts it is latched for a beat and only
+  // released when the fuel runs out or there is nothing in front any
+  // more, which is also what makes the fuel and the damage ticks behave
+  // the way they were designed to.
+  const holdWeapon = t.weapon === "flame";
   if (gun.canFire) {
     acts.shoot = true;
     if (!gun.hold) B.shotAt = now;
+    if (gun.hold) { B.flameOn = now; B.burnUntil = now + 750; }
+  } else if (holdWeapon && now < (B.burnUntil ?? 0)
+             && (t.flameFuel ?? 1e9) > 60
+             && B.target && B.target.visible) {
+    acts.shoot = true;
+  } else if (B.flameOn && now - B.flameOn > 400) {
+    B.flameOn = 0;
+    B.burnUntil = 0;
   }
 }
 

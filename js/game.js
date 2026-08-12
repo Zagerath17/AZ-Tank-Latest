@@ -4159,7 +4159,7 @@ function draw(now) {
   // everything outside an angled edge fell back to flat grey — which is
   // why some maps had bare background beyond the wall. The ground is the
   // world; only the things standing on it get clipped.
-  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s * dpr, S.maze, CELL);
+  const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s * dpr, S.maze, CELL, S.diag);
   drawGround(ctx, scene);
 
   let clippedToShape = false;
@@ -4214,24 +4214,22 @@ function draw(now) {
     }
   }
 
+  // Mud is a puddle ON THE GROUND, so it goes down before the masonry.
+  // Drawn after the walls it lapped OVER them wherever a pit was thrown
+  // near one, which made the wall look like it was standing in front of
+  // nothing.
+  for (const m of S.mudPits) drawMudPit(m, now);
+
   // Walls: stone brick, markedly darker than the floor, with the shadow
   // the sun casts from them laid down first.
   drawWallLayer(ctx, scene);
 
-  // Shaped arena: lift the silhouette clip and draw the diagonal border
-  // as ONE stroked polygon (round joins), so the corners connect
-  // smoothly instead of showing a seam between separate edge slabs.
-  // The stroke is centred on the polygon with the wall thickness, so it
-  // lines up exactly with the slab collision.
-  if (clippedToShape) {
-    ctx.restore();
-    ctx.strokeStyle = "#606265";
-    ctx.lineWidth = WALL_T;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    tracePoly(S.polyWorld);
-    ctx.stroke();
-  }
+  // Shaped arena: just lift the silhouette clip. The angled border used
+  // to be painted here as a flat grey stroke, which is why it was the
+  // one wall in the arena with no brick on it and no shadow under it.
+  // It is now baked into the wall layer above alongside every other
+  // wall, from the same slab geometry the collision uses.
+  if (clippedToShape) ctx.restore();
 
   // Pickups on the floor, wrecks, tanks, then projectiles on top.
   const pulse = Math.sin(now / 220) * 0.5 + 0.5;
@@ -4284,8 +4282,8 @@ function draw(now) {
   }
   ctx.globalAlpha = 1;
 
-  // Ground defense effects, under walls/tanks: mud puddles then heal pads.
-  for (const m of S.mudPits) drawMudPit(m, now);
+  // Heal pads sit on the floor under the tanks. (Mud is drawn earlier,
+  // beneath the walls — see below.)
   for (const z of S.healZones) drawHealZone(z, now);
 
   // Mortar: impact smoke clouds, in-flight landing markers, and the
@@ -5069,8 +5067,13 @@ function castWallShadowsOnTanks(scene) {
     ctx.rotate(t.a);
     // The hull plus the turret disc and barrel — the tank's whole
     // footprint, so the shade runs across the gun as well.
-    if (ctx.roundRect) ctx.roundRect(-R * 0.95, -R * 0.62, R * 1.9, R * 1.24, R * 0.24);
-    else ctx.rect(-R * 0.95, -R * 0.62, R * 1.9, R * 1.24);
+    // Wide enough to take in the TREADS, not just the hull. The treads
+    // sit at ±0.62 R and are 0.42 R across, so they reach 0.83 R — clip
+    // at the hull's 0.62 R and the shadow stops dead along the tracks
+    // while they stay in full sun, which reads as the treads being
+    // sliced off the moment the tank drives into shade.
+    if (ctx.roundRect) ctx.roundRect(-R * 1.0, -R * 0.86, R * 2.0, R * 1.72, R * 0.24);
+    else ctx.rect(-R * 1.0, -R * 0.86, R * 2.0, R * 1.72);
     ctx.moveTo(R * 1.3, -R * 0.13);
     ctx.arc(0, 0, R * 0.46, 0, Math.PI * 2);
     ctx.rect(0, -R * 0.13, R * 1.3, R * 0.26);
@@ -5135,7 +5138,7 @@ function stepPrewarm(budgetMs = 4) {
           dpr = dpr ?? Math.max(1, Math.min(RENDER_W / Math.max(1, cw), RENDER_H / Math.max(1, ch)));
           s2 = Math.min((cw - 16) / S.worldW, (ch - 16) / S.worldH);
         }
-        buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s2 * (dpr ?? 1), S.maze, CELL);
+        buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s2 * (dpr ?? 1), S.maze, CELL, S.diag);
       } else {
         prebakeStep(j.hex, j.fin, j.size, j.i);
       }

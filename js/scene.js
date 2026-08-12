@@ -46,6 +46,47 @@ export const SHADOW = (() => {
   return { dx: -Math.cos(SUN.az) * len, dy: -Math.sin(SUN.az) * len, len };
 })();
 
+// Every solid thing in the arena, in one shape.
+//
+// Interior walls arrive as axis-aligned rects; the angled boundary of a
+// shaped arena arrives as oriented slabs. They used to be handled by
+// completely different code — the rects were baked into the masonry
+// layer, and the boundary was drawn afterwards as a plain grey stroke,
+// which is why it had no brick on it and cast no shadow at all. Both are
+// walls. Both go through here.
+export function wallPieces(rects, diag) {
+  const out = [];
+  for (const r of rects ?? []) {
+    out.push({ cx: r.x + r.w / 2, cy: r.y + r.h / 2, hw: r.w / 2, hh: r.h / 2, a: 0 });
+  }
+  for (const w of diag ?? []) {
+    out.push({ cx: w.x, cy: w.y, hw: w.hx, hh: w.hy, a: w.a });
+  }
+  return out;
+}
+
+// The four corners of a piece, in world space.
+function corners(p) {
+  const c = Math.cos(p.a), s2 = Math.sin(p.a);
+  const ax = c * p.hw, ay = s2 * p.hw;
+  const bx = -s2 * p.hh, by = c * p.hh;
+  return [
+    [p.cx - ax - bx, p.cy - ay - by],
+    [p.cx + ax - bx, p.cy + ay - by],
+    [p.cx + ax + bx, p.cy + ay + by],
+    [p.cx - ax + bx, p.cy - ay + by],
+  ];
+}
+
+// Add a piece's outline to the current path.
+function tracePiece(g, p, grow = 0) {
+  const q = grow ? { ...p, hw: p.hw + grow, hh: p.hh + grow } : p;
+  const c = corners(q);
+  g.moveTo(c[0][0], c[0][1]);
+  for (let i = 1; i < 4; i++) g.lineTo(c[i][0], c[i][1]);
+  g.closePath();
+}
+
 /* ---------- deterministic noise ---------- */
 
 function rng(seed) {
@@ -321,16 +362,29 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
   // Scale with the MAZE, not the pixel area: a bigger map has more
   // corridors, so it wants proportionally more history on the floor.
   const openCells = cols * rows;
-  const runs = Math.max(10, Math.round(openCells * 1.1));
+  // Fewer, and no longer one per cell. At the old density every corridor
+  // carried a trail, every trail sat on the same centre line, and the
+  // whole lot closed into concentric loops — a second, ghostly maze
+  // printed over the real one.
+  const runs = Math.max(8, Math.round(openCells * 0.55));
 
   g.save();
   g.lineCap = "butt";
   for (let i = 0; i < runs; i++) {
     let c = (r() * cols) | 0, rw = (r() * rows) | 0;
     if (!inside(c, rw)) continue;
-    const hops = 2 + ((r() * 7) | 0);
-    // Cell centres, in canvas coordinates.
-    const way = [[(c + 0.5) * cell + pad, (rw + 0.5) * cell + pad]];
+    const hops = 2 + ((r() * 5) | 0);
+    // Waypoints are JITTERED inside their cell rather than being the
+    // exact centre. Driving centre to centre meant every straight lay on
+    // the same line and every turn was the same arc, so the trails
+    // stacked into a lattice — the ghost map printed over the arena. A
+    // tank does not drive down the exact middle of a corridor.
+    const J = 0.22;
+    const wp = (cc, rr2) => [
+      (cc + 0.5 + (r() - 0.5) * 2 * J) * cell + pad,
+      (rr2 + 0.5 + (r() - 0.5) * 2 * J) * cell + pad,
+    ];
+    const way = [wp(c, rw)];
     let last = -1;
     for (let hnum = 0; hnum < hops; hnum++) {
       const opts = [];
@@ -344,11 +398,18 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
       const d = opts[(r() * opts.length) | 0];
       c += DC[d]; rw += DR[d];
       last = d ^ 1;                                  // the way back
-      way.push([(c + 0.5) * cell + pad, (rw + 0.5) * cell + pad]);
+      way.push(wp(c, rw));
     }
     if (way.length < 2) continue;
 
-    const fade = 0.045 + r() * 0.08;
+    // Wear varies a lot: most passes are barely there, a few are worn
+    // in. One uniform mid-grey for every run is most of what made these
+    // read as a drawn overlay rather than as history.
+    const fade = 0.022 + r() * r() * 0.115;
+    // Each run gets its own gauge and its own turning circle, so no two
+    // corners come out the same shape.
+    const gauge = HALF * (0.86 + r() * 0.3);
+    const turn = 0.11 + r() * 0.11;
     const bandL = [], bandR = [], cleats = [];
     // Walk the route as a smooth curve so turns through a junction arc
     // the way a tank would take them, instead of hinging at right angles.
@@ -375,7 +436,7 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
       while (Math.hypot(tx - px, ty - py) > release && guard++ < 400) {
         const want = Math.atan2(ty - py, tx - px);
         let da = ((want - ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-        ang += Math.max(-0.16, Math.min(0.16, da));   // a real turning circle
+        ang += Math.max(-turn, Math.min(turn, da));   // a real turning circle
         const nx = px + Math.cos(ang) * PITCH, ny = py + Math.sin(ang) * PITCH;
         const ox = -Math.sin(ang), oy = Math.cos(ang);
         // Last line of defence: if the hull centre has still wandered
@@ -390,8 +451,8 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
         // Collected, not stroked here. Stroking every step separately
         // meant four canvas strokes per 6 px of track, which is most of
         // what made a round take a moment to start.
-        bandL.push([nx + ox * HALF * -1, ny + oy * HALF * -1]);
-        bandR.push([nx + ox * HALF, ny + oy * HALF]);
+        bandL.push([nx + ox * gauge * -1, ny + oy * gauge * -1]);
+        bandR.push([nx + ox * gauge, ny + oy * gauge]);
         cleats.push([nx, ny, ox, oy]);
         px = nx; py = ny;
       }
@@ -411,7 +472,7 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
     g.beginPath();
     for (const [cx2, cy2, ox2, oy2] of cleats) {
       for (const side of [-1, 1]) {
-        const bx = cx2 + ox2 * HALF * side, by = cy2 + oy2 * HALF * side;
+        const bx = cx2 + ox2 * gauge * side, by = cy2 + oy2 * gauge * side;
         g.moveTo(bx - ox2 * (WIDTH / 2), by - oy2 * (WIDTH / 2));
         g.lineTo(bx + ox2 * (WIDTH / 2), by + oy2 * (WIDTH / 2));
       }
@@ -427,7 +488,7 @@ function paintOldTracks(g, w, h, seed, pad, rects, maze, cell) {
 // brick sized against the tank; the face catches the light on the sun
 // side and falls into shade opposite, and the whole slab throws a soft
 // shadow onto the concrete.
-function buildWalls(w, h, rects, seed, d = 1) {
+function buildWalls(w, h, pieces, seed, d = 1) {
   const cv = newCanvas(w, h, d);
   const g = cv.getContext("2d");
   const r = rng(seed ^ 0x5150);
@@ -440,8 +501,8 @@ function buildWalls(w, h, rects, seed, d = 1) {
   const MORTAR_C = "rgb(74,74,72)";
   const sx = Math.cos(SUN.az), sy = Math.sin(SUN.az);
 
-  for (const rc of rects) {
-    const { x, y, w: rw, h: rh } = rc;
+  for (const piece of pieces) {
+    const rw = piece.hw * 2, rh = piece.hh * 2;
     if (rw <= 0 || rh <= 0) continue;
 
     g.save();
@@ -451,8 +512,14 @@ function buildWalls(w, h, rects, seed, d = 1) {
     // looked sliced. Against the union, a stone laid near a junction runs
     // on into the wall it meets.
     g.beginPath();
-    for (const o of rects) g.rect(o.x, o.y, o.w, o.h);
+    for (const o of pieces) tracePiece(g, o);
     g.clip();
+    // Work in the piece's own frame, so an angled boundary slab is laid
+    // with courses running ALONG it exactly like every interior wall,
+    // rather than being a bare grey stroke bolted on afterwards.
+    g.translate(piece.cx, piece.cy);
+    g.rotate(piece.a);
+    const x = -piece.hw, y = -piece.hh;
 
     // Mortar bed first; the stones are then set into it.
     g.fillStyle = MORTAR_C;
@@ -544,35 +611,65 @@ function buildWalls(w, h, rects, seed, d = 1) {
   // band of pixels along one side. Shifted away from the sun it gives
   // the lit arris; shifted toward it, the shaded one.
   const BEV = 2.2;
-  const lx = -sx, ly = -sy;                     // toward the sun, on screen
   const band = newCanvas(w, h, d);
   const bg = band.getContext("2d");
   const bu = band.__wu ?? { w: band.width, h: band.height };
-  const paintUnion = (cx, ctxx, dx, dy, style) => {
+  const fillUnion = (ctxx, grow, style) => {
     ctxx.fillStyle = style;
-    for (const o of rects) ctxx.fillRect(o.x + dx, o.y + dy, o.w, o.h);
+    ctxx.beginPath();
+    for (const o of pieces) tracePiece(ctxx, o, grow);
+    ctxx.fill("nonzero");
   };
-  for (const [dx, dy, style, alpha] of [
-    [lx * BEV, ly * BEV, "rgba(228,230,232,1)", 0.30],   // lit edge
-    [-lx * BEV, -ly * BEV, "rgba(16,17,19,1)", 0.34],    // shaded edge
-  ]) {
-    bg.setTransform(1, 0, 0, 1, 0, 0);
+  // Reset the scratch layer WITHOUT destroying its density scale.
+  //
+  // newCanvas() hands back a canvas of w·d × h·d device pixels with the
+  // context pre-scaled by d, so world units can be used throughout.
+  // Clearing it with setTransform(1,0,0,1,0,0) threw that scale away,
+  // and everything drawn afterwards went down in raw device pixels —
+  // filling only the top-left 1/d of the layer. The result was a
+  // shrunken wireframe copy of the entire wall layout, composited faint
+  // over the arena: the "mini map" of translucent lines. It only showed
+  // at d > 1, which is every real screen, and never in a d = 1 test.
+  const resetBand = () => {
+    bg.setTransform(d, 0, 0, d, 0, 0);
+    bg.globalCompositeOperation = "source-over";
     bg.clearRect(0, 0, bu.w, bu.h);
-    bg.globalCompositeOperation = "source-over";
-    paintUnion(band, bg, 0, 0, style);
-    bg.globalCompositeOperation = "destination-out";
-    paintUnion(band, bg, dx, dy, "#000");
-    bg.globalCompositeOperation = "source-over";
-    g.globalAlpha = alpha;
-    g.drawImage(band, 0, 0, bu.w, bu.h);
-  }
+  };
+
+  // A cast slab is broken on EVERY edge, not just the two facing the
+  // sun. Shifting the union along one axis only left the short ends —
+  // the thin faces where a wall stops — with no chamfer at all, which is
+  // exactly the sliced look on wall ends. Shrinking the union instead
+  // gives a rim that runs the whole way round the silhouette.
+  resetBand();
+  fillUnion(bg, 0, "rgba(198,201,205,1)");
+  bg.globalCompositeOperation = "destination-out";
+  fillUnion(bg, -BEV, "#000");
+  bg.globalCompositeOperation = "source-over";
+  g.globalAlpha = 0.34;
+  g.drawImage(band, 0, 0, bu.w, bu.h);
+
+  // Then a darker lip on the side facing away from the sun, so the rim
+  // still reads as lit on one side and shaded on the other.
+  const lx = -sx, ly = -sy;
+  resetBand();
+  fillUnion(bg, 0, "rgba(14,15,17,1)");
+  bg.globalCompositeOperation = "destination-out";
+  bg.save();
+  bg.translate(lx * BEV * 1.3, ly * BEV * 1.3);
+  fillUnion(bg, 0, "#000");
+  bg.restore();
+  bg.globalCompositeOperation = "source-over";
+  g.globalAlpha = 0.30;
+  g.drawImage(band, 0, 0, bu.w, bu.h);
+
   g.globalAlpha = 1;
   return cv;
 }
 
 // Shadows the walls throw across the concrete. Drawn under the walls, in
 // the direction the sun dictates, so the light has visible consequences.
-function buildShadows(w, h, rects, pad, d = 1) {
+function buildShadows(w, h, pieces, pad, d = 1) {
   const cv = newCanvas(w + pad * 2, h + pad * 2, d);
   const g = cv.getContext("2d");
   const HEIGHT = 20;                             // walls stand well above a tank
@@ -595,13 +692,9 @@ function buildShadows(w, h, rects, pad, d = 1) {
   // displaced, and the volume joining them. Drawing only the displaced
   // copy leaves a floating rectangle with a gap where wall meets ground.
   sg.fillStyle = "#000";
-  for (const rc of rects) {
-    const { x, y, w: rw, h: rh } = rc;
-    const pts = [
-      [x, y], [x + rw, y], [x + rw, y + rh], [x, y + rh],
-      [x + ox, y + oy], [x + rw + ox, y + oy],
-      [x + rw + ox, y + rh + oy], [x + ox, y + rh + oy],
-    ];
+  for (const piece of pieces) {
+    const base = corners(piece);
+    const pts = base.concat(base.map(([px, py]) => [px + ox, py + oy]));
     const hull = convexHull(pts);
     sg.beginPath();
     sg.moveTo(hull[0][0], hull[0][1]);
@@ -615,10 +708,15 @@ function buildShadows(w, h, rects, pad, d = 1) {
 
   // Contact shading: darkest right where wall meets floor, so it looks
   // seated rather than floating. Same treatment — one pass, one union.
-  sg.setTransform(1, 0, 0, 1, 0, 0);
+  // Same trap as the chamfer band: keep the density scale when resetting.
+  sg.setTransform(d, 0, 0, d, 0, 0);
   sg.clearRect(0, 0, su.w, su.h);
   sg.translate(pad, pad);
-  for (const rc of rects) sg.fillRect(rc.x + ox * 0.16, rc.y + oy * 0.16, rc.w, rc.h);
+  sg.beginPath();
+  for (const piece of pieces) {
+    tracePiece(sg, { ...piece, cx: piece.cx + ox * 0.16, cy: piece.cy + oy * 0.16 });
+  }
+  sg.fill("nonzero");
   g.globalAlpha = 0.26;
   g.drawImage(scratch, 0, 0, su.w, su.h);
   g.globalAlpha = 1;
@@ -650,7 +748,7 @@ function convexHull(pts) {
 
 // Build (or reuse) the arena art. Keyed on size, layout and seed, so it
 // is generated once per round and simply blitted every frame after that.
-export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = null, cell = 96) {
+export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = null, cell = 96, diag = null) {
   // Bake at the density the arena is actually SHOWN at, so the concrete,
   // the brickwork and the worn tracks are as sharp as the tanks standing
   // on them. Baking at world size and letting the canvas magnify it is
@@ -671,14 +769,15 @@ export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = nu
   const BUDGET = 11e6;
   while (d > 1 && fw * fh * d * d > BUDGET) d -= 0.5;
 
-  const key = `${Math.round(worldW)}x${Math.round(worldH)}|${rects.length}|${seed}|${d}`;
+  const pieces = wallPieces(rects, diag);
+  const key = `${Math.round(worldW)}x${Math.round(worldH)}|${pieces.length}|${seed}|${d}`;
   if (cache && cache.key === key) return cache;
   cache = {
     key,
     w: worldW, h: worldH, pad, density: d,
     floor: buildFloor(fw, fh, seed >>> 0, pad, rects, d, maze, cell),
-    walls: buildWalls(worldW, worldH, rects, seed >>> 0, d),
-    shadow: buildShadows(worldW, worldH, rects, pad, 1),   // soft edges: density buys nothing
+    walls: buildWalls(worldW, worldH, pieces, seed >>> 0, d),
+    shadow: buildShadows(worldW, worldH, pieces, pad, 1),  // soft edges: density buys nothing
   };
   return cache;
 }
