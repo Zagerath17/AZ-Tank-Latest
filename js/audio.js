@@ -175,10 +175,16 @@ export const sfx = {
   fire() {
     if (!ready() || limited("fire", 45)) return;
     try {
-      whoosh("highpass", 5000, 1500, 0.03, 0.16);       // muzzle crack
-      blip("square", 260, 60, 0.11, 0.2);               // barrel body
-      blip("sine", 150, 46, 0.16, 0.22, 0.004);         // low thump
-      whoosh("lowpass", 900, 120, 0.14, 0.1, 0.01, 0.7); // boom tail
+      // An actual cannon: a hard crack off the muzzle brake, a deep
+      // pressure thump you feel more than hear, and a long boom rolling
+      // away after it. The old one was a small "pop" and far too quiet
+      // for the thing that fires it.
+      whoosh("highpass", 7000, 1800, 0.035, 0.42);        // muzzle crack
+      whoosh("bandpass", 2200, 500, 0.07, 0.30, 0, 0.8);  // blast
+      blip("square", 190, 42, 0.16, 0.42);                // barrel body
+      blip("sine", 110, 32, 0.30, 0.52, 0.004);           // deep thump
+      whoosh("lowpass", 700, 90, 0.34, 0.30, 0.012, 0.7); // boom rolling off
+      blip("sine", 62, 30, 0.42, 0.24, 0.02);             // sub tail
     } catch (e) {}
   },
 
@@ -193,9 +199,16 @@ export const sfx = {
 
   // Ricochet off a wall: bright little tick.
   bounce() {
-    if (!ready() || limited("bounce", 55)) return;
+    if (!ready() || limited("bounce", 40)) return;
     try {
-      blip("triangle", 1150, 700, 0.035, 0.06);
+      // A proper ricochet: a hard metallic strike, then the descending
+      // whine of the round spinning away. The old version was a 35 ms
+      // tick at 0.06 peak — technically playing, but far too quiet and
+      // short to hear over a firefight, which is why it seemed absent.
+      whoosh("highpass", 6000, 2600, 0.03, 0.20);        // strike
+      blip("triangle", 2400, 900, 0.10, 0.20);           // spang
+      blip("square", 1500, 520, 0.14, 0.10, 0.006);      // the whine off
+      blip("sine", 300, 150, 0.07, 0.09);                // a little body
     } catch (e) {}
   },
 
@@ -203,10 +216,14 @@ export const sfx = {
   hit() {
     if (!ready() || limited("hit", 55)) return;
     try {
-      blip("triangle", 1750, 620, 0.06, 0.09);
-      blip("square", 240, 95, 0.07, 0.11);
-      whoosh("highpass", 3800, 1400, 0.035, 0.06);
-      blip("sine", 95, 55, 0.09, 0.07, 0.005);
+      // Something heavy striking armour: a blunt crunch with weight
+      // behind it, not a little bell. The bright layer is kept short so
+      // it reads as metal rather than a chime.
+      whoosh("highpass", 5200, 1600, 0.03, 0.26);       // the strike
+      whoosh("bandpass", 1400, 380, 0.08, 0.26, 0, 0.9); // crunch
+      blip("square", 210, 70, 0.12, 0.34);               // plate deflection
+      blip("sine", 88, 40, 0.20, 0.40, 0.004);           // the weight of it
+      blip("triangle", 1500, 500, 0.05, 0.12);           // a touch of ring
     } catch (e) {}
   },
 
@@ -490,7 +507,7 @@ export function setEngine(active, localMoving, enemyMoving) {
     // Engines run ONLY while a tank is actually moving — no phantom
     // always-on idle bed. Nobody driving → the sound fades to silence.
     const localRev = localMoving ? 0.05 : 0;
-    const enemyRev = enemyMoving ? 0.05 * 0.3 : 0;
+    const enemyRev = enemyMoving ? 0.05 * 0.36 : 0;   // +20% — enemies were too faint to place
     const anyMoving = localMoving || enemyMoving;
     const target = !active ? 0 : (localRev + enemyRev) * LOUD;
     const freq = anyMoving ? 72 : 52;

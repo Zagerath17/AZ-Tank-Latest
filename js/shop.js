@@ -29,6 +29,7 @@ import {
   ownsPattern, getPattern, getPatternColors, buyPattern, equipPattern, ownedSkins,
 } from "./social.js";
 import { finishSwatchCanvas } from "./tanksprite.js";
+import { materialTile } from "./material.js";
 import {
   UPGRADE_TREE, MAX_SKILL_POINTS, RESET_COST, TOTAL_RANKS,
   ranksIn, pointsSpent, pointsLeft, canRank, xpForLevel,
@@ -47,9 +48,40 @@ let tab = "colours";
 // real canvas swatch replaces it. Deliberately plain: the canvas is the
 // authority on what bronze looks like (material.js), and a CSS gradient
 // pretending otherwise would just disagree with it.
+// A swatch that shows what the paint ACTUALLY looks like on a tank.
+// Flat hex was fine for plain colours, but a special is a lit metal
+// surface — bronze, gold, silver and the rest were being previewed as a
+// dull average of themselves, which is why the shop never matched the
+// arena. Bake the real material once per colour and reuse it.
+const swatchCache = new Map();
+function materialSwatch(id) {
+  if (swatchCache.has(id)) return swatchCache.get(id);
+  let url = null;
+  try {
+    const fin = skinFinish(id);
+    const tile = materialTile(SKINS[id].hex, fin, 64, 0.9);
+    if (tile) url = tile.toDataURL ? tile.toDataURL() : null;
+  } catch (e) { url = null; }
+  swatchCache.set(id, url);
+  return url;
+}
+
 function swatchStyle(id) {
   const s = SKINS[id];
-  return `background: ${s.hex};`;
+  const url = materialSwatch(id);
+  // The hex stays underneath, so if the bake fails for any reason the
+  // swatch is still the right colour rather than blank.
+  return url
+    ? `background: ${s.hex} url(${url}) center/cover;`
+    : `background: ${s.hex};`;
+}
+
+// The two colours a pattern is drawn in, as CSS the chip can use. For a
+// special this is its material image; for a plain colour, its hex.
+function patternPaint(id) {
+  const url = materialSwatch(id);
+  const hex = SKINS[id]?.hex ?? "#888";
+  return { hex, url, css: url ? `url(${url}) center/cover` : hex };
 }
 
 function tile(id, { owned, worn, afford, unlocked }) {
@@ -178,6 +210,39 @@ function renderColours() {
 
 // A little swatch showing the pattern shape in neutral tones, so the
 // tile reads as "camo" / "lightning" etc. before you pick colours.
+// The average colour of a paint AS RENDERED. For a plain colour that is
+// just its hex; for a special it is sampled from the baked material, so
+// previews match what ends up on the tank.
+const displayCache = new Map();
+function displayHex(id, fallback) {
+  if (!id || !SKINS[id]) return fallback;
+  if (displayCache.has(id)) return displayCache.get(id);
+  let out = SKINS[id].hex ?? fallback;
+  try {
+    const fin = skinFinish(id);
+    const tile = materialTile(SKINS[id].hex, fin, 32, 0.9);
+    const g = tile?.getContext?.("2d");
+    if (g) {
+      const { data, width, height } = g.getImageData(0, 0, tile.width, tile.height);
+      let r = 0, gg = 0, b = 0, n = 0;
+      // Sample the middle, away from the rim's dark edge shading.
+      for (let y = (height * 0.3) | 0; y < height * 0.7; y++) {
+        for (let x = (width * 0.3) | 0; x < width * 0.7; x++) {
+          const i = (y * width + x) * 4;
+          if (data[i + 3] < 200) continue;
+          r += data[i]; gg += data[i + 1]; b += data[i + 2]; n++;
+        }
+      }
+      if (n) {
+        const h = (v) => Math.round(v / n).toString(16).padStart(2, "0");
+        out = `#${h(r)}${h(gg)}${h(b)}`;
+      }
+    }
+  } catch (e) { /* fall back to the nominal hex */ }
+  displayCache.set(id, out);
+  return out;
+}
+
 function patternChip(id) {
   // Previewed in the player's OWN two colours rather than a fixed pair
   // of greys, so the swatch shows what the pattern will actually look
@@ -185,8 +250,13 @@ function patternChip(id) {
   const one = getSkin();
   const cur = getPatternColors();
   const two = (cur[1] && cur[1] !== one) ? cur[1] : fallbackSecond(one);
-  const light = SKINS[one]?.hex ?? "#c7d0de";
-  const dark = SKINS[two]?.hex ?? "#2a2f3a";
+  // A special's swatch hex is only a nominal value — what you actually
+  // see on the tank is a LIT metal surface, which is a good deal
+  // brighter and differently tinted. Sampling the rendered material
+  // gives the colour the pattern will really be drawn in, so bronze
+  // reads as bronze here instead of a flat brown.
+  const light = displayHex(one, "#c7d0de");
+  const dark = displayHex(two, "#2a2f3a");
   switch (id) {
     case "twoTone":
       return `background: linear-gradient(90deg, ${light} 50%, ${dark} 50%);`;

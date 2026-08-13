@@ -1481,6 +1481,26 @@ function stepTanks(now, dt) {
         } else if (!tankHitsAnyWall(t, nx, ny, t.a) && !tankHitsAnyDiag(t, nx, ny, t.a)) {
           t.x = nx;
           t.y = ny;
+        } else {
+          // Blocked. Two things have to happen or the tank judders along
+          // the bricks: kill the stored momentum (it used to keep
+          // building against the wall and then lurch the moment the tank
+          // came free — the micro-teleport), and step up to the wall
+          // instead of refusing to move at all, so contact is smooth
+          // rather than stopping a fraction short and jittering.
+          t.vel = 0;
+          t.spin = t.spin ?? 0;
+          let lo2 = 0, hi2 = 1;
+          for (let it = 0; it < 6; it++) {
+            const mid = (lo2 + hi2) / 2;
+            const mx = t.x + (nx - t.x) * mid, my = t.y + (ny - t.y) * mid;
+            if (tankHitsAnyWall(t, mx, my, t.a) || tankHitsAnyDiag(t, mx, my, t.a)) hi2 = mid;
+            else lo2 = mid;
+          }
+          if (lo2 > 0.02) {
+            t.x += (nx - t.x) * lo2;
+            t.y += (ny - t.y) * lo2;
+          }
         }
       }
 
@@ -1784,7 +1804,11 @@ function drawTracks(now) {
   // costs a fixed handful of strokes. 20 keeps every step under ~3/255
   // levels, which is below what the eye can pick out — so the fade reads
   // as continuous rather than stepping down in visible stages.
-  const BUCKETS = 20;
+  // Eight opacity steps, not twenty. These marks are faint and short-
+  // lived, so the extra bands cost three canvas strokes each for a
+  // difference nobody can see — and stroking was the single busiest
+  // thing in the frame.
+  const BUCKETS = 8;
   const fadeOf = (k) => {
     const life = 1 - (now - k.born) / TRACK_LIFE;      // 1 fresh → 0 gone
     if (life <= 0) return 0;
@@ -4339,7 +4363,12 @@ function draw(now) {
   // why some maps had bare background beyond the wall. The ground is the
   // world; only the things standing on it get clipped.
   const scene = buildScene(S.worldW, S.worldH, S.rects ?? [], S.groundSeed ?? 1, s * dpr, S.maze, CELL, S.diag);
-  drawGround(ctx, scene);
+  // Hand the renderer the visible world rect so it only copies what the
+  // camera can see, instead of the whole padded ground bitmap.
+  drawGround(ctx, scene, {
+    x: -ox / s, y: -oy / s,
+    w: cw / s, h: ch / s,
+  });
 
   let clippedToShape = false;
   if (S.polyWorld) {
@@ -5412,12 +5441,26 @@ function castWallShadowsOnTanks(scene) {
     else ctx.rect(-R * 1.0, -R * 0.86, R * 2.0, R * 1.72);
     ctx.moveTo(R * 1.3, -R * 0.13);
     ctx.arc(0, 0, R * 0.46, 0, Math.PI * 2);
-    ctx.rect(0, -R * 0.13, R * 1.3, R * 0.26);
+    // The barrel used to be added to this clip as a bare rectangle. Near
+    // a wall its hard corners caught the shadow and showed up as a black
+    // slab floating off the muzzle. The hull and turret alone are enough
+    // to seat the tank in shade; the barrel is thin enough that nobody
+    // reads shade on it, and the rectangle was doing real visual harm.
     ctx.clip();
     ctx.rotate(-t.a);
     ctx.translate(-t.x, -t.y);
     ctx.globalCompositeOperation = "multiply";
-    ctx.drawImage(sh, -pad, -pad, u.w, u.h);
+    // Blit ONLY the patch of shadow under this tank. This used to hand
+    // the whole padded shadow canvas to the GPU once per tank, per
+    // frame, with multiply blending — on a big arena that is tens of
+    // megapixels of blending for a sprite 35 px across, and it was the
+    // single biggest cost in the frame.
+    const box = R * 2.2;
+    const sx = t.x - box, sy = t.y - box, sw = box * 2, sh2 = box * 2;
+    const scale = sh.width / u.w;
+    ctx.drawImage(sh,
+      (sx + pad) * scale, (sy + pad) * scale, sw * scale, sh2 * scale,
+      sx, sy, sw, sh2);
     ctx.restore();
   }
   ctx.globalCompositeOperation = "source-over";
@@ -5582,7 +5625,11 @@ function drawTank(t, now) {
     // Clip to the hull rectangle so neither the material nor the
     // pattern ever spills onto the treads.
     ctx.beginPath();
-    rrPath(-R * 0.9, -R * 0.58, R * 1.8, R * 1.16, R * 0.24);
+    // Clip to the FULL hull footprint, treads included. It used to clip
+    // to the narrower body box while the material tile behind it is a
+    // square — so as the tank turned, the tile's corners showed past the
+    // clip as a pale rectangle sliding under the hull.
+    rrPath(-R * 0.98, -R * 0.86, R * 1.96, R * 1.72, R * 0.26);
     ctx.clip();
     if (bodyIsMaterial) fillMaterial(bodyColor, R, baseHexOv, t.a);
     else { ctx.fillStyle = hullPaint(bodyColor, R, baseHexOv, t.a); ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4); }

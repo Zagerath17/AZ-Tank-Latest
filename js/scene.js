@@ -283,16 +283,26 @@ function buildFloor(w, h, seed, pad = 0, rects = [], d = 1, maze = null, cell = 
     crackRun(g, r, x, y, r() * Math.PI * 2, 40 + r() * 130,
              0.8 + r() * 1.1, 0.5 + r() * 0.5, seams);
   }
-  // Old patch seams: long, straight, shallow.
-  const seamCount = Math.max(2, Math.floor(w / 420));
+  // Old patch seams. These used to run the FULL width or height of the
+  // map in one dead-straight stroke, which read as a ruled line drawn
+  // across the arena rather than a join in the concrete. Now they are
+  // short segments that wander, so they look like the edge of a poured
+  // section instead of a pencil line.
+  const seamCount = Math.max(2, Math.floor((w * h) / 420000));
   for (let i = 0; i < seamCount; i++) {
     const vertical = r() < 0.5;
-    const p = r();
-    g.strokeStyle = "rgba(60,61,60,0.20)";
-    g.lineWidth = 1.1;
+    let px = r() * w, py = r() * h;
+    const len = Math.min(w, h) * (0.18 + r() * 0.3);
+    const steps = Math.max(3, Math.floor(len / 26));
+    g.strokeStyle = `rgba(60,61,60,${0.10 + r() * 0.07})`;
+    g.lineWidth = 1.0;
     g.beginPath();
-    if (vertical) { g.moveTo(p * w, 0); g.lineTo(p * w + (r() - 0.5) * 30, h); }
-    else { g.moveTo(0, p * h); g.lineTo(w, p * h + (r() - 0.5) * 30); }
+    g.moveTo(px, py);
+    for (let k = 0; k < steps; k++) {
+      if (vertical) { py += len / steps; px += (r() - 0.5) * 7; }
+      else { px += len / steps; py += (r() - 0.5) * 7; }
+      g.lineTo(px, py);
+    }
     g.stroke();
   }
 
@@ -787,16 +797,50 @@ export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = nu
 
 const wu = (cv) => cv.__wu ?? { w: cv.width, h: cv.height };
 
-export function drawGround(ctx, scene) {
+// Blit the baked art at its NATIVE pixel size.
+//
+// These bitmaps are baked at `density` device-pixels per world unit and
+// were then being drawn at world size — so every single frame Skia
+// rescaled several million pixels through its filtered-bitmap path. A
+// real profile put ~80% of all rasterisation time in exactly that:
+// drawGround and drawWallLayer inside S32_alpha_D32_filter_DX.
+//
+// Scaling the transform by 1/density and drawing 1:1 means the blit is
+// a straight copy instead of a filtered resample, which is the single
+// biggest win available in the renderer.
+function blitNative(ctx, cv, x, y) {
+  const u = wu(cv);
+  const d = (cv.width / Math.max(1, u.w)) || 1;
+  if (Math.abs(d - 1) < 0.001) { ctx.drawImage(cv, x, y); return; }
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(1 / d, 1 / d);
+  ctx.drawImage(cv, 0, 0);          // 1:1 — no resample
+  ctx.restore();
+}
+
+// Only the part of the ground that is actually on screen. The floor
+// canvas covers the arena PLUS a wide surround, so most of it is off
+// camera every frame — copying all of it was millions of wasted pixels.
+export function drawGround(ctx, scene, view) {
   if (!scene) return;
-  const u = wu(scene.floor);
-  ctx.drawImage(scene.floor, -scene.pad, -scene.pad, u.w, u.h);
+  const cv = scene.floor;
+  const u = wu(cv);
+  const d = (cv.width / Math.max(1, u.w)) || 1;
+  if (!view) { blitNative(ctx, cv, -scene.pad, -scene.pad); return; }
+  // `view` is the visible world rect. Clamp it to the bitmap and copy
+  // just that window, 1:1 in source pixels.
+  const x0 = Math.max(-scene.pad, view.x), y0 = Math.max(-scene.pad, view.y);
+  const x1 = Math.min(-scene.pad + u.w, view.x + view.w);
+  const y1 = Math.min(-scene.pad + u.h, view.y + view.h);
+  if (x1 <= x0 || y1 <= y0) return;
+  const sx = (x0 + scene.pad) * d, sy = (y0 + scene.pad) * d;
+  const sw = (x1 - x0) * d, sh2 = (y1 - y0) * d;
+  ctx.drawImage(cv, sx, sy, sw, sh2, x0, y0, x1 - x0, y1 - y0);
 }
 
 export function drawWallLayer(ctx, scene) {
   if (!scene) return;
-  const sh = wu(scene.shadow.cv);
-  ctx.drawImage(scene.shadow.cv, -scene.shadow.pad, -scene.shadow.pad, sh.w, sh.h);
-  const wl = wu(scene.walls);
-  ctx.drawImage(scene.walls, 0, 0, wl.w, wl.h);
+  blitNative(ctx, scene.shadow.cv, -scene.shadow.pad, -scene.shadow.pad);
+  blitNative(ctx, scene.walls, 0, 0);
 }
