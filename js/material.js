@@ -44,10 +44,15 @@ import { SUN } from "./scene.js";
 //   dome   — how domed the casting is, which sets how far the
 //            reflection sweeps across it as the tank turns.
 const MATERIALS = {
-  bronze:   { metal: 1, rough: 0.26, envMul: 1.25, dome: 0.84 },
-  silver:   { metal: 1, rough: 0.055, envMul: 1.55, dome: 0.86 },
-  gold:     { metal: 1, rough: 0.12, envMul: 1.45, dome: 0.84 },
-  platinum: { metal: 1, rough: 0.20, envMul: 1.30, dome: 0.84 },
+  // F0 is the measured reflectance of the real metal, not the swatch
+  // colour — that is what makes gold look like gold rather than a
+  // yellow-painted mirror. Roughness separates them further: cast
+  // bronze is satin, silver is a near-mirror, platinum is greyer and
+  // softer than silver, gold sits between.
+  bronze:   { metal: 1, rough: 0.34, envMul: 1.10, dome: 0.84, f0: [0.955, 0.638, 0.538] },
+  silver:   { metal: 1, rough: 0.045, envMul: 1.70, dome: 0.88, f0: [0.972, 0.960, 0.915] },
+  gold:     { metal: 1, rough: 0.13,  envMul: 1.55, dome: 0.86, f0: [1.000, 0.766, 0.336] },
+  platinum: { metal: 1, rough: 0.23, envMul: 1.28, dome: 0.84, f0: [0.679, 0.642, 0.588] },
   // Every OTHER paint in the game. Not a conductor — pigment under a
   // clear coat — so it keeps a full diffuse response and only picks up
   // a soft sheen and a single sun highlight. Enough to sit in the same
@@ -205,6 +210,10 @@ function renderTile(hex, finish, size, ang) {
     // Its colour still comes from DIFFUSE, which is what keeps a red
     // tank red instead of turning it into red chrome.
     f0 = [0, 1, 2].map((i) => sat(0.04 * (1 - metalness) + base[i] * metalness));
+  } else if (M.f0) {
+    // A measured conductor: its own reflectance spectrum, tinted a
+    // little by the paint so the shop swatch still matches the tank.
+    f0 = [0, 1, 2].map((i) => sat(M.f0[i] * 0.82 + base[i] * 0.18));
   } else if (metalness >= 1) {
     // A conductor's F0 IS its colour. This is the paint you bought,
     // lifted to the reflectance real metal has — same hue, physical

@@ -1056,6 +1056,7 @@ function readActions(tank, binds) {
    ================================================================ */
 
 function frame(now) {
+  const frameT0 = performance.now();
   if (!S) return;
   const dt = Math.min((now - S.lastT) / 1000, 0.05);
   S.lastT = now;
@@ -1064,7 +1065,11 @@ function frame(now) {
   // nobody can move, so a generous slice costs nothing; once play starts
   // anything left is finished off in small bites rather than stalling a
   // frame. In practice the queue is empty well before GO.
-  if (S.prewarm) stepPrewarm(now < (S.freezeUntil ?? 0) ? 8 : 2);
+  // During the countdown nothing is moving, so there is slack to bake
+  // in — but a single job must never blow the frame. The scene is the
+  // one big one; give it its own generous slot on the very first ticks
+  // and keep the rest to a small budget.
+  if (S.prewarm) stepPrewarm(now < (S.freezeUntil ?? 0) ? 10 : 2);
 
   // Shared per-frame data: laser aiming lines (drawn for everyone,
   // dodged by bots) and the hazard list bots treat as bullets.
@@ -1192,6 +1197,21 @@ function frame(now) {
     }
   }
 
+  // Frame-time governor. A rolling average, checked a few times a
+  // second: consistently over budget and the render scale steps down;
+  // comfortably under and it steps back up. Bounded so it can never
+  // collapse to a blur or overshoot the 1440p ceiling.
+  {
+    const spent = performance.now() - frameT0;
+    S.frameAvg = S.frameAvg == null ? spent : S.frameAvg * 0.9 + spent * 0.1;
+    if (now - (S.resCheckAt ?? 0) > 400) {
+      S.resCheckAt = now;
+      const cur = S.resScale ?? 1;
+      if (S.frameAvg > 13 && cur > 0.55) S.resScale = Math.max(0.55, cur - 0.1);
+      else if (S.frameAvg < 7 && cur < 1) S.resScale = Math.min(1, cur + 0.05);
+    }
+  }
+
   setEngine(!S.banner, S.engineMovingLocal, S.engineMovingEnemy);
   setFlame(!S.banner && !!S.tanks && S.tanks.some(t => t.flameOn && !t.dead && !t.gone));
   draw(now);
@@ -1260,6 +1280,11 @@ function stepTanks(now, dt) {
             walls: S.walls,
             mud: S.mudPits,
             mudSlow: MUD.slow,
+          // The closing zone. Bots were completely blind to it and would
+          // sit in a red cell taking ticks until they died.
+          zoneDist: S.zoneActive ? S.zoneDist : null,
+          zoneLevel: S.zoneLevel ?? 0,
+          zoneWarn: S.zoneWarnLevel ?? -1,
             tanks: S.tanks,
             tankR: TANK_RAD,
             bullets: S.aiBullets ?? S.bullets,
@@ -3004,14 +3029,19 @@ function spawnWall(t, now) {
 function addWall(byId, x, y, a, now) {
   const half = WALL.lengthCells * CELL * 0.5;
   const perp = a + Math.PI / 2;
+  // The builder's upgrades, looked up from the id. This used to read a
+  // bare `t`, which does not exist in this function — placing a wall
+  // threw a ReferenceError and killed the frame loop outright.
+  const up = upOf(byId);
+  const hp = WALL.hp + Math.round(up?.wallHp ?? 0);
   S.walls.push({
     by: byId,
     x, y, a: perp,               // a = orientation of the LONG axis
     hx: half,                    // half-length along `perp`
     hy: WALL.thickCells * CELL * 0.5, // half-thickness
-    hp: WALL.hp + Math.round(t.up?.wallHp ?? 0),
-    hp0: WALL.hp + Math.round(t.up?.wallHp ?? 0),   // for the damage tint
-    life: WALL.lifeMs * (t.up?.wallDuration ?? 1),
+    hp,
+    hp0: hp,                     // for the damage tint
+    life: WALL.lifeMs * (up?.wallDuration ?? 1),
     born: now,
   });
 }
@@ -4260,7 +4290,13 @@ function draw(now) {
   // budget without exceeding it, so on a 16:9 display it lands exactly
   // on 2560x1440 and on anything else it gets as close as the aspect
   // allows. Bounded either way, so it can't run away on a big monitor.
-  const dpr = Math.max(1, Math.min(RENDER_W / Math.max(1, cw), RENDER_H / Math.max(1, ch)));
+  // ADAPTIVE RESOLUTION. 2560x1440 is up to 4x the pixels of a 1:1
+  // canvas, and on a mid-range GPU that alone can hold the game under
+  // 60fps — every fill, stroke and blit pays for it. Aim for the full
+  // budget, but back off when frames are running long and recover when
+  // they aren't, so the game stays smooth first and sharp second.
+  const target = Math.max(1, Math.min(RENDER_W / Math.max(1, cw), RENDER_H / Math.max(1, ch)));
+  const dpr = target * (S.resScale ?? 1);
   if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
     canvas.width = Math.round(cw * dpr);
     canvas.height = Math.round(ch * dpr);
@@ -4359,42 +4395,67 @@ function draw(now) {
         cellState[r][c] = st;
       }
     }
-    const paintRegion = (want, style) => {
-      ctx.fillStyle = style;
-      ctx.beginPath();
-      const RAD = CELL * 0.42;
+    // Painted as a smooth CONTOUR of the region rather than a grid of
+    // rounded squares. Marching-squares over the cell states gives the
+    // outline of the doomed area as real polygons, and running those
+    // through a corner-cutting pass turns the staircase into a flowing
+    // boundary that follows the arena's shape — including the outside of
+    // a non-rectangular map, where per-cell rounding looked worst.
+    // Smooth boundary WITHOUT tracing outlines. Edge-chaining kept
+    // producing broken loops (an outline that fails to close draws
+    // nothing at all, which is worse than a jagged one), so instead the
+    // region is rasterised into an offscreen mask at low resolution and
+    // blurred — thresholding a blurred mask rounds every corner and
+    // follows the arena's shape for free, with no topology to get wrong.
+    const zoneMask = (want) => {
+      const SS = 4;                                  // px per cell in the mask
+      const mw = cols * SS, mh = rows * SS;
+      let cv = S._zoneCv;
+      if (!cv || cv.width !== mw || cv.height !== mh) {
+        cv = S._zoneCv = document.createElement("canvas");
+        cv.width = mw; cv.height = mh;
+      }
+      const g = cv.getContext("2d");
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, mw, mh);
+      g.fillStyle = "#fff";
+      let any = false;
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           if (cellState[r][c] !== want) continue;
-          const same = (rr, cc) => (cellState[rr]?.[cc] ?? -1) === want;
-          // Only round a corner that actually faces open ground; a cell
-          // with neighbours on both sides stays square so the interior
-          // stays solid and seamless.
-          const up = same(r - 1, c), dn = same(r + 1, c);
-          const lf = same(r, c - 1), rt = same(r, c + 1);
-          const x = c * CELL, y = r * CELL;
-          const tl = (!up && !lf) ? RAD : 0;
-          const tr = (!up && !rt) ? RAD : 0;
-          const br = (!dn && !rt) ? RAD : 0;
-          const bl = (!dn && !lf) ? RAD : 0;
-          // A hair of overlap so adjoining cells leave no seam.
-          const o = 0.6;
-          ctx.moveTo(x + tl, y - o);
-          ctx.lineTo(x + CELL - tr + o, y - o);
-          if (tr) ctx.quadraticCurveTo(x + CELL + o, y - o, x + CELL + o, y + tr);
-          ctx.lineTo(x + CELL + o, y + CELL - br);
-          if (br) ctx.quadraticCurveTo(x + CELL + o, y + CELL + o, x + CELL - br, y + CELL + o);
-          ctx.lineTo(x + bl, y + CELL + o);
-          if (bl) ctx.quadraticCurveTo(x - o, y + CELL + o, x - o, y + CELL - bl);
-          ctx.lineTo(x - o, y + tl);
-          if (tl) ctx.quadraticCurveTo(x - o, y - o, x + tl, y - o);
-          ctx.closePath();
+          any = true;
+          g.fillRect(c * SS, r * SS, SS, SS);
         }
       }
-      ctx.fill();
+      return any ? cv : null;
     };
-    paintRegion(2, "rgba(200, 32, 30, 0.42)");
-    paintRegion(1, `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`);
+    // A tinted silhouette, not the white mask: stamp the mask into a
+    // scratch layer, tint it, then blit. Simple and always closed.
+    const tintLayer = (want, css) => {
+      const mask = zoneMask(want);
+      if (!mask) return;
+      let lay = S._zoneLay;
+      const lw = cols * CELL, lh = rows * CELL;
+      if (!lay || lay.width !== lw || lay.height !== lh) {
+        lay = S._zoneLay = document.createElement("canvas");
+        lay.width = lw; lay.height = lh;
+      }
+      const lg = lay.getContext("2d");
+      lg.setTransform(1, 0, 0, 1, 0, 0);
+      lg.clearRect(0, 0, lw, lh);
+      lg.filter = "blur(" + (CELL * 0.16).toFixed(1) + "px)";
+      lg.drawImage(mask, 0, 0, lw, lh);
+      lg.filter = "none";
+      // Harden the blurred edge a little so it reads as a boundary
+      // rather than a haze, then tint the whole silhouette.
+      lg.globalCompositeOperation = "source-in";
+      lg.fillStyle = css;
+      lg.fillRect(0, 0, lw, lh);
+      lg.globalCompositeOperation = "source-over";
+      ctx.drawImage(lay, 0, 0);
+    };
+    tintLayer(2, "rgba(200, 32, 30, 0.42)");
+    tintLayer(1, `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`);
   }
 
   // Mud is a puddle ON THE GROUND, so it goes down before the masonry.
@@ -4454,7 +4515,10 @@ function draw(now) {
       const cs = Math.cos(rot), sn = Math.sin(rot);
       ctx.globalAlpha = (d.boost ? 0.42 : 0.34) * (1 - k) * (1 - k * 0.3);
       ctx.beginPath();
-      for (const lo of d.lobes ?? [{ ox: 0, oy: 0, r: 1 }]) {
+      // Two lobes, not four: the silhouette still reads as irregular and
+      // it halves the arc count, which with a few tanks driving was a
+      // meaningful slice of the frame.
+      for (const lo of (d.lobes ?? [{ ox: 0, oy: 0, r: 1 }]).slice(0, 2)) {
         const lx = (lo.ox * cs - lo.oy * sn) * R0 * spread;
         const ly = (lo.ox * sn + lo.oy * cs) * R0 * spread;
         ctx.moveTo(dx0 + lx + lo.r * R0, dy0 + ly);
@@ -4487,6 +4551,33 @@ function draw(now) {
       ctx.fillText("+1", p.x, p.y - TANK_R - k * 22);
       ctx.restore();
     }
+  }
+
+  // Placed walls throw the same shadow the permanent masonry does —
+  // same height, same sun, same swept shape — so a dropped wall sits in
+  // the scene rather than floating on top of it.
+  if (S.walls.length) {
+    const WH = 20;                                  // matches scene.js
+    const ox = SHADOW.dx * WH, oy = SHADOW.dy * WH;
+    ctx.save();
+    ctx.fillStyle = "rgba(20,22,25,0.34)";
+    for (const w of S.walls) {
+      if ((w.hp ?? 1) <= 0) continue;
+      const c = Math.cos(w.a), sn = Math.sin(w.a);
+      const pts = [];
+      for (const [lx, ly] of [[-w.hx, -w.hy], [w.hx, -w.hy], [w.hx, w.hy], [-w.hx, w.hy]]) {
+        const wx = w.x + lx * c - ly * sn, wy = w.y + lx * sn + ly * c;
+        pts.push([wx, wy], [wx + ox, wy + oy]);     // footprint AND its offset
+      }
+      const hull = convexHull2(pts);
+      if (!hull.length) continue;
+      ctx.beginPath();
+      ctx.moveTo(hull[0][0], hull[0][1]);
+      for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i][0], hull[i][1]);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   for (const w of S.walls) drawWall(w, now);
@@ -5169,6 +5260,19 @@ function fillMaterial(color, R, hexOverride, ang) {
 // of the barrel and squares off the rounded corners, which is exactly
 // why it came out as a box. Stamping the true silhouette at a few points
 // along the offset keeps the shape and still joins up.
+// Andrew's monotone chain. The hull of a box and its sun-offset copy is
+// the volume the light sweeps through, i.e. the shadow's outline.
+function convexHull2(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], hi = [];
+  for (const q of p) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i];
+    while (hi.length >= 2 && cr(hi[hi.length - 2], hi[hi.length - 1], q) <= 0) hi.pop(); hi.push(q); }
+  lo.pop(); hi.pop();
+  return lo.concat(hi);
+}
+
 function tankSilhouette(ctx2, t, dx, dy) {
   const R = TANK_R;
   const bar = BARRELS[t.weapon || "normal"] ?? BARRELS.normal;
@@ -5244,16 +5348,25 @@ function drawTankShadows(now) {
   ctx.clip("evenodd");
 
   ctx.fillStyle = "rgba(18,20,23,0.34)";
-  const STEPS = 5;                     // enough to read as one solid smear
   for (const t of S.tanks) {
     if (t.dead || t.gone || now < (t.phaseUntil ?? 0)) continue;
     // Every stamp goes into ONE path and is filled once, so the overlaps
     // don't darken where they pile up.
+    // Two stamps — where the tank stands and where the sun throws it —
+    // joined by a quad across the gap. Six full stamps of the outline
+    // per tank was ~450 path segments a frame on its own, easily the
+    // most expensive thing being drawn, and it looks no different.
     ctx.beginPath();
-    for (let i = 0; i <= STEPS; i++) {
-      const f = i / STEPS;
-      tankSilhouette(ctx, t, ox * f, oy * f);
-    }
+    tankSilhouette(ctx, t, 0, 0);
+    tankSilhouette(ctx, t, ox, oy);
+    const R2 = TANK_R;
+    const pdir = Math.atan2(oy, ox) + Math.PI / 2;
+    const px2 = Math.cos(pdir) * R2 * 0.9, py2 = Math.sin(pdir) * R2 * 0.9;
+    ctx.moveTo(t.x + px2, t.y + py2);
+    ctx.lineTo(t.x + ox + px2, t.y + oy + py2);
+    ctx.lineTo(t.x + ox - px2, t.y + oy - py2);
+    ctx.lineTo(t.x - px2, t.y - py2);
+    ctx.closePath();
     ctx.fill("nonzero");
   }
   ctx.restore();

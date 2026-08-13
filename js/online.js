@@ -1422,7 +1422,7 @@ function renderLobby(code, lobby) {
     startBtn.hidden = false;
     startBtn.disabled = entries.length < 2;
     status.textContent = entries.length < 2
-      ? "Share the code, or add a bot — you need at least 2 tanks."
+      ? ""
       : `${entries.length} tanks ready. You're the host.`;
   } else {
     startBtn.hidden = true;

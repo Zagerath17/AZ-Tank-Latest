@@ -57,7 +57,11 @@ function tile(id, { owned, worn, afford, unlocked }) {
   const cost = s.cost ?? 0;
   let state = "";
   let foot = "";
-  if (worn) { state = "is-worn"; foot = "WORN"; }
+  // `worn` is now which SLOT this paint occupies: 1 = primary, 2 = the
+  // pattern's second colour, 0 = not worn. Both live in this one tab, so
+  // there is no separate colour list to open any more.
+  if (worn === 1) { state = "is-worn"; foot = "① MAIN"; }
+  else if (worn === 2) { state = "is-worn is-second"; foot = "② PATTERN"; }
   else if (owned) { state = "is-owned"; foot = "WEAR"; }
   else if (!unlocked) { state = "is-locked"; foot = "🔒"; }
   else if (!afford) { state = "is-broke"; foot = `💀 ${cost}`; }
@@ -65,13 +69,37 @@ function tile(id, { owned, worn, afford, unlocked }) {
   // A locked tile says what's missing, not just that it's shut.
   const why = unlocked || owned ? "" : lockReason(id, ownsSkin);
   return `
+    <div class="shop-cell">
     <button class="shop-tile ${state}" data-skin="${id}" type="button"
             aria-label="${s.name}${owned ? "" : `, ${cost} tags${why ? `, locked: ${why}` : ""}`}">
       <span class="shop-chip" data-chip="${id}" style="${swatchStyle(id)}"></span>
       <span class="shop-name">${s.name}</span>
       <span class="shop-foot">${foot}</span>
       ${why ? `<span class="shop-need">${why}</span>` : ""}
-    </button>`;
+    </button>
+    ${owned ? `<button class="shop-slot2${worn === 2 ? " is-on" : ""}" data-second="${id}"
+            type="button" title="Use ${s.name} as the pattern's second colour">②</button>` : ""}
+    </div>`;
+}
+
+// If no second colour has been chosen yet, pick something the player
+// owns that actually contrasts with their main paint, so a pattern is
+// never two shades of the same thing.
+function fallbackSecond(main) {
+  const owned = Object.keys(ownedSkins()).filter((id) => SKINS[id] && !SKINS[id].reserved && id !== main);
+  if (!owned.length) return main;
+  const hex = (id) => SKINS[id].hex;
+  const lum = (h) => {
+    const n = parseInt(h.slice(1), 16);
+    return 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
+  };
+  const mine = lum(hex(main));
+  let best = owned[0], bd = -1;
+  for (const id of owned) {
+    const d = Math.abs(lum(hex(id)) - mine);
+    if (d > bd) { bd = d; best = id; }
+  }
+  return best;
 }
 
 /* ---------- the colours tab ---------- */
@@ -82,6 +110,9 @@ function renderColours() {
   const acc = getAccount();
   const tags = getTags();
   const worn = getSkin();
+  // The second colour is chosen right here now, rather than in a modal
+  // that duplicated this entire grid.
+  const second = getPatternColors()[1] ?? null;
 
   // Grouped by family, in progression order, with the materials last —
   // that ordering IS the unlock chain, so the shelf reads top to bottom
@@ -111,7 +142,8 @@ function renderColours() {
         <div class="shop-grid">
           ${g.ids.map((id) => tile(id, {
             owned: ownsSkin(id),
-            worn: id === worn,
+            // 1 = primary, 2 = the pattern's second colour.
+            worn: id === worn ? 1 : (id === second ? 2 : 0),
             afford: tags >= (SKINS[id].cost ?? 0),
             unlocked: skinUnlocked(id, ownsSkin),
           })).join("")}
@@ -147,7 +179,14 @@ function renderColours() {
 // A little swatch showing the pattern shape in neutral tones, so the
 // tile reads as "camo" / "lightning" etc. before you pick colours.
 function patternChip(id) {
-  const dark = "#2a2f3a", light = "#c7d0de";
+  // Previewed in the player's OWN two colours rather than a fixed pair
+  // of greys, so the swatch shows what the pattern will actually look
+  // like on their tank. `light` is the main paint, `dark` the second.
+  const one = getSkin();
+  const cur = getPatternColors();
+  const two = (cur[1] && cur[1] !== one) ? cur[1] : fallbackSecond(one);
+  const light = SKINS[one]?.hex ?? "#c7d0de";
+  const dark = SKINS[two]?.hex ?? "#2a2f3a";
   switch (id) {
     case "twoTone":
       return `background: linear-gradient(90deg, ${light} 50%, ${dark} 50%);`;
@@ -280,57 +319,6 @@ function renderPatterns() {
     </section>`;
 }
 
-// The two-colour picker shown when equipping a multi-colour pattern.
-// Lists the colours you own; the player taps two DIFFERENT ones.
-function openPatternPicker(patternId) {
-  const modal = document.getElementById("pattern-picker");
-  if (!modal) return;
-  const owned = Object.keys(ownedSkins()).filter((id) => SKINS[id] && !SKINS[id].reserved);
-  const pre = getPatternColors();
-  const chosen = getPattern() === patternId && pre.length === 2 ? [...pre] : [];
-
-  const grid = modal.querySelector("#pattern-picker-grid");
-  const err = modal.querySelector("#pattern-picker-msg");
-  const paint = () => {
-    grid.innerHTML = owned.map((id) => {
-      const slot = chosen.indexOf(id);
-      const badge = slot === 0 ? "①" : slot === 1 ? "②" : "";
-      return `
-        <button class="pp-swatch ${slot >= 0 ? "is-picked" : ""}" data-color="${id}" type="button"
-                title="${SKINS[id].name}">
-          <span class="pp-chip" style="background:${SKINS[id].hex};"></span>
-          <span class="pp-badge">${badge}</span>
-        </button>`;
-    }).join("");
-  };
-  paint();
-  err.textContent = "";
-  modal.hidden = false;
-
-  const onPick = (e) => {
-    const sw = e.target.closest("[data-color]");
-    if (!sw) return;
-    const id = sw.dataset.color;
-    const at = chosen.indexOf(id);
-    if (at >= 0) chosen.splice(at, 1);
-    else if (chosen.length < 2) chosen.push(id);
-    else { chosen.shift(); chosen.push(id); }
-    paint();
-  };
-  grid.onclick = onPick;
-
-  modal.querySelector("#pattern-picker-apply").onclick = async () => {
-    if (chosen.length < 2) { err.textContent = "Pick two different colours."; return; }
-    try {
-      await equipPattern(patternId, chosen);
-      modal.hidden = true;
-      refresh();
-      toast(`${PATTERNS[patternId].name} equipped.`);
-    } catch (e2) { err.textContent = e2?.message ?? "Couldn't equip that."; }
-  };
-  modal.querySelector("#pattern-picker-cancel").onclick = () => { modal.hidden = true; };
-}
-
 /* ---------- the upgrades tab ---------- */
 
 function renderUpgrades() {
@@ -390,7 +378,7 @@ function renderUpgrades() {
             <div class="up-row${full ? " is-full" : ""}">
               <div class="up-info">
                 <span class="up-name">${n.name}</span>
-                <span class="up-effect">${n.fmt(n.per)} per rank${have ? ` · now ${n.fmt(have * n.per)}` : ""}</span>
+                <span class="up-effect">${n.fmt(n.per)}${have ? ` · now ${n.fmt(have * n.per)}` : ""}</span>
               </div>
               <span class="up-pips" aria-label="${have} of ${n.ranks}">${pips}</span>
               <button class="btn btn-small up-buy" data-up="${key}"
@@ -495,6 +483,21 @@ export function initShop() {
   // One delegated handler: tap to wear what you own, or to buy what
   // you can afford.
   document.getElementById("shop-colours")?.addEventListener("click", async (e) => {
+    // ② assigns this paint as the pattern's SECOND colour, in place of
+    // the old modal that re-listed every colour a second time.
+    const two = e.target.closest("[data-second]");
+    if (two) {
+      const cid = two.dataset.second;
+      if (!getAccount()) { toast("Log in to buy and wear paint."); return; }
+      try {
+        const cur = getPatternColors();
+        const next = [cur[0] ?? getSkin(), cid];
+        await equipPattern(getPattern(), next);
+        refresh();
+      } catch (err) { toast(err?.message ?? "Couldn't set that colour."); }
+      return;
+    }
+
     const btn = e.target.closest("[data-skin]");
     if (!btn) return;
     const id = btn.dataset.skin;
@@ -506,6 +509,12 @@ export function initShop() {
       if (id === getSkin()) return; // already wearing it
       try {
         await equipSkin(id);
+        // Slot 1 IS the worn paint, so keep the pattern pair aligned
+        // with it — otherwise a pattern keeps painting the old colour.
+        const cur = getPatternColors();
+        if (cur.length === 2 && cur[0] !== id) {
+          await equipPattern(getPattern(), [id, cur[1]]);
+        }
         refresh();
       } catch (err) {
         toast(err?.message ?? "Couldn't equip that.");
@@ -541,23 +550,29 @@ export function initShop() {
     if (!p) return;
     if (!getAccount()) { toast("Log in to buy and wear patterns."); return; }
 
+    // Tapping a pattern just WEARS it now. The colours it uses are the
+    // two already chosen in the Colours tab, so there is no second
+    // colour list to open — that modal duplicated the whole grid.
+    const pair = () => {
+      const cur = getPatternColors();
+      const one = getSkin();
+      const two = cur[1] && cur[1] !== one ? cur[1] : fallbackSecond(one);
+      return [one, two];
+    };
+
     if (ownsPattern(id)) {
-      if (id === DEFAULT_PATTERN) {
-        // Solid takes no colours — equip straight away.
-        try { await equipPattern(id, []); refresh(); }
-        catch (err) { toast(err?.message ?? "Couldn't equip that."); }
-        return;
-      }
-      // Owned multi-colour pattern → pick its two colours.
-      if (patternColors(id) >= 2) openPatternPicker(id);
+      try {
+        await equipPattern(id, id === DEFAULT_PATTERN ? [] : pair());
+        refresh();
+      } catch (err) { toast(err?.message ?? "Couldn't equip that."); }
       return;
     }
     btn.disabled = true;
     try {
       await buyPattern(id);
-      toast(`${p.name} bought — pick two colours to wear it.`);
+      await equipPattern(id, id === DEFAULT_PATTERN ? [] : pair());
+      toast(`${p.name} bought — you're wearing it.`);
       refresh();
-      if (patternColors(id) >= 2) openPatternPicker(id);
     } catch (err) {
       toast(err?.message ?? "Couldn't buy that.");
       btn.disabled = false;

@@ -146,7 +146,10 @@ function newCanvas(w, h, d = 1) {
 // worn unevenly. Rendered at a fraction of the resolution and scaled up,
 // because none of this has any business being pixel-sharp.
 function paintBase(g, w, h, seed, d = 1) {
-  const SCALE = 3 / Math.min(2, d);
+  // Coarser base sample grid: this is broad mottling that gets scaled
+  // up and covered in grain anyway, so the extra samples were invisible
+  // and cost real time on the first frame of a round.
+  const SCALE = 4 / Math.min(2, d);
   const bw = Math.max(2, Math.ceil(w / SCALE)), bh = Math.max(2, Math.ceil(h / SCALE));
   const tmp = newCanvas(bw, bh);
   const tg = tmp.getContext("2d");
@@ -182,7 +185,7 @@ function paintBase(g, w, h, seed, d = 1) {
 // reading as flat paper.
 function paintAggregate(g, w, h, seed) {
   const r = rng(seed ^ 0x2f1a);
-  const count = Math.floor((w * h) / 190);
+  const count = Math.floor((w * h) / 320);   // aggregate grains
   const lx = Math.sign(Math.cos(SUN.az)), ly = Math.sign(Math.sin(SUN.az));
   for (let i = 0; i < count; i++) {
     const x = r() * w, y = r() * h;

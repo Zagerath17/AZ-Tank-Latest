@@ -524,7 +524,10 @@ function navigate(t, B, world, P, now, gun) {
   // of a dead end still can.
   const HALF = R * 0.66;                  // true hull half-width
   const SQUEEZE = R * 0.95;               // width needed to turn in
-  const probe = R * 2.4;
+  // Look further ahead. A short probe only sees a wall once the nose is
+  // nearly on it, which at speed means the bot is already committed and
+  // scrapes along the masonry before it can turn out.
+  const probe = R * 4.2;
   const squeeze = new Array(DIRS).fill(1);
   for (let i = 0; i < DIRS; i++) {
     const d = clearance(t, world, RAY[i], probe, HALF);
@@ -565,13 +568,20 @@ function navigate(t, B, world, P, now, gun) {
     // the enemy, which is both the most readable thing they can do and
     // the easiest thing to shoot. Reverse stays available for a genuine
     // break-off; it is no longer competitive for an approach.
-    score[i] += Math.max(0, along) * 1.9 + Math.max(0, -along) * 0.18;
+    // Reverse is for backing out of somewhere, not for getting places.
+    // Leaving it even mildly competitive produced the shuffle: a bot
+    // creeps back, the forward score wins again, it creeps forward, and
+    // it repeats — travelling almost nowhere. Backwards headings now
+    // score near zero unless there is genuinely nothing ahead.
+    score[i] += Math.max(0, along) * 2.4 - Math.max(0, -along) * 0.9;
     // Openness is a MULTIPLIER on desire, not a veto: a direction that
     // is merely tight stays available, one that is solid stops being
     // attractive. This is what keeps a bot off walls without ever
     // leaving it with nowhere legal to go.
     score[i] *= 0.25 + 0.75 * open[i];
-    if (open[i] < 0.18) score[i] -= (0.18 - open[i]) * 8;
+    // And treat a closing direction as genuinely bad well before it is
+    // blocked, so the turn starts early rather than at the last moment.
+    if (open[i] < 0.45) score[i] -= (0.45 - open[i]) * 14;
     // A way that is open to a thin probe but shut to a turning one is a
     // slot too tight to use. Weighted by how INVITING it looks, because
     // the trap is specifically a direction that reads wide open and
@@ -594,6 +604,31 @@ function navigate(t, B, world, P, now, gun) {
     for (let i = 0; i < DIRS; i++) {
       const c = Math.cos(angDiff(RAY[i].a, a));
       if (c > 0) score[i] -= c * push;
+    }
+  }
+
+  // --- the closing zone ------------------------------------------------
+  // Red ground kills, and ground that is about to turn red will kill
+  // shortly. Both are scored as danger so a bot leaves under its own
+  // steam instead of standing in it, and the pull scales with how bad
+  // the cell is — already lethal outweighs merely doomed.
+  if (world.zoneDist) {
+    const cellPx = world.cell;
+    const zl = world.zoneLevel ?? 0, zw = world.zoneWarn ?? -1;
+    const layerAt = (x, y) => {
+      const c = Math.floor(x / cellPx), rr2 = Math.floor(y / cellPx);
+      const row = world.zoneDist[rr2];
+      return row ? (row[c] ?? Infinity) : Infinity;
+    };
+    const badness = (L) => (L === Infinity ? 0 : L < zl ? 1 : L === zw ? 0.6 : L === zl ? 0.3 : 0);
+    const here = badness(layerAt(t.x, t.y));
+    for (let i = 0; i < DIRS; i++) {
+      // Sample a little way along each heading: is that better or worse?
+      const px2 = t.x + RAY[i].cx * cellPx * 1.15;
+      const py2 = t.y + RAY[i].cy * cellPx * 1.15;
+      const there = badness(layerAt(px2, py2));
+      score[i] -= there * 9;
+      if (here > 0) score[i] += (here - there) * 11;   // any way out is good
     }
   }
 
