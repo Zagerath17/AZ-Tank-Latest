@@ -3175,11 +3175,16 @@ function spawnCannon(byId, x, y, a, now) {
 function stepSnipesWrap() {} // (kept for clarity; stepSnipes called in stepSpecials)
 
 function stepCannons(now, dt) {
-  const r = CANNON.r * BULLET_R * (c.sizeMul ?? 1);
   const survivors = [];
 
   for (const c of S.cannons) {
     if (now - c.born > CANNON.lifeMs) { explodeCannon(c, now); continue; }
+
+    // Per-shell, since the Cannon Size upgrade makes each one its own
+    // width. This was being read from `c` ABOVE the loop, where `c` does
+    // not exist yet — a ReferenceError that killed the frame the instant
+    // physics started, i.e. the moment the countdown hit zero.
+    const r = CANNON.r * BULLET_R * (c.sizeMul ?? 1);
 
     let alive = true;
     c.x += c.vx * dt;
@@ -4337,19 +4342,59 @@ function draw(now) {
       if (L === wl) return 1;
       return 0;
     };
+    // Painted as ONE rounded region per state rather than a cell-by-cell
+    // grid of squares. A square per cell gives a hard stair-stepped edge
+    // that looks especially wrong on a map that isn't square; rounding
+    // each cell's outer corners and overlapping them into a single path
+    // lets the boundary read as a closing ring that follows the arena's
+    // actual shape.
+    const cellState = [];
     for (let r = 0; r < rows; r++) {
+      cellState[r] = [];
       for (let c = 0; c < cols; c++) {
         let st = stateAt(r, c);
         if (st === 0 && (S.zoneDist[r][c] === Infinity)) {
-          // Outside cell — inherit from inside neighbours.
           st = Math.max(stateAt(r - 1, c), stateAt(r + 1, c), stateAt(r, c - 1), stateAt(r, c + 1));
         }
-        if (st === 2) ctx.fillStyle = "rgba(200, 32, 30, 0.42)";
-        else if (st === 1) ctx.fillStyle = `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`;
-        else continue;
-        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+        cellState[r][c] = st;
       }
     }
+    const paintRegion = (want, style) => {
+      ctx.fillStyle = style;
+      ctx.beginPath();
+      const RAD = CELL * 0.42;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          if (cellState[r][c] !== want) continue;
+          const same = (rr, cc) => (cellState[rr]?.[cc] ?? -1) === want;
+          // Only round a corner that actually faces open ground; a cell
+          // with neighbours on both sides stays square so the interior
+          // stays solid and seamless.
+          const up = same(r - 1, c), dn = same(r + 1, c);
+          const lf = same(r, c - 1), rt = same(r, c + 1);
+          const x = c * CELL, y = r * CELL;
+          const tl = (!up && !lf) ? RAD : 0;
+          const tr = (!up && !rt) ? RAD : 0;
+          const br = (!dn && !rt) ? RAD : 0;
+          const bl = (!dn && !lf) ? RAD : 0;
+          // A hair of overlap so adjoining cells leave no seam.
+          const o = 0.6;
+          ctx.moveTo(x + tl, y - o);
+          ctx.lineTo(x + CELL - tr + o, y - o);
+          if (tr) ctx.quadraticCurveTo(x + CELL + o, y - o, x + CELL + o, y + tr);
+          ctx.lineTo(x + CELL + o, y + CELL - br);
+          if (br) ctx.quadraticCurveTo(x + CELL + o, y + CELL + o, x + CELL - br, y + CELL + o);
+          ctx.lineTo(x + bl, y + CELL + o);
+          if (bl) ctx.quadraticCurveTo(x - o, y + CELL + o, x - o, y + CELL - bl);
+          ctx.lineTo(x - o, y + tl);
+          if (tl) ctx.quadraticCurveTo(x - o, y - o, x + tl, y - o);
+          ctx.closePath();
+        }
+      }
+      ctx.fill();
+    };
+    paintRegion(2, "rgba(200, 32, 30, 0.42)");
+    paintRegion(1, `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`);
   }
 
   // Mud is a puddle ON THE GROUND, so it goes down before the masonry.

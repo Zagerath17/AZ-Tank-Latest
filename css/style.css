@@ -93,6 +93,14 @@ body {
     min-width: 420px;
     gap: 16px;
   }
+  /* Seven buttons in two columns leaves the account button stranded in
+     the left-hand column. Span it across both so it sits centred on the
+     bottom row, under Social and Settings. */
+  #screen-menu .menu-grid #menu-login {
+    grid-column: 1 / -1;
+    justify-self: center;
+    min-width: 60%;
+  }
   #screen-menu .foot { position: absolute; bottom: 16px; left: 0; right: 0; }
 }
 
@@ -277,12 +285,14 @@ body {
 .tank-row {
   display: flex;
   justify-content: center;
-  gap: 18px;
+  /* 40% bigger sprites, and a tighter gap — at the old spacing they
+     read as four separate icons rather than a line-up. */
+  gap: 12px;
   margin-top: 4px;
 }
 .tank-row .tank {
-  width: 38px;
-  height: 38px;
+  width: 53px;
+  height: 53px;
   animation: idle 2.4s ease-in-out infinite;
 }
 .tank-row .tank:nth-child(2) { animation-delay: .3s; }
@@ -1753,3 +1763,26 @@ body {
 .vs-perks { margin-top: 6px; display: grid; gap: 2px; justify-items: center; }
 .vs-perk { font-size: .55rem; color: #9aa3b2; letter-spacing: .02em; }
 .vs-perk b { color: #ffd23f; font-weight: normal; }
+
+/* Upgrade sub-tabs: Tank / Offense / Defense / Agility. Fourteen groups
+   in one column was a long scroll to reach the ability upgrades. */
+.up-subs {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0 12px;
+}
+.up-subs .up-sub {
+  flex: 1;
+  opacity: .55;
+  font-size: .62rem;
+  padding: 7px 4px;
+}
+.up-subs .up-sub b {
+  opacity: .75;
+  margin-left: 4px;
+  font-weight: 700;
+}
+.up-subs .up-sub.is-on {
+  opacity: 1;
+  border-color: #fff;
+}

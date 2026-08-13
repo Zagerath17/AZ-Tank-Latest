@@ -38,6 +38,7 @@ import {
   rankUpgrade, resetUpgrades, getUpgradesSpent,
 } from "./social.js";
 
+let upSub = "tank";   // which upgrade sub-tab is open
 let tab = "colours";
 
 /* ---------- swatch rendering ---------- */
@@ -348,7 +349,33 @@ function renderUpgrades() {
   const tags = getTags();
   const pct = info.need === Infinity ? 100 : Math.round((info.into / info.need) * 100);
 
-  const groups = UPGRADE_TREE.map((g) => `
+  // Fourteen groups stacked in one column meant a very long scroll to
+  // reach the ability upgrades. Sorted into four sub-tabs by what the
+  // upgrade actually applies to, so each view is a short list.
+  const SUBTAB = {
+    tank: "tank",
+    basic: "offense", cannon: "offense", laser: "offense", sniper: "offense",
+    mg: "offense", mortar: "offense", flame: "offense", rocket: "offense",
+    wall: "defense", armour: "defense", mud: "defense",
+    boost: "agility", phase: "agility",
+  };
+  const SUBS = [
+    ["tank", "TANK"], ["offense", "OFFENSE"],
+    ["defense", "DEFENSE"], ["agility", "AGILITY"],
+  ];
+  const active = upSub;
+  // Points already spent under each tab, so the player can see at a
+  // glance where their build has gone without opening every tab.
+  const spentIn = {};
+  for (const g of UPGRADE_TREE) {
+    const k = SUBTAB[g.id] ?? "tank";
+    spentIn[k] = (spentIn[k] ?? 0) + g.nodes.reduce((a, n) => a + ranksIn(alloc, `${g.id}.${n.id}`), 0);
+  }
+  const subBar = `<div class="up-subs">${SUBS.map(([id, label]) =>
+    `<button class="btn btn-small up-sub${id === active ? " is-on" : ""}" data-sub="${id}">` +
+    `${label}${spentIn[id] ? ` <b>${spentIn[id]}</b>` : ""}</button>`).join("")}</div>`;
+
+  const groups = UPGRADE_TREE.filter((g) => (SUBTAB[g.id] ?? "tank") === active).map((g) => `
     <section class="up-group">
       <h3 class="shop-group-head"><span>${g.name}</span></h3>
       <div class="up-rows">
@@ -397,6 +424,7 @@ function renderUpgrades() {
       </button>
       <span class="hint">${spent ? `${spent} point${spent === 1 ? "" : "s"} allocated` : "nothing allocated yet"}</span>
     </div>
+    ${subBar}
     ${groups}`;
 }
 
@@ -444,6 +472,8 @@ export function initShop() {
   document.getElementById("shop-tab-upgrades")?.addEventListener("click", () => pickTab("upgrades"));
 
   document.getElementById("shop-upgrades")?.addEventListener("click", async (e) => {
+    const sub = e.target.closest?.(".up-sub");
+    if (sub) { upSub = sub.dataset.sub; renderUpgrades(); return; }
     const buy = e.target.closest("[data-up]");
     if (buy) {
       buy.disabled = true;
