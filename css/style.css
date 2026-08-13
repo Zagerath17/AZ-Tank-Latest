@@ -1687,3 +1687,69 @@ body {
   display: block;
 }
 .arena-wrap.has-touch .p2-hud { bottom: calc(var(--tp-size) + 44px); }
+
+/* ---------- upgrades tab ---------- */
+.up-head {
+  display: flex; align-items: center; gap: 14px;
+  margin: 4px 0 10px; padding: 10px 12px;
+  border: 1px solid rgba(120, 132, 156, .28); border-radius: 12px;
+  background: rgba(120, 132, 156, .06);
+}
+.up-level { flex: 1; display: grid; gap: 5px; }
+.up-lvl { font-family: "Black Ops One", system-ui; letter-spacing: .06em; color: #e7ecf5; }
+.up-bar {
+  height: 9px; border-radius: 5px; overflow: hidden;
+  background: rgba(10, 12, 17, .55); border: 1px solid rgba(120, 132, 156, .3);
+}
+.up-bar > i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, #4bd08a, #7ee6b0);
+  transition: width .35s ease;
+}
+.up-xp { font-size: .62rem; color: #8b93a3; letter-spacing: .03em; }
+.up-points { text-align: center; min-width: 74px; }
+.up-points b {
+  display: block; font-family: "Black Ops One", system-ui;
+  font-size: 1.6rem; line-height: 1; color: #ffd23f;
+}
+.up-points em { font-style: normal; font-size: .55rem; color: #808896; letter-spacing: .07em; }
+
+.up-group { margin: 12px 0; }
+.up-rows { display: grid; gap: 6px; }
+.up-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border-radius: 10px;
+  background: rgba(120, 132, 156, .07);
+  border: 1px solid rgba(120, 132, 156, .16);
+}
+.up-row.is-full { border-color: rgba(75, 208, 138, .4); background: rgba(75, 208, 138, .07); }
+.up-info { flex: 1; display: grid; gap: 2px; min-width: 0; }
+.up-name { color: #e7ecf5; font-size: .8rem; }
+.up-effect { font-size: .58rem; color: #8b93a3; }
+.up-pips { display: flex; gap: 4px; }
+.up-pip {
+  width: 10px; height: 10px; border-radius: 3px;
+  background: rgba(10, 12, 17, .5);
+  border: 1px solid rgba(120, 132, 156, .45);
+}
+.up-pip.on { background: #4bd08a; border-color: #4bd08a; }
+.up-buy { min-width: 46px; }
+.up-reset-line { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; }
+
+/* XP gain on the results screen */
+.res-xp { margin: 10px 0 4px; padding: 10px 12px;
+  border: 1px solid rgba(120, 132, 156, .28); border-radius: 12px; }
+.res-xp-top { display: flex; justify-content: space-between; align-items: baseline; }
+.res-xp-lvl { font-family: "Black Ops One", system-ui; color: #e7ecf5; }
+.res-xp-gain { color: #4bd08a; font-size: .8rem; }
+.res-xp-bar { height: 10px; margin-top: 7px; border-radius: 5px; overflow: hidden;
+  background: rgba(10, 12, 17, .55); border: 1px solid rgba(120, 132, 156, .3); }
+.res-xp-bar > i { display: block; height: 100%;
+  background: linear-gradient(90deg, #4bd08a, #7ee6b0); width: 0; }
+.res-xp-note { margin-top: 6px; font-size: .62rem; color: #8b93a3; min-height: 1em; }
+.res-xp-note.pop { color: #ffd23f; }
+
+/* allocated points under each tank on the versus card */
+.vs-perks { margin-top: 6px; display: grid; gap: 2px; justify-items: center; }
+.vs-perk { font-size: .55rem; color: #9aa3b2; letter-spacing: .02em; }
+.vs-perk b { color: #ffd23f; font-weight: normal; }

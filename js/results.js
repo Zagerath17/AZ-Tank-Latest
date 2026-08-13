@@ -15,7 +15,8 @@
 import { showScreen, paintVar } from "./main.js";
 import { tankSpriteCanvas } from "./tanksprite.js";
 import { ensureFirebase } from "./online.js";
-import { awardTags } from "./social.js";
+import { awardTags, awardXp } from "./social.js";
+import { XP_PER_KILL, XP_PER_WIN, MAX_SKILL_POINTS } from "./upgrades.js";
 
 // Claim this match's kill tags exactly once. The claim flag lives on
 // the lobby, so reloading the results screen — or a second device —
@@ -27,6 +28,77 @@ async function payTags(f, code, myKey, kills) {
   if (already) return;
   await f.set(ref, kills);
   await awardTags(kills);
+}
+
+// Pay out XP and play it back on the bar.
+//
+// Claimed once per match, guarded on the lobby exactly like the tags —
+// a reload, or the poll below firing again, must not pay twice.
+//
+// The animation is the point: the bar fills from where it was, and when
+// it reaches the end it announces the level, resets to empty and keeps
+// going, so a match that crosses two levels shows both. For the first
+// ten levels it also calls out the skill point, because that is the
+// thing the player actually cares about.
+async function payXp(f, code, myKey, kills, won) {
+  if (!f || !myKey) return null;
+  const amount = kills * XP_PER_KILL + (won ? XP_PER_WIN : 0);
+  if (amount <= 0) return null;
+  const ref = f.ref(f.db, `lobbies/${code}/xpPaid/${myKey}`);
+  if ((await f.get(ref)).val()) return null;
+  await f.set(ref, amount);
+  return awardXp(amount);
+}
+
+function animateXp(res) {
+  const box = document.getElementById("results-xp");
+  if (!box || !res) return;
+  box.hidden = false;
+  const lvlEl = box.querySelector(".res-xp-lvl");
+  const gainEl = box.querySelector(".res-xp-gain");
+  const barEl = box.querySelector(".res-xp-bar > i");
+  const noteEl = box.querySelector(".res-xp-note");
+  gainEl.textContent = `+${res.gained} XP`;
+
+  // One segment per level crossed, plus the remainder in the last one.
+  const segs = [];
+  let cur = res.from;
+  for (const lv of res.levels) {
+    segs.push({ from: cur.into / cur.need, to: 1, level: cur.level, ding: lv });
+    cur = { level: lv.level, into: 0, need: cur.need };
+  }
+  const end = res.to;
+  segs.push({
+    from: res.levels.length ? 0 : res.from.into / res.from.need,
+    to: end.need === Infinity ? 1 : end.into / end.need,
+    level: end.level, ding: null,
+  });
+
+  let i = 0;
+  const run = () => {
+    if (i >= segs.length) return;
+    const s2 = segs[i++];
+    lvlEl.textContent = `LEVEL ${s2.level}`;
+    barEl.style.transition = "none";
+    barEl.style.width = `${Math.max(0, Math.min(1, s2.from)) * 100}%`;
+    // Force the reset to land before the fill starts.
+    void barEl.offsetWidth;
+    const ms = 520;
+    barEl.style.transition = `width ${ms}ms ease-out`;
+    barEl.style.width = `${Math.max(0, Math.min(1, s2.to)) * 100}%`;
+    setTimeout(() => {
+      if (s2.ding) {
+        noteEl.textContent = s2.ding.point
+          ? `LEVEL ${s2.ding.level} — skill point earned!`
+          : `LEVEL ${s2.ding.level}!`;
+        noteEl.classList.add("pop");
+        setTimeout(() => { noteEl.classList.remove("pop"); run(); }, 720);
+      } else if (res.points > 0) {
+        noteEl.textContent = `${res.points} skill point${res.points === 1 ? "" : "s"} to spend in the Shop.`;
+      }
+    }, ms + 40);
+  };
+  run();
 }
 
 // players: [{ id, key, name, color, score }]. onContinue is called when
@@ -42,6 +114,7 @@ export async function showMatchResults(code, players, myKey, onContinue) {
 
   let timer = 0;
   let paid = false;
+  let xpPaid = false;
   let f = null;
   try { f = await ensureFirebase(); } catch (e) { /* render offline-ish */ }
 
@@ -79,6 +152,15 @@ export async function showMatchResults(code, players, myKey, onContinue) {
         paid = true; // don't re-enter while the guard write is in flight
         payTags(f, code, myKey, mine).catch(() => { paid = false; });
       }
+    }
+    // XP is paid on the same tick, and only once — including for a win
+    // with no kills, which tags alone would miss.
+    if (meRow && !xpPaid) {
+      xpPaid = true;
+      const top = players.slice().sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0];
+      payXp(f, code, myKey, killsByPlayer[meRow.id] ?? 0, top && top.key === myKey)
+        .then((r) => { if (r && r.gained) animateXp(r); })
+        .catch(() => { xpPaid = false; });
     }
   };
 

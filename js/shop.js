@@ -29,6 +29,14 @@ import {
   ownsPattern, getPattern, getPatternColors, buyPattern, equipPattern, ownedSkins,
 } from "./social.js";
 import { finishSwatchCanvas } from "./tanksprite.js";
+import {
+  UPGRADE_TREE, MAX_SKILL_POINTS, RESET_COST, TOTAL_RANKS,
+  ranksIn, pointsSpent, pointsLeft, canRank, xpForLevel,
+} from "./upgrades.js";
+import {
+  getXp, getLevel, getLevelInfo, getUpgrades, getSkillPointsLeft,
+  rankUpgrade, resetUpgrades, getUpgradesSpent,
+} from "./social.js";
 
 let tab = "colours";
 
@@ -322,6 +330,76 @@ function openPatternPicker(patternId) {
   modal.querySelector("#pattern-picker-cancel").onclick = () => { modal.hidden = true; };
 }
 
+/* ---------- the upgrades tab ---------- */
+
+function renderUpgrades() {
+  const host = document.getElementById("shop-upgrades");
+  if (!host) return;
+  const acc = getAccount();
+  if (!acc) {
+    host.innerHTML = `<p class="shop-rank">Log in to earn XP and spend skill points.</p>`;
+    return;
+  }
+  const alloc = getUpgrades();
+  const level = getLevel();
+  const info = getLevelInfo();
+  const left = pointsLeft(alloc, level);
+  const spent = pointsSpent(alloc);
+  const tags = getTags();
+  const pct = info.need === Infinity ? 100 : Math.round((info.into / info.need) * 100);
+
+  const groups = UPGRADE_TREE.map((g) => `
+    <section class="up-group">
+      <h3 class="shop-group-head"><span>${g.name}</span></h3>
+      <div class="up-rows">
+        ${g.nodes.map((n) => {
+          const key = `${g.id}.${n.id}`;
+          const have = ranksIn(alloc, key);
+          const full = have >= n.ranks;
+          const can = canRank(alloc, key, level);
+          const pips = Array.from({ length: n.ranks },
+            (_, i) => `<i class="up-pip${i < have ? " on" : ""}"></i>`).join("");
+          return `
+            <div class="up-row${full ? " is-full" : ""}">
+              <div class="up-info">
+                <span class="up-name">${n.name}</span>
+                <span class="up-effect">${n.fmt(n.per)} per rank${have ? ` · now ${n.fmt(have * n.per)}` : ""}</span>
+              </div>
+              <span class="up-pips" aria-label="${have} of ${n.ranks}">${pips}</span>
+              <button class="btn btn-small up-buy" data-up="${key}"
+                      ${can ? "" : "disabled"}>${full ? "MAX" : "+1"}</button>
+            </div>`;
+        }).join("")}
+      </div>
+    </section>`).join("");
+
+  host.innerHTML = `
+    <div class="up-head">
+      <div class="up-level">
+        <span class="up-lvl">LEVEL ${level}</span>
+        <div class="up-bar"><i style="width:${pct}%"></i></div>
+        <span class="up-xp">${info.need === Infinity
+          ? `${getXp()} XP · max level`
+          : `${info.into} / ${info.need} XP to level ${level + 1}`}</span>
+      </div>
+      <div class="up-points">
+        <b>${left}</b><em>point${left === 1 ? "" : "s"} left</em>
+      </div>
+    </div>
+    <p class="shop-rank">
+      ${level >= MAX_SKILL_POINTS
+        ? `All ${MAX_SKILL_POINTS} skill points earned — ${spent} of them spent across ${TOTAL_RANKS} possible ranks.`
+        : `A skill point per level to level ${MAX_SKILL_POINTS}. XP comes from 1v1: 10 a kill, 25 a win.`}
+    </p>
+    <div class="up-reset-line">
+      <button class="btn btn-small" id="up-reset" ${spent && tags >= RESET_COST ? "" : "disabled"}>
+        RESET · 💀 ${RESET_COST}
+      </button>
+      <span class="hint">${spent ? `${spent} point${spent === 1 ? "" : "s"} allocated` : "nothing allocated yet"}</span>
+    </div>
+    ${groups}`;
+}
+
 /* ---------- wiring ---------- */
 
 function refresh() {
@@ -331,17 +409,17 @@ function refresh() {
     tagsEl.textContent = Number.isFinite(n) ? String(n) : "∞";
   }
   if (tab === "colours") renderColours();
+  else if (tab === "upgrades") renderUpgrades();
   else renderPatterns();
 }
 
 function pickTab(which) {
   tab = which;
-  document.getElementById("shop-tab-colours")?.classList.toggle("is-on", which === "colours");
-  document.getElementById("shop-tab-patterns")?.classList.toggle("is-on", which !== "colours");
-  const c = document.getElementById("shop-colours");
-  const p = document.getElementById("shop-patterns");
-  if (c) c.hidden = which !== "colours";
-  if (p) p.hidden = which === "colours";
+  for (const t of ["colours", "patterns", "upgrades"]) {
+    document.getElementById(`shop-tab-${t}`)?.classList.toggle("is-on", which === t);
+    const pane = document.getElementById(`shop-${t}`);
+    if (pane) pane.hidden = which !== t;
+  }
   const rankEl = document.getElementById("shop-rank");
   if (rankEl) rankEl.hidden = which !== "colours";
   refresh();
@@ -363,6 +441,26 @@ export function initShop() {
 
   document.getElementById("shop-tab-colours")?.addEventListener("click", () => pickTab("colours"));
   document.getElementById("shop-tab-patterns")?.addEventListener("click", () => pickTab("patterns"));
+  document.getElementById("shop-tab-upgrades")?.addEventListener("click", () => pickTab("upgrades"));
+
+  document.getElementById("shop-upgrades")?.addEventListener("click", async (e) => {
+    const buy = e.target.closest("[data-up]");
+    if (buy) {
+      buy.disabled = true;
+      try { await rankUpgrade(buy.dataset.up); refresh(); }
+      catch (err) { toast(err?.message ?? "Couldn't spend that point."); buy.disabled = false; }
+      return;
+    }
+    if (e.target.closest("#up-reset")) {
+      const btn = e.target.closest("#up-reset");
+      btn.disabled = true;
+      try {
+        await resetUpgrades();
+        toast(`Skill points reset — ${RESET_COST} tags spent.`);
+        refresh();
+      } catch (err) { toast(err?.message ?? "Couldn't reset."); btn.disabled = false; }
+    }
+  });
 
   // One delegated handler: tap to wear what you own, or to buy what
   // you can afford.

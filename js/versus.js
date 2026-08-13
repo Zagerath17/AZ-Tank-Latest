@@ -17,6 +17,7 @@
 import { paintVar } from "./main.js";
 import { tankSpriteCanvas } from "./tanksprite.js";
 import { DEFAULT_SKIN } from "./skins.js";
+import { describe as describeUpgrades } from "./upgrades.js";
 import { ensureFirebase } from "./online.js";
 import { getAccount } from "./social.js";
 
@@ -33,7 +34,7 @@ async function recordVs(f, oppKey) {
 // players: [[id, p]] (or an id→p object) to map ukeys.
 // matched=false (custom lobbies): the card still loads, but there's no
 // win/loss ledger to show — records are a 1v1 thing.
-export async function showVersus(roster, myId, players = [], matched = true) {
+export async function showVersus(roster, myId, players = [], matched = true, showPerks = true) {
   const acc = getAccount();
   const host = document.getElementById("versus-body");
   // players may arrive as entries ([[id, p]]) or an id→p object.
@@ -48,12 +49,24 @@ export async function showVersus(roster, myId, players = [], matched = true) {
 
   // ONE giant number sits under each side — my wins under mine, my
   // losses under theirs — with a hyphen between.
+  // What each side has put its skill points into. Shown BEFORE the
+  // match so both players can see what they're up against — the whole
+  // point of a build being visible rather than a hidden advantage.
+  const perkBlock = (r) => {
+    const list = describeUpgrades(r.upgrades ?? {});
+    if (!list.length) return `<span class="vs-perks"><span class="vs-perk">No upgrades</span></span>`;
+    return `<span class="vs-perks">${
+      list.slice(0, 6).map((d) => `<span class="vs-perk">${d.group} · ${d.short} <b>${d.ranks}</b></span>`).join("")
+    }${list.length > 6 ? `<span class="vs-perk">+${list.length - 6} more</span>` : ""}</span>`;
+  };
+
   const spriteBlock = (r, isMe, side) => `
     <div class="vs-fighter${isMe ? " vs-me" : ""}" style="${paintVar(r.color)}">
       <span class="vs-sprite" data-sprite="${r.id}"
             data-color="${r.color}" data-pattern="${r.pattern ?? "solid"}"
             data-patcolors="${(r.patColors ?? []).join(",")}"></span>
-      <span class="vs-name">${r.name ?? "Player"}</span>
+      <span class="vs-name">${r.name ?? "Player"}${r.level ? ` <em class="vs-lvl">L${r.level}</em>` : ""}</span>
+      ${showPerks ? perkBlock(r) : ""}
       <span class="vs-score" data-fighter="${r.id}" data-side="${side}">${matched && side ? "–" : ""}</span>
     </div>`;
 

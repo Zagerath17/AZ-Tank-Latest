@@ -117,15 +117,31 @@ export function boundaryWalls(maze, cell, t) {
   if (!pts) return [];
   const half = t / 2;
   const walls = [];
+  // The silhouette's centre, so each edge can be pushed INWARD.
+  let cx = 0, cy = 0;
+  for (const [px, py] of pts) { cx += px; cy += py; }
+  cx /= pts.length; cy /= pts.length;
+
   for (let i = 0; i < pts.length; i++) {
     const [x1, y1] = pts[i];
     const [x2, y2] = pts[(i + 1) % pts.length];
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy);
     if (len < 1e-6) continue;
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    // Offset the slab a half-thickness inside the polygon.
+    //
+    // It used to sit centred ON the boundary line, which put half of it
+    // outside the silhouette — and since the wall layer is drawn inside
+    // the silhouette clip, that outer half was cut away. The border came
+    // out exactly half as thick as every interior wall. Pushing it in
+    // means the whole slab is inside the arena and drawn, and the
+    // collision box now matches what the player can actually see.
+    let nx = -dy / len, ny = dx / len;            // edge normal
+    if ((cx - mx) * nx + (cy - my) * ny < 0) { nx = -nx; ny = -ny; }  // point inward
     walls.push({
-      x: (x1 + x2) / 2,
-      y: (y1 + y2) / 2,
+      x: mx + nx * half,
+      y: my + ny * half,
       a: Math.atan2(dy, dx),
       hx: len / 2 + t,   // overlap corners
       hy: half,

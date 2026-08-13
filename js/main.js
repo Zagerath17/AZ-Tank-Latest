@@ -24,6 +24,7 @@ export {
 // `export ... from` re-exports WITHOUT binding anything locally, so
 // anything this module actually uses must be imported as well.
 import { COLORS, PALETTE } from "./palette.js";
+import { tankSpriteCanvas } from "./tanksprite.js";
 import { DEFAULT_SKIN } from "./skins.js";
 
 /* ---------- screen router ---------- */
@@ -96,11 +97,65 @@ export function paintVar(color) {
   return `--p:${PALETTE[color] ?? PALETTE[DEFAULT_SKIN]}`;
 }
 
-// A tank sprite that mirrors what you actually drive: treads with
-// links, a hull with a lighter sloped glacis + nose chevron at the
-// FRONT and a darker engine deck with grille + twin exhausts at the
-// REAR, a turret, and a barrel. Drawn pointing UP (barrel at top).
-export function tankSVG(color) {
+// A tank icon for a roster row, friend card, or invite list.
+//
+// `look` may be a plain colour id (the old signature) or the full
+// { color, pattern, patColors } a player is actually wearing. It returns
+// a PLACEHOLDER, because these are built inside template literals while
+// the real sprite is a canvas — the observer below turns every
+// placeholder into the same sprite the player drives, patterns and
+// materials included. This used to draw a flat SVG that knew about a
+// single hull colour only, so someone wearing Galaxy over Gold appeared
+// in the lobby as a plain gold rectangle.
+export function tankSVG(look) {
+  const o = (look && typeof look === "object") ? look : { color: look };
+  return `<span class="tank tank-icon" data-tank="${o.color ?? DEFAULT_SKIN}"
+    data-tank-pat="${o.pattern ?? "solid"}"
+    data-tank-pc="${Array.isArray(o.patColors) ? o.patColors.join(",") : ""}"
+    aria-hidden="true"></span>`;
+}
+
+// Turn every placeholder inside `root` into a real sprite.
+export function hydrateTankIcons(root, px = 34) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll(".tank-icon[data-tank]").forEach((el) => {
+    if (el.__iconDone) return;
+    el.__iconDone = true;
+    const look = {
+      color: el.dataset.tank,
+      pattern: el.dataset.tankPat || "solid",
+      patColors: el.dataset.tankPc ? el.dataset.tankPc.split(",") : [],
+    };
+    try {
+      el.appendChild(tankSpriteCanvas(look, px, el.dataset.tank));
+    } catch (e) {
+      // Canvas unavailable: fall back to a flat swatch rather than a gap.
+      el.style.background = PALETTE[look.color] ?? PALETTE[DEFAULT_SKIN];
+    }
+  });
+}
+
+// Hydrate automatically, wherever a placeholder appears.
+//
+// These icons are built inside template literals scattered across the
+// social and lobby screens, so hooking every render site by hand would
+// be tedious and easy to forget next time one is added. One observer on
+// the document catches them all, including anything rendered later.
+let iconObserver = null;
+export function startTankIconHydration() {
+  if (iconObserver || typeof MutationObserver === "undefined") return;
+  const pass = () => hydrateTankIcons(document.body);
+  iconObserver = new MutationObserver(() => {
+    if (iconObserver.__queued) return;       // coalesce a render's worth
+    iconObserver.__queued = true;
+    queueMicrotask(() => { iconObserver.__queued = false; pass(); });
+  });
+  iconObserver.observe(document.body, { childList: true, subtree: true });
+  pass();
+}
+
+// The old flat SVG, kept for anywhere a canvas can't be used.
+export function tankSVGFlat(color) {
   const hull = PALETTE[color] ?? PALETTE[DEFAULT_SKIN];
   const light = shade(hull, -0.2);   // glacis (lighter)
   const dark = shade(hull, 0.34);    // engine deck (darker)
@@ -190,6 +245,7 @@ initShop();
 initLocal();
 initOnline();
 initGame();
+startTankIconHydration();
 initSocial();
 initDuel();
 initChat();

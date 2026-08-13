@@ -25,6 +25,7 @@
 
 import { onEnter, showScreen, toast, COLORS, COLOR_NAMES, tankSVG, paintVar } from "./main.js";
 import { SKINS, BOT_SKINS, DEFAULT_SKIN } from "./skins.js";
+import { sanitize as sanitizeUpgrades } from "./upgrades.js";
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
 import { WEAPON_TYPES, WEAPON_LABEL } from "./weapons.js";
 import { startOnlineGame, onlineLobbyUpdate, stopGame, getMatchStats, GEAR_CAP_LIMIT } from "./game.js";
@@ -237,6 +238,8 @@ export async function createMatchLobby(expect) {
         color: social.getSkin(), // the paint you bought and equipped
         pattern: social.getPattern(),
         patColors: social.getPatternColors(),
+        upgrades: social.getUpgrades(),
+        level: social.getLevel(),
       } },
     });
     await enterLobby(code, { matched: true });
@@ -246,6 +249,28 @@ export async function createMatchLobby(expect) {
 }
 
 // What the social layer needs to know about my current lobby.
+// Push my CURRENT paint to the lobby I'm sitting in.
+//
+// The look is written once when you join, so changing colour or pattern
+// in the Shop — which is now reachable straight from the lobby — updated
+// your profile and left the lobby node showing what you were wearing
+// when you walked in. Everyone else, and the match itself, kept using
+// the old one, so the change appeared to do nothing.
+export async function syncMyLook() {
+  if (!current?.code || current.inGame) return;
+  try {
+    const f = await ensureFirebase();
+    const id = myId();
+    await f.update(f.ref(f.db, `lobbies/${current.code}/players/${id}`), {
+      color: social.getSkin(),
+      pattern: social.getPattern(),
+      patColors: social.getPatternColors(),
+      upgrades: social.getUpgrades(),
+      level: social.getLevel(),
+    });
+  } catch (e) { /* best-effort: the next join writes it anyway */ }
+}
+
 export function lobbyInfo() {
   if (!current) return null;
   return {
@@ -359,6 +384,8 @@ async function createLobby() {
         color: social.getSkin(), // the paint you bought and equipped
         pattern: social.getPattern(),
         patColors: social.getPatternColors(),
+        upgrades: social.getUpgrades(),
+        level: social.getLevel(),
       } },
     });
     await enterLobby(code);
@@ -385,6 +412,8 @@ export async function joinLobby(code) {
       color: social.getSkin(), // the paint you bought and equipped
       pattern: social.getPattern(),
       patColors: social.getPatternColors(),
+      upgrades: social.getUpgrades(),
+      level: social.getLevel(),
     });
   }
   await enterLobby(code, { matched: !!lobby.matched });
@@ -611,7 +640,7 @@ function baseSettings() {
   for (const w of WEAPON_TYPES) gear[w] = true;
   const sizes = {};
   for (const k of SIZE_KEYS) sizes[k] = true;
-  return { sizes, gear, gearMax: 24, zone: false, zoneSec: 30 };
+  return { sizes, gear, gearMax: 24, zone: false, zoneSec: 30, upgrades: true };
 }
 
 export function saveHostSettings(s) {
@@ -633,6 +662,7 @@ function defaultSettings() {
     gearMax: Math.max(1, Math.min(30, saved.gearMax ?? d.gearMax)),
     zone: saved.zone ?? d.zone,
     zoneSec: Math.max(10, Math.min(60, saved.zoneSec ?? d.zoneSec)),
+    upgrades: saved.upgrades ?? d.upgrades,
   };
 }
 
@@ -649,7 +679,8 @@ function readSettings(lobby) {
   const max = Math.max(1, Math.min(GEAR_CAP_LIMIT, s.gearMax ?? d.gearMax));
   const zone = s.zone ?? d.zone;
   const zoneSec = Math.max(10, Math.min(60, s.zoneSec ?? d.zoneSec));
-  return { sizes, gear, gearMax: max, zone, zoneSec };
+  const upgrades = s.upgrades ?? d.upgrades;
+  return { sizes, gear, gearMax: max, zone, zoneSec, upgrades };
 }
 
 function settingsToOpts(lobby) {
@@ -714,6 +745,14 @@ function renderSettings(lobby, isHost) {
     zoneChip.classList.toggle("is-on", s.zone);
     zoneChip.textContent = s.zone ? "ZONE: ON" : "ZONE: OFF";
     zoneChip.onclick = () => write("settings/zone", !s.zone);
+  }
+  // Skill points on or off for this lobby. Off gives a level field —
+  // useful for a fair game among friends at different levels.
+  const upChip = document.getElementById("set-upgrades");
+  if (upChip) {
+    upChip.classList.toggle("is-on", s.upgrades);
+    upChip.textContent = s.upgrades ? "UPGRADES: ON" : "UPGRADES: OFF";
+    upChip.onclick = () => write("settings/upgrades", !s.upgrades);
   }
   const zoneRow = document.getElementById("set-zone-timer");
   if (zoneRow) zoneRow.hidden = !s.zone;
@@ -1022,7 +1061,8 @@ function enterVersus(code, lobby) {
     pattern: p.bot ? "solid" : (p.pattern ?? "solid"),
     patColors: p.bot ? [] : (Array.isArray(p.patColors) ? p.patColors : []),
   }));
-  showVersus(roster, me, current?.playersCache ?? [], !!lobby.matched);
+  showVersus(roster, me, current?.playersCache ?? [], !!lobby.matched,
+    lobby.matched ? true : lobby.settings?.upgrades !== false);
   showScreen("screen-versus");
 
   // Announce readiness (informational — the shared clock, not this
@@ -1079,6 +1119,12 @@ function beginOnlineGame(code, lobby) {
       // Bots always run solid.
       pattern: p.bot ? "solid" : (p.pattern ?? "solid"),
       patColors: p.bot ? [] : (Array.isArray(p.patColors) ? p.patColors : []),
+      // Each player's own upgrade allocation, sanitised against the
+      // level they claim. It arrives over the network, so it is never
+      // trusted as sent: sanitize() pares anything beyond what that
+      // level could have earned. Bots run stock.
+      upgrades: p.bot ? {} : sanitizeUpgrades(p.upgrades ?? {}, p.level ?? 0),
+      level: p.bot ? 0 : (p.level ?? 0),
     }));
 
   if (!roster.some((p) => p.id === me && !p.bot)) {
@@ -1113,6 +1159,9 @@ function beginOnlineGame(code, lobby) {
   const setOpts = settingsToOpts(lobby);
   startOnlineGame({
     duel: !!lobby.matched,
+    // A matchmade 1v1 always runs upgrades; a custom lobby runs them
+    // only if the host switched them on.
+    upgradesOn: lobby.matched ? true : lobby.settings?.upgrades !== false,
     serverNow, // shared match clock (device clock + Firebase offset)
     // Custom lobbies honour the host's panel; a matchmade 1v1 uses the
     // fixed competitive rules and ignores it.
@@ -1360,7 +1409,7 @@ function renderLobby(code, lobby) {
 
     return `
       <li class="lobby-row" style="${paintVar(color)}">
-        ${tankSVG(color)}
+        ${tankSVG({ color, pattern: p.pattern, patColors: p.patColors })}
         <span class="lobby-name">${p.name ?? COLOR_NAMES[color]}</span>
         <span class="row-end">${id === lobby.hostId ? '<span class="chip">HOST</span>' : ""}</span>
       </li>`;

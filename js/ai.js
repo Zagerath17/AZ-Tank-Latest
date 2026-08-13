@@ -144,6 +144,7 @@ function brain(t, now) {
       driveA: t.a,          // smoothed heading actually being driven
       driveM: 0,
       lastDir: null,        // sticky steering slot
+      backing: false,       // committed to giving ground (hysteresis)
       orbitDir: 1,          // which way round the target we're circling
       orbitAt: 0,
       dodgeKey: null,       // the shot currently being evaded
@@ -1098,9 +1099,27 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
     // which in a 96px-cell maze meant anything inside about three tank
     // lengths — most of a fight. The bot spent it reversing. Give ground
     // only when genuinely crowded, and gently.
-    const near = want * 0.34, far = want * 1.35;
+    // The close-range band gets a SCHMITT TRIGGER, not a threshold.
+    //
+    // Backing off commands `axis + PI` while holding the line commands
+    // `axis` — a 180° difference. With a single threshold, a target
+    // drifting either side of it flipped the commanded heading by half
+    // a turn on alternate frames, and because a bot with a shot on
+    // commands its firing heading UNSMOOTHED, that flip went straight
+    // to the hull. The game picks forward or reverse from that heading,
+    // so the tank switched between driving and reversing several times
+    // a second: measured at 4.9 crossings per second with the average
+    // spell in reverse lasting 84 ms. Not a manoeuvre — a twitch, and
+    // exactly what reads as a bot getting stuck and confused.
+    //
+    // Separating the two edges means backing off starts when genuinely
+    // crowded and continues until there is real daylight, so the
+    // manoeuvre runs to completion instead of cancelling itself.
+    const nearIn = want * 0.34, nearOut = want * 0.62, far = want * 1.35;
+    if (B.backing) { if (gun.dist > nearOut) B.backing = false; }
+    else if (gun.dist < nearIn) B.backing = true;
 
-    if (gun.dist > far) {
+    if (gun.dist > far && !B.backing) {
       // Close the gap NOSE FIRST. Commanding the raw bearing when the
       // hull happens to point away makes the game reverse rather than
       // turn — the nose stays put and the tank drives backwards — and
@@ -1111,7 +1130,7 @@ function posture(t, B, world, P, now, dt, nav, gun, acts) {
       const LIM = 1.45;                                // ~83°, inside reverse
       wantA = Math.abs(off) > LIM ? t.a + Math.sign(off) * LIM : axis;
       wantM = 0.9;                                     // close the gap
-    } else if (gun.dist < near) {
+    } else if (B.backing) {
       wantA = axis + Math.PI; wantM = 0.40;            // ease off, nose still on
     } else {
       // In the pocket: hold the line, just enough throttle to keep the

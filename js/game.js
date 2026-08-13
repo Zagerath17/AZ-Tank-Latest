@@ -28,6 +28,7 @@ import {
 } from "./weapons.js";
 import { SUN, SUN_DIR, SHADOW, buildScene, drawGround, drawWallLayer } from "./scene.js";
 import { prebakeCount, prebakeStep } from "./material.js";
+import { statsFrom, NO_STATS } from "./upgrades.js";
 import { sfx, setEngine, setFlame, startMusic, stopAll } from "./audio.js";
 
 /* ---------- tuning ---------- */
@@ -123,7 +124,7 @@ const MAG_REGEN = 3500;     // ms for one spent round to come back
 
 function magAvailable(t, now) {
   t.basicMag = (t.basicMag ?? []).filter((ts) => now - ts < MAG_REGEN);
-  return MAG_SIZE - t.basicMag.length;
+  return magCapOf(t) - t.basicMag.length;
 }
 
 // A special projectile still flying blocks the basic trigger — no
@@ -362,6 +363,7 @@ function opts_toState(o) {
     sendGun: o.sendGun,
     onExit: o.onExit,
     duel: o.duel,
+    upgradesOn: o.upgradesOn,
     winTarget: o.winTarget,
     serverNow: o.serverNow,
     gearPool: o.gearPool,
@@ -496,6 +498,8 @@ export function onlineLobbyUpdate(lobby) {
     } else if (gun && gun !== t.weapon && nowMs - t.gunClearedAt > 1500) {
       t.weapon = gun;
       if (gun === "sniper") t.snAmmo = SNIPER.shots;
+      // A newly picked-up agility item comes with its full charges.
+      t.agiLeft = 1 + Math.round(t.up?.phaseUses ?? 0);
       if (!t.local) sfx.pickup();
     }
 
@@ -647,6 +651,10 @@ function begin(opts) {
     sendGun: opts.sendGun,
     onExit: opts.onExit,
     duel: !!opts.duel,
+    // Upgrades are a 1v1 and custom-lobby thing. Local play is people
+    // on one keyboard, where an account-bound advantage would just be
+    // unfair to whoever isn't logged in — so it's always off there.
+    upgradesOn: opts.mode !== "local" && !!opts.upgradesOn,
     netClock: opts.serverNow ?? (() => Date.now()), // shared match clock
     // Custom-lobby host settings (null → defaults everywhere).
     gearPool: opts.gearPool ?? null,   // greenlit ability types
@@ -868,6 +876,10 @@ function startRound(seed) {
   const cornerFor = (spec, i) => corners[i % corners.length];
 
   S.tanks = S.roster.map((spec, i) => {
+    // Resolve this player's upgrades ONCE. Whether they count at all is
+    // the match's call, not the player's: local play and any custom
+    // lobby with the toggle off hand everyone the neutral set.
+    const upSpec = S.upgradesOn ? statsFrom(spec.upgrades ?? {}) : NO_STATS;
     const [c, r] = cornerFor(spec, i);
     const x = (c + 0.5) * CELL;
     const y = (r + 0.5) * CELL;
@@ -878,8 +890,23 @@ function startRound(seed) {
       x, y, a, tx: x, ty: y, ta: a,
       turret: a, tu: a, // barrel aim (world angle) + remote target
       dead: false,
-      hp: TANK_HP, // baseline health; damage chips this down to 0
-      armour: 0, armourUntil: 0, // shield HP + expiry (blue glow)
+      // Upgrades, resolved ONCE at spawn into a flat stat block.
+      //
+      // The roster carries each player's allocation; whether it counts
+      // is decided by the match, not the player — S.upgradesOn is false
+      // in local play and in any custom lobby with the toggle off, and
+      // everyone then gets the neutral set. Resolving here means the
+      // rest of the simulation reads plain numbers and never has to
+      // know the tree exists.
+      up: upSpec,
+      hp: TANK_HP + upSpec.hp,
+      maxHp: TANK_HP + upSpec.hp,
+      regenAt: 0, armourRegenAt: 0,
+      // Starting Armour rides for the whole round rather than expiring,
+      // so it reads as plating the tank came with rather than a pickup.
+      armour: Math.round(upSpec.startArmour),
+      armourUntil: upSpec.startArmour > 0 ? Number.MAX_SAFE_INTEGER : 0,
+      agiLeft: 0,
       healInMs: 0,               // continuous time inside a heal pad
       gone: !S.present.has(spec.id),
       prevShoot: false,
@@ -1048,7 +1075,8 @@ function frame(now) {
     if (t.dead || t.gone) continue;
     if (t.weapon === "laser") {
       const m = muzzlePoint(t, 1);
-      S.laserPaths.push({ by: t.id, color: effBaseHex(t), pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects, LASER.previewBounces, S.diag) });
+      S.laserPaths.push({ by: t.id, color: effBaseHex(t), pts: laserPath(m.x, m.y, t.turret ?? t.a, S.rects,
+        LASER.previewBounces + Math.round(t.up?.laserGuide ?? 0), S.diag) });
     } else if (t.weapon === "sniper") {
       // Straight line, no bounce, through walls, 3 cells long.
       const m = muzzlePoint(t, 1);
@@ -1100,6 +1128,7 @@ function frame(now) {
     for (const t of S.tanks) emitTracks(t, now);
     stepFlameBurns(now); // arm the after-burn once the flame leaves a tank
     stepBurns(now);
+    stepRegen(now);
     stepBullets(now, dt);
     stepSpecials(now, dt);
     maybeEndRound(now);
@@ -1243,7 +1272,7 @@ function stepTanks(now, dt) {
             bulletSpeed: BULLET_SPEED,
             bulletR: BULLET_R,
             muzzle: BARRELS.normal.len * TANK_R + BULLET_R + 2,
-            magSize: MAG_SIZE,
+            magSize: magCapOf(t),   // includes this tank's Max Ammo upgrade
             magGap: MAG_GAP,
             magRegen: MAG_REGEN,
             moveSpeed: MOVE_SPEED,
@@ -1325,19 +1354,33 @@ function stepTanks(now, dt) {
 
       let v = 0;
       const boosting = now < (t.boostUntil ?? 0);
-      const boostMul = boosting ? BOOST.mult : 1;
+      // Top Speed scales the boost itself, so it stacks with the
+      // tank's own Speed upgrade rather than replacing it.
+      const boostMul = boosting ? BOOST.mult * (t.up?.boostSpeed ?? 1) : 1;
       // Mud pit: any tank standing in one moves 20% slower.
-      const inMud = S.mudPits.some((m) =>
-        now - m.born < MUD.lifeMs && (t.x - m.x) ** 2 + (t.y - m.y) ** 2 < m.r * m.r);
-      const mudMul = inMud ? MUD.slow : 1;
+      // The pit's OWN slow, set by whoever laid it — so the Slow Effect
+      // upgrade belongs to the player who threw the mud, not the poor
+      // soul driving through it.
+      let mudMul = 1;
+      for (const m of S.mudPits) {
+        if (now - m.born >= (m.life ?? MUD.lifeMs)) continue;
+        if ((t.x - m.x) ** 2 + (t.y - m.y) ** 2 >= m.r * m.r) continue;
+        mudMul = Math.min(mudMul, m.slow ?? MUD.slow);
+      }
+      const inMud = mudMul < 1;
       if (dirThrottle != null) {
         // Directional stick throttle (forward, or reverse if the target
         // was behind us).
-        if (dirReverse) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul * dirThrottle;
-        else v += MOVE_SPEED * mul.speed * boostMul * mudMul * dirThrottle;
+        // `upS` folds in the tank's own Speed upgrade, so it stacks
+        // with the bot handicap, the boost and the mud slow rather than
+        // replacing any of them.
+        const upS = t.up?.speed ?? 1;
+        if (dirReverse) v -= REVERSE_SPEED * mul.speed * upS * boostMul * mudMul * dirThrottle;
+        else v += MOVE_SPEED * mul.speed * upS * boostMul * mudMul * dirThrottle;
       } else {
-        if (acts.up) v += MOVE_SPEED * mul.speed * boostMul * mudMul;
-        if (acts.down) v -= REVERSE_SPEED * mul.speed * boostMul * mudMul;
+        const upS = t.up?.speed ?? 1;
+        if (acts.up) v += MOVE_SPEED * mul.speed * upS * boostMul * mudMul;
+        if (acts.down) v -= REVERSE_SPEED * mul.speed * upS * boostMul * mudMul;
       }
 
       // ---- inertia -------------------------------------------------
@@ -1348,7 +1391,7 @@ function stepTanks(now, dt) {
       // than pulling away, which is how a tracked vehicle behaves.
       {
         const want = v;
-        const full = MOVE_SPEED * mul.speed;              // the reference speed
+        const full = MOVE_SPEED * mul.speed * (t.up?.speed ?? 1); // reference speed
         const cur = t.vel ?? 0;
         // Rates are "reference speeds per second", so boost and mud
         // change the target without changing how briskly it responds.
@@ -1458,12 +1501,13 @@ function stepTanks(now, dt) {
             t.mgReadyAt = now + MG.windupMs;
             sfx.windup();
           } else if (now >= t.mgReadyAt && now >= (t.mgNext ?? 0)) {
-            t.mgAmmo ??= MG.shots;
+            t.mgAmmo ??= MG.shots + Math.round(t.up?.mgAmmo ?? 0);
             const m = muzzlePoint(t, MG.r * BULLET_R);
             const a = (t.turret ?? t.a) + (Math.random() * 2 - 1) * MG.spread;
             spawnBullet(t.id, m.x, m.y, a, now, true);
             sendTypedShot(t, { w: "mini", x: +m.x.toFixed(1), y: +m.y.toFixed(1), a: +a.toFixed(3) }, now);
-            t.mgNext = now + MG.gapMs;
+            // Fire Rate shortens the gap between balls.
+            t.mgNext = now + MG.gapMs / (t.up?.mgRate ?? 1);
             t.mgAmmo -= 1;
             if (t.mgAmmo <= 0) {
               t.mgAmmo = null;
@@ -1491,7 +1535,7 @@ function stepTanks(now, dt) {
         // FLAME.tickMs (400 ms). We ALSO stamp the contact every frame so
         // stepFlameBurns can start a burn once the flame LEAVES it — the
         // burn never overlaps the direct damage.
-        t.flameFuel ??= FLAME.durationMs;
+        t.flameFuel ??= FLAME.durationMs + (t.up?.flameFuel ?? 0) * 1000;
         const firing = !!acts.shoot && t.flameFuel > 0;
         if (firing) {
           if (!t.flameOn) {
@@ -2149,10 +2193,14 @@ function mortarTarget(t) {
 // for the shared math — every client and the AI use the same curve).
 function launchMortar(byId, x0, y0, tx, ty, now) {
   const distCells = Math.hypot(tx - x0, ty - y0) / CELL;
+  // Shell Speed shortens the arc's flight time. `flightMs` is stored so
+  // the in-flight marker animates against the same figure rather than
+  // recomputing the base curve.
+  const flightMs = mortarFlightMs(distCells) / upOf(byId).mortarSpeed;
   S.mortars.push({
     by: byId, x0, y0, x: tx, y: ty, born: now,
-    distCells,
-    landAt: now + mortarFlightMs(distCells),
+    distCells, flightMs,
+    landAt: now + flightMs,
   });
   sfx.cannon?.(0.75); // big-cannon report, a touch quieter
 }
@@ -2161,6 +2209,8 @@ function launchMortar(byId, x0, y0, tx, ty, now) {
 // fractions of a cell. The blast is centred on a grid INTERSECTION and
 // reaches a full cell in every direction — a 2-cell span, i.e. the four
 // cells meeting at that corner.
+// Blast Damage adds to EVERY ring, so the upgrade is worth taking
+// whether you land it dead centre or clip someone at the edge.
 const MORTAR_RINGS = [
   { r: 0.22, dmg: 8 }, // core: full hit
   { r: 0.48, dmg: 6 },
@@ -2182,7 +2232,9 @@ function detonateMortar(m, now) {
     for (const ring of MORTAR_RINGS) {
       if (d <= ring.r * CELL) { dmg = ring.dmg; break; }
     }
-    if (dmg > 0) applyHit(t, dmg, m.by, now, "mortar");
+    // Blast Damage lifts every ring, so the upgrade pays whether the
+    // shell lands dead centre or only clips someone at the edge.
+    if (dmg > 0) applyHit(t, dmg + Math.round(upOf(m.by).mortarDmg), m.by, now, "mortar");
   }
 }
 
@@ -2209,8 +2261,8 @@ function fireDefense(t, now) {
     }, now);
   } else if (kind === "armour") {
     // Shield: 4 HP that soak damage before health, for 20 s.
-    t.armour = ARMOUR.hp;
-    t.armourUntil = now + ARMOUR.durationMs;
+    t.armour = ARMOUR.hp + Math.round(t.up?.armourMax ?? 0);
+    t.armourUntil = now + ARMOUR.durationMs * (t.up?.armourDuration ?? 1);
     sfx.pickup?.();
     sendTypedShot(t, { w: "armour" }, now);
   } else if (kind === "heal") {
@@ -2225,7 +2277,7 @@ function fireDefense(t, now) {
     const mx = t.x + Math.cos(back) * (TANK_RAD + MUD.radiusCells * CELL * 0.5);
     const my = t.y + Math.sin(back) * (TANK_RAD + MUD.radiusCells * CELL * 0.5);
     const seed = (Math.random() * 1e9) | 0;
-    addMudPit(mx, my, seed, now);
+    addMudPit(mx, my, seed, now, t.id);
     sfx.wallup?.();
     sendTypedShot(t, { w: "mud", x: +mx.toFixed(1), y: +my.toFixed(1), s: seed }, now);
   }
@@ -2237,18 +2289,23 @@ function fireAgility(t, now) {
   if (t.agility === "boost") {
     // Speed boost: activating it refills your basic gun AND grants a
     // temporary sprint. No projectile.
-    t.boostUntil = now + BOOST.durationMs;
+    t.boostUntil = now + BOOST.durationMs * (t.up?.boostDuration ?? 1);
     t.basicMag = []; // refill: basic attacks available immediately
     t.basicNext = 0;
     sfx.boost?.();
     sendTypedShot(t, { w: "boost" }, now);
   } else if (t.agility === "phase") {
-    // Phase: 2 s of intangibility. Can't shoot while active (handled
-    // in the movement loop). Still vulnerable to everything.
-    t.phaseUntil = now + PHASE.durationMs;
+    // Phase: intangibility you can't shoot through — which is why
+    // Shorter Phase is an upgrade rather than a nerf. It gets you
+    // through the wall and back into the fight sooner.
+    t.phaseUntil = now + PHASE.durationMs * (t.up?.phaseDuration ?? 1);
     sfx.phase?.();
     sendTypedShot(t, { w: "phase" }, now);
   }
+  // Extra Use lets the pickup fire more than once before it's spent.
+  t.agiLeft = (t.agiLeft ?? (1 + Math.round(t.up?.phaseUses ?? 0))) - 1;
+  if (t.agiLeft > 0) return;      // keep the slot loaded
+  t.agiLeft = 0;
   t.agility = null;
 }
 
@@ -2277,11 +2334,14 @@ function spawnShot(byId, sh, now = performance.now(), ageMs = 0) {
     }
     case "armour": {
       const at = S.tanks.find((x) => x.id === byId);
-      if (at) { at.armour = ARMOUR.hp; at.armourUntil = now + ARMOUR.durationMs; }
+      if (at) {
+        at.armour = ARMOUR.hp + Math.round(at.up?.armourMax ?? 0);
+        at.armourUntil = now + ARMOUR.durationMs * (at.up?.armourDuration ?? 1);
+      }
       break;
     }
     case "heal": addHealZone(sh.x, sh.y, now); break;
-    case "mud": addMudPit(sh.x, sh.y, sh.s ?? 1, now); break;
+    case "mud": addMudPit(sh.x, sh.y, sh.s ?? 1, now, byId); break;
     case "mortar": launchMortar(byId, sh.x0, sh.y0, sh.x, sh.y, now); break;
     case "flame": {
       // Remote flamethrower: the shooter sends a pulse every FLAME_NET_MS
@@ -2403,7 +2463,8 @@ function stepBullets(now, dt) {
           addFade(b.x, b.y, b.r ?? BULLET_R, now);
           // Authority: in local mode we own everyone; online we only
           // pronounce deaths for tanks simulated on this device.
-          applyHit(t, b.mini ? DMG.mg : DMG.basic, b.by, now, "bullet");
+          applyHit(t, b.mini ? DMG.mg : DMG.basic + upOf(b.by).basicDmg,
+                   b.by, now, "bullet");
           break;
         }
       }
@@ -2429,7 +2490,7 @@ function stepSpecials(now, dt) {
   stepBeams(now);
   S.beams = S.beams.filter((bm) => !bm.doneAt || now - bm.doneAt < LASER.flashMs);
   S.booms = S.booms.filter((bo) => now - bo.born < 320);
-  S.mudPits = S.mudPits.filter((m) => now - m.born < MUD.lifeMs);
+  S.mudPits = S.mudPits.filter((m) => now - m.born < (m.life ?? MUD.lifeMs));
   if (S.mortarClouds) S.mortarClouds = S.mortarClouds.filter((c) => now - c.born < MORTAR.cloudMs);
   if (S.sparks) S.sparks = S.sparks.filter((p) => now - p.born < p.life);
 }
@@ -2521,7 +2582,7 @@ function stepGear(now) {
         if (g.type === "flame") {
           // A fresh tank of fuel, and a clean slate so the first pull
           // ticks at once and can't be tap-spammed.
-          t.flameFuel = FLAME.durationMs;
+          t.flameFuel = FLAME.durationMs + (t.up?.flameFuel ?? 0) * 1000;
           t.flameTickAt = 0;
           t.flameBurn = FLAME.tickMs;
           t.flameOn = false;
@@ -2709,7 +2770,9 @@ function pickGearSpot() {
 }
 
 function fireLaser(byId, x, y, a, now) {
-  const pts = laserPath(x, y, a, S.rects, LASER.shotBounces, S.diag);
+  const up = upOf(byId);
+  const pts = laserPath(x, y, a, S.rects,
+    LASER.shotBounces + Math.round(up.laserBounce), S.diag);
   const shooter = S.tanks.find((t) => t.id === byId);
   const cum = [0];
   for (let i = 1; i < pts.length; i++) {
@@ -2722,6 +2785,9 @@ function fireLaser(byId, x, y, a, now) {
     pts, cum, total: cum[cum.length - 1],
     color: HULL[shooter?.color] ?? "#e8452e",
     born: now, by: byId, head: 0, doneAt: 0,
+    // Sustained Power: damage holds flat for this many bounces before
+    // the usual −1 per reflection starts biting.
+    hold: Math.round(up.laserFalloff),
   });
   sfx.laser();
 }
@@ -2779,7 +2845,8 @@ function stepBeams(now) {
           // Just ENTERED the tank at this point along the path — one
           // hit. 8 dmg fresh, −1 per bounce so far, floored at 1.
           bm.inside.add(t.id);
-          const dmg = Math.max(1, DMG.laserBase - beamBouncesAt(bm, d));
+          const bounces = Math.max(0, beamBouncesAt(bm, d) - (bm.hold ?? 0));
+          const dmg = Math.max(1, DMG.laserBase - bounces);
           applyHit(t, dmg, bm.by, now, "laser");
         } else if (!touching && bm.inside.has(t.id)) {
           bm.inside.delete(t.id); // exited — a later re-entry hits again
@@ -2793,13 +2860,15 @@ function stepBeams(now) {
 }
 
 function spawnRocket(byId, x, y, a, now) {
-  const speed = BULLET_SPEED * ROCKET.speed;
+  const up = upOf(byId);
+  const speed = BULLET_SPEED * ROCKET.speed * up.rocketSpeed;
   S.rockets.push({
     x, y,
     vx: Math.cos(a) * speed,
     vy: Math.sin(a) * speed,
     born: now,
     by: byId,
+    durMul: up.rocketDuration,   // Duration upgrade, fixed at launch
     r: ROCKET.r * BULLET_R, // bots dodge it like a (fat) bullet
     mini: true,             // never counts toward anyone's ammo
     trail: [],
@@ -2814,7 +2883,7 @@ function stepRockets(now, dt) {
 
   for (const rk of S.rockets) {
     const age = now - rk.born;
-    if (age > ROCKET.lifeMs) {
+    if (age > ROCKET.lifeMs * (rk.durMul ?? 1)) {
       S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3 });
       addFade(rk.x, rk.y, r * 1.4, now);
       continue;
@@ -2883,7 +2952,7 @@ function stepRockets(now, dt) {
         if (t.id === rk.by && age < ROCKET.ownerGraceMs) continue;
         if (tankHitPoint(t, rk.x, rk.y, r)) {
           alive = false;
-          applyHit(t, DMG.rocket, rk.by, now, "bullet");
+          applyHit(t, DMG.rocket + upOf(rk.by).rocketDmg, rk.by, now, "bullet");
           S.booms.push({ x: rk.x, y: rk.y, born: now, r: r * 3.5 });
           addFade(rk.x, rk.y, r * 1.4, now);
           break;
@@ -2940,7 +3009,9 @@ function addWall(byId, x, y, a, now) {
     x, y, a: perp,               // a = orientation of the LONG axis
     hx: half,                    // half-length along `perp`
     hy: WALL.thickCells * CELL * 0.5, // half-thickness
-    hp: WALL.hp,
+    hp: WALL.hp + Math.round(t.up?.wallHp ?? 0),
+    hp0: WALL.hp + Math.round(t.up?.wallHp ?? 0),   // for the damage tint
+    life: WALL.lifeMs * (t.up?.wallDuration ?? 1),
     born: now,
   });
 }
@@ -2952,7 +3023,7 @@ function addHealZone(x, y, now) {
 
 // A muddy puddle that slows any tank inside it. `seed` drives the
 // irregular blob outline so every client draws the same shape.
-function addMudPit(x, y, seed, now) {
+function addMudPit(x, y, seed, now, byId = null) {
   const rng = mulberry32(seed >>> 0);
   const R = MUD.radiusCells * CELL;
   const N = 11;
@@ -2962,18 +3033,25 @@ function addMudPit(x, y, seed, now) {
     const rr = R * (0.72 + rng() * 0.5);          // jittered radius
     pts.push([Math.cos(ang) * rr, Math.sin(ang) * rr * 0.82]); // squashed
   }
-  S.mudPits.push({ x, y, r: R, born: now, pts });
+  // The pit remembers the Mud Pit upgrades of whoever laid it.
+  const up = byId ? upOf(byId) : NO_STATS;
+  S.mudPits.push({
+    x, y, r: R, born: now, pts,
+    life: MUD.lifeMs * up.mudDuration,
+    slow: Math.max(0.05, MUD.slow - up.mudSlow),
+  });
 }
 
 function spawnSnipe(byId, x, y, a, now) {
   sfx.snipe?.();
-  const speed = BULLET_SPEED * SNIPER.speed;
+  const up = upOf(byId);
+  const speed = BULLET_SPEED * SNIPER.speed * up.sniperSpeed;
   S.snipes.push({
     x, y,
     vx: Math.cos(a) * speed,
     vy: Math.sin(a) * speed,
     x0: x, y0: y,               // origin, to measure the 5-cell range
-    maxDist: SNIPER.rangeCells * CELL,
+    maxDist: (SNIPER.rangeCells + up.sniperRange) * CELL,
     born: now,
     by: byId,
     r: SNIPER.r * BULLET_R,
@@ -2982,16 +3060,18 @@ function spawnSnipe(byId, x, y, a, now) {
 }
 
 // Damage a brick wall takes per weapon — the SAME numbers tanks take,
-// so a 6-HP wall behaves like a 6-HP tank. Laser here is its base 8
-// (a fresh, un-bounced beam one-shots the wall, as the design intends).
+// so a 6-HP wall behaves like a 6-HP tank. The laser uses its BASE
+// figure here: a fresh, un-bounced beam one-shots a wall, as intended.
+// (Stale comments corrected — these said 8 when the value is 7, and
+// the cannon ball is 5, not 6.)
 const WALL_DMG = {
   basic: DMG.basic,        // 2
   mg: DMG.mg,              // 1
-  laser: DMG.laserBase,    // 8 → one hit
+  laser: DMG.laserBase,    // 7 → one hit
   rocket: DMG.rocket,      // 7
-  cannon: DMG.cannonBall,  // 6 → one hit
+  cannon: DMG.cannonBall,  // 5
   shrapnel: DMG.shrapnel,  // 2
-  sniper: DMG.sniper,      // 4
+  sniper: DMG.sniper,      // 7
 };
 
 // Point-vs-walls with damage. `dmgKey` selects the per-weapon value.
@@ -3013,7 +3093,7 @@ function hitWall(x, y, r, dmgKey, now) {
 }
 
 function stepWalls(now, dt) {
-  S.walls = S.walls.filter((w) => now - w.born < WALL.lifeMs && w.hp > 0);
+  S.walls = S.walls.filter((w) => now - w.born < (w.life ?? WALL.lifeMs) && w.hp > 0);
   // A wall blocks tanks: if a tank overlaps a wall slab, push it out
   // along the slab's short axis (gently). Clamp so we never eject a
   // tank past the arena boundary (no escaping the map).
@@ -3058,7 +3138,7 @@ function stepSnipes(now, dt) {
       if (tankHitPoint(t, s.x, s.y, r)) {
         alive = false;
         addFade(s.x, s.y, r * 1.4, now);
-        applyHit(t, DMG.sniper, s.by, now, "bullet");
+        applyHit(t, DMG.sniper + upOf(s.by).sniperDmg, s.by, now, "bullet");
         break;
       }
     }
@@ -3069,7 +3149,8 @@ function stepSnipes(now, dt) {
 
 function spawnCannon(byId, x, y, a, now) {
   sfx.cannon();
-  const speed = BULLET_SPEED * CANNON.speed;
+  const up = upOf(byId);
+  const speed = BULLET_SPEED * CANNON.speed * up.cannonSpeed;
   // Deterministic per-shot seed: built only from the (fixed-precision)
   // shot parameters, so every online client grows the SAME shrapnel
   // pattern from this ball.
@@ -3081,7 +3162,12 @@ function spawnCannon(byId, x, y, a, now) {
     vy: Math.sin(a) * speed,
     born: now,
     by: byId,
-    r: CANNON.r * BULLET_R, // bots read this to keep clear
+    // Shell size and the burst it makes are the SHOOTER's, fixed here
+    // so the shell behaves the same on every client that sees it.
+    sizeMul: up.cannonSize,
+    shrapN: CANNON.shrapN + Math.round(up.cannonShrapnel),
+    shrapMul: up.shrapSpeed,
+    r: CANNON.r * BULLET_R * up.cannonSize, // bots read this to keep clear
     mini: true,             // never counts toward anyone's ammo
   });
 }
@@ -3089,7 +3175,7 @@ function spawnCannon(byId, x, y, a, now) {
 function stepSnipesWrap() {} // (kept for clarity; stepSnipes called in stepSpecials)
 
 function stepCannons(now, dt) {
-  const r = CANNON.r * BULLET_R;
+  const r = CANNON.r * BULLET_R * (c.sizeMul ?? 1);
   const survivors = [];
 
   for (const c of S.cannons) {
@@ -3126,19 +3212,20 @@ function stepCannons(now, dt) {
 // Shrapnel circle — it phases through walls (slowed inside them).
 function explodeCannon(c, now) {
   sfx.shrap();
-  addFade(c.x, c.y, CANNON.r * BULLET_R, now);
-  S.booms.push({ x: c.x, y: c.y, born: now, r: CANNON.r * BULLET_R * 4 });
+  addFade(c.x, c.y, CANNON.r * BULLET_R * (c.sizeMul ?? 1), now);
+  S.booms.push({ x: c.x, y: c.y, born: now, r: CANNON.r * BULLET_R * (c.sizeMul ?? 1) * 4 });
   // A small smoke puff at the point of detonation (reuses the mortar
   // cloud, smaller — the same rising-and-fading render).
   (S.mortarClouds ??= []).push({
     x: c.x, y: c.y, born: now, scale: 0.55, seed: (Math.random() * 1e9) | 0,
   });
-  const speed = BULLET_SPEED * CANNON.shrapSpeed;
+  const speed = BULLET_SPEED * CANNON.shrapSpeed * (c.shrapMul ?? 1);
   // Irregular burst, not a perfect ring: seeded jitter on both angle
   // and speed (seeded so online clients all see the same pattern).
   const rng = mulberry32(c.seed ?? 1);
-  for (let i = 0; i < CANNON.shrapN; i++) {
-    const a = (i / CANNON.shrapN) * Math.PI * 2 + (rng() - 0.5) * 0.55;
+  const shrapN = c.shrapN ?? CANNON.shrapN;
+  for (let i = 0; i < shrapN; i++) {
+    const a = (i / shrapN) * Math.PI * 2 + (rng() - 0.5) * 0.55;
     const jitter = 0.7 + rng() * 0.6;
     S.shraps.push({
       x: c.x, y: c.y,
@@ -3841,9 +3928,60 @@ function stepFlameBurns(now) {
       // before it ends simply refreshes it, since flameContact goes true
       // again and this re-arms once contact ends anew.)
       o.flameContact = false;
-      o.burnUntil = now + FLAME.burnTotalMs + 60; // +margin so the final tick lands
+      // Burn Duration belongs to whoever lit the fire, not the victim.
+      const bUp = upOf(o.flameHitBy ?? null);
+      o.burnUntil = now + FLAME.burnTotalMs + bUp.flameBurn * 1000 + 60; // +margin
       o.burnNextAt = now + FLAME.burnEveryMs;     // first burn tick 1 s after contact ends
       o.burnBy = o.flameHitBy ?? null;
+    }
+  }
+}
+
+// Regeneration, both flavours.
+//
+// Health ticks every 17 s and armour every 34 s, per the tree. Both are
+// deliberately slow enough to matter between engagements rather than
+// during one — a tank that out-heals incoming fire would be miserable
+// to play against.
+//
+// Only the authority ticks these: offline that's us, online it's each
+// tank's owner, so a regen tick can't be applied twice by two clients
+// watching the same tank.
+const REGEN_MS = 17000;
+const ARMOUR_REGEN_MS = 34000;
+
+function stepRegen(now) {
+  if (!S.upgradesOn) return;
+  for (const t of S.tanks) {
+    if (t.dead || t.gone) continue;
+    if (S.mode === "online" && !t.local) continue;   // owner ticks it
+    const up = t.up;
+    if (!up) continue;
+
+    if (up.regen > 0) {
+      t.regenAt = t.regenAt || now + REGEN_MS;
+      if (now >= t.regenAt) {
+        t.regenAt = now + REGEN_MS;
+        const cap = t.maxHp ?? TANK_HP;
+        if (t.hp < cap) {
+          // The HUD is rebuilt from tank state every frame, so there
+          // is nothing to notify.
+          t.hp = Math.min(cap, t.hp + up.regen);
+        }
+      }
+    }
+
+    if (up.armourRegen > 0) {
+      t.armourRegenAt = t.armourRegenAt || now + ARMOUR_REGEN_MS;
+      if (now >= t.armourRegenAt) {
+        t.armourRegenAt = now + ARMOUR_REGEN_MS;
+        const cap = ARMOUR.hp + Math.round(up.armourMax);
+        if ((t.armour ?? 0) < cap) {
+          t.armour = Math.min(cap, (t.armour ?? 0) + up.armourRegen);
+          // Armour earned this way persists like the starting plate.
+          if (!t.armourUntil || t.armourUntil < now) t.armourUntil = Number.MAX_SAFE_INTEGER;
+        }
+      }
     }
   }
 }
@@ -4361,7 +4499,7 @@ function draw(now) {
   ctx.fillStyle = "#14171d";
   for (const c of S.cannons) {
     ctx.beginPath();
-    ctx.arc(c.x, c.y, CANNON.r * BULLET_R, 0, Math.PI * 2);
+    ctx.arc(c.x, c.y, CANNON.r * BULLET_R * (c.sizeMul ?? 1), 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -4922,7 +5060,7 @@ function drawWall(w, now) {
   }
   ctx.stroke();
   // Damage tint as HP drops (the only visual cue — no timer bar).
-  const frac = Math.max(0, w.hp / WALL.hp);
+  const frac = Math.max(0, w.hp / (w.hp0 ?? WALL.hp));
   if (frac < 1) {
     ctx.fillStyle = `rgba(20,10,6,${(1 - frac) * 0.4})`;
     ctx.fillRect(-L, -T, L * 2, T * 2);
@@ -5020,6 +5158,46 @@ function drawTankShadows(now) {
   const H = TANK_R * 0.30;
   const ox = SHADOW.dx * H, oy = SHADOW.dy * H;
   ctx.save();
+
+  // A tank's shadow stops at the foot of a wall.
+  //
+  // Walls stand well above a tank, so a tank's shadow physically cannot
+  // be cast onto the top of one — the wall is in the way. Drawn after
+  // the masonry with no mask, the smear ran straight up and over the
+  // brickwork, which flattened the whole scene: suddenly the wall looked
+  // no taller than the tank beside it.
+  //
+  // Masked with the EVEN-ODD rule: one big rectangle covering the world,
+  // plus every wall footprint. Even-odd counts a region covered twice as
+  // outside the path, so the walls punch themselves out and what's left
+  // is exactly the floor.
+  ctx.beginPath();
+  ctx.rect(-CELL, -CELL, S.worldW + CELL * 2, S.worldH + CELL * 2);
+  for (const rc of S.rects ?? []) ctx.rect(rc.x, rc.y, rc.w, rc.h);
+  for (const w of S.diag ?? []) {
+    const c = Math.cos(w.a), sn = Math.sin(w.a);
+    const ax = c * w.hx, ay = sn * w.hx;
+    const bx = -sn * w.hy, by = c * w.hy;
+    ctx.moveTo(w.x - ax - bx, w.y - ay - by);
+    ctx.lineTo(w.x + ax - bx, w.y + ay - by);
+    ctx.lineTo(w.x + ax + bx, w.y + ay + by);
+    ctx.lineTo(w.x - ax + bx, w.y - ay + by);
+    ctx.closePath();
+  }
+  // Player-built brick walls are just as tall.
+  for (const w of S.walls ?? []) {
+    if ((w.hp ?? 1) <= 0) continue;
+    const c = Math.cos(w.a), sn = Math.sin(w.a);
+    const ax = c * w.hx, ay = sn * w.hx;
+    const bx = -sn * w.hy, by = c * w.hy;
+    ctx.moveTo(w.x - ax - bx, w.y - ay - by);
+    ctx.lineTo(w.x + ax - bx, w.y + ay - by);
+    ctx.lineTo(w.x + ax + bx, w.y + ay + by);
+    ctx.lineTo(w.x - ax + bx, w.y - ay + by);
+    ctx.closePath();
+  }
+  ctx.clip("evenodd");
+
   ctx.fillStyle = "rgba(18,20,23,0.34)";
   const STEPS = 5;                     // enough to read as one solid smear
   for (const t of S.tanks) {
@@ -5145,6 +5323,23 @@ function stepPrewarm(budgetMs = 4) {
     } catch (e) { /* the draw path builds anything that failed */ }
   }
   if (!jobs.length) S.prewarm = null;
+}
+
+// The upgrade stats belonging to whoever fired a projectile.
+//
+// Damage and lifetime are settled long after the shot leaves the barrel,
+// often on a client that isn't the shooter's, so the projectile carries
+// only an owner id. This resolves that back to a stat block, and falls
+// back to the neutral set for a shooter who has left or for any match
+// with upgrades switched off.
+function upOf(byId) {
+  const t = S.tanks.find((x) => x.id === byId);
+  return t?.up ?? NO_STATS;
+}
+
+// The basic gun's magazine, including the Max Ammo upgrade.
+function magCapOf(t) {
+  return MAG_SIZE + (t?.up?.basicMag ?? 0);
 }
 
 function drawTank(t, now) {

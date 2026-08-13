@@ -111,6 +111,15 @@
     <section class="screen screen-center" id="screen-results" aria-label="Match results">
       <h2>Match Results</h2>
       <div class="results-body" id="results-body"></div>
+      <!-- XP earned this match, filled in and animated by results.js -->
+      <div class="res-xp" id="results-xp" hidden>
+        <div class="res-xp-top">
+          <span class="res-xp-lvl">LEVEL 0</span>
+          <span class="res-xp-gain"></span>
+        </div>
+        <div class="res-xp-bar"><i></i></div>
+        <p class="res-xp-note"></p>
+      </div>
       <button class="btn btn-big btn-go" id="results-continue" type="button">Continue</button>
     </section>
 
@@ -148,10 +157,12 @@
       <div class="settings-tabs">
         <button class="btn tab-btn is-on" id="shop-tab-colours" type="button">COLOURS</button>
         <button class="btn tab-btn" id="shop-tab-patterns" type="button">PATTERNS</button>
+        <button class="btn tab-btn" id="shop-tab-upgrades" type="button">UPGRADES</button>
       </div>
       <p class="shop-rank" id="shop-rank"></p>
       <div id="shop-colours"></div>
       <div id="shop-patterns" hidden></div>
+      <div id="shop-upgrades" hidden></div>
 
       <!-- Two-colour picker for equipping a pattern -->
       <div class="modal" id="pattern-picker" hidden>
@@ -310,6 +321,8 @@
               <p class="set-label">Closing zone</p>
               <div class="set-row">
                 <button class="btn btn-small set-chip" id="set-zone" type="button">ZONE: OFF</button>
+                <!-- Host can switch skill points off, for a level field. -->
+                <button class="btn btn-small set-chip" id="set-upgrades" type="button">UPGRADES: ON</button>
               </div>
               <div id="set-zone-timer" hidden>
                 <p class="set-label">Shrinks every: <b id="set-zone-val">30s</b></p>

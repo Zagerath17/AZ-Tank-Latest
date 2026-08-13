@@ -19,11 +19,16 @@
 // screen, including mid-game.
 // ================================================================
 
-import { toast, tankSVG, showScreen, onEnter, onLeave, paintVar } from "./main.js";
+import { toast, tankSVG, hydrateTankIcons, showScreen, onEnter, onLeave, paintVar } from "./main.js";
 import {
   SKINS, DEFAULT_SKIN, PATTERNS, DEFAULT_PATTERN, patternColors,
   isFreeSkin, skinUnlocked, lockReason,
 } from "./skins.js";
+import {
+  levelFromXp, sanitize as sanitizeUpgrades, pointsLeft as upgradePointsLeft,
+  pointsSpent as upgradePointsSpent, canRank as canRankUpgrade,
+  MAX_SKILL_POINTS, RESET_COST as UPGRADE_RESET_COST,
+} from "./upgrades.js";
 
 // Reset marker. Any account whose stored wipeVersion is lower gets its
 // currency and purchases cleared exactly once on its next sign-in.
@@ -369,6 +374,8 @@ async function adoptProfile(uid, wantName = null, email = null) {
     pattern: PATTERNS[prof.pattern] ? prof.pattern : DEFAULT_PATTERN,
     patColors: Array.isArray(prof.patColors) ? prof.patColors.slice(0, 2) : [],
     ownedPatterns: { ...(prof.ownedPatterns ?? {}), [DEFAULT_PATTERN]: true },
+    xp: prof.xp ?? 0,
+    upgrades: prof.upgrades ?? {},
   };
   localStorage.setItem(LS_NAME, JSON.stringify(account));
   // Their cloud-saved preferences come back with them.
@@ -709,6 +716,9 @@ export async function buySkin(id) {
     [`users/${account.key}/tags`]: live - cost,
     [`users/${account.key}/owned/${id}`]: true,
   });
+  // A lobby holds its own copy of what everyone is wearing, so tell it.
+  try { const m = await import("./online.js"); await m.syncMyLook(); }
+  catch (e) { /* not in a lobby, or it's already gone */ }
   account.tags = live - cost;
   account.owned = { ...(account.owned ?? {}), [id]: true };
   localStorage.setItem(LS_NAME, JSON.stringify(account));
@@ -741,6 +751,9 @@ export async function equipPattern(id, colors = []) {
     [`users/${account.key}/pattern`]: id,
     [`users/${account.key}/patColors`]: chosen,
   });
+  // A lobby holds its own copy of what everyone is wearing, so tell it.
+  try { const m = await import("./online.js"); await m.syncMyLook(); }
+  catch (e) { /* not in a lobby, or it's already gone */ }
 }
 
 // Buy a pattern. Patterns have no gates — price is the only check,
@@ -783,6 +796,108 @@ export async function awardTags(kills) {
   } catch (e) {
     return account.tags;
   }
+}
+
+/* ---------- progression: XP, levels, skill points ---------- */
+
+// Total XP earned, ever. Levels and skill points are DERIVED from it
+// rather than stored, so the two can never disagree — and a profile
+// that has been tampered with still can't produce more points than its
+// XP would have earned.
+export function getXp() {
+  return account?.xp ?? 0;
+}
+
+export function getLevel() {
+  return levelFromXp(getXp()).level;
+}
+
+export function getLevelInfo() {
+  return levelFromXp(getXp());
+}
+
+// The player's allocation, always sanitised against what they've earned.
+export function getUpgrades() {
+  if (!account) return {};
+  return sanitizeUpgrades(account.upgrades ?? {}, getLevel());
+}
+
+export function getSkillPointsLeft() {
+  return upgradePointsLeft(getUpgrades(), getLevel());
+}
+
+// Award XP and report what happened, so the results screen can animate
+// it: where the bar started, where it ended, and every level crossed.
+export async function awardXp(amount) {
+  const n = Math.max(0, Math.round(amount ?? 0));
+  const before = getXp();
+  const from = levelFromXp(before);
+  if (!account || !n) return { gained: 0, from, to: from, levels: [], points: 0 };
+
+  let next = before + n;
+  try {
+    const f = await ensureFirebase();
+    const live = (await f.get(f.ref(f.db, `users/${account.key}/xp`))).val() ?? 0;
+    next = live + n;
+    await f.set(f.ref(f.db, `users/${account.key}/xp`), next);
+  } catch (e) { /* offline: keep the local total moving */ }
+
+  account.xp = next;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  const to = levelFromXp(next);
+  const levels = [];
+  for (let l = from.level + 1; l <= to.level; l++) {
+    levels.push({ level: l, point: l <= MAX_SKILL_POINTS });
+  }
+  return {
+    gained: n, from, to, levels,
+    points: levels.filter((x) => x.point).length,
+  };
+}
+
+// Put a point into a node.
+export async function rankUpgrade(key) {
+  if (!account) throw new Error("Log in to spend skill points.");
+  const alloc = getUpgrades();
+  const level = getLevel();
+  if (!canRankUpgrade(alloc, key, level)) {
+    throw new Error(upgradePointsLeft(alloc, level) > 0
+      ? "That upgrade is already at its maximum."
+      : "No skill points left — level up or reset.");
+  }
+  alloc[key] = (alloc[key] ?? 0) + 1;
+  account.upgrades = alloc;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  try {
+    const f = await ensureFirebase();
+    await f.set(f.ref(f.db, `users/${account.key}/upgrades`), alloc);
+  } catch (e) { /* saved locally; syncs on the next write */ }
+  return alloc;
+}
+
+// Wipe the whole allocation. Costs tags, so respeccing is a decision
+// rather than something you do between every round.
+export async function resetUpgrades() {
+  if (!account) throw new Error("Log in to reset your upgrades.");
+  if (getUpgradesSpent() === 0) throw new Error("You haven't spent any skill points.");
+  if (getTags() < UPGRADE_RESET_COST) {
+    throw new Error(`A reset costs ${UPGRADE_RESET_COST} tags.`);
+  }
+  const tagsNext = getTags() - UPGRADE_RESET_COST;
+  account.upgrades = {};
+  account.tags = tagsNext;
+  localStorage.setItem(LS_NAME, JSON.stringify(account));
+  try {
+    const f = await ensureFirebase();
+    await f.update(f.ref(f.db), {
+      [`users/${account.key}/upgrades`]: null,
+      [`users/${account.key}/tags`]: tagsNext,
+    });
+  } catch (e) { /* local copy already cleared */ }
+}
+
+export function getUpgradesSpent() {
+  return upgradePointsSpent(getUpgrades());
 }
 
 export function setDnd(on) {
@@ -845,7 +960,7 @@ export async function toggleInvitePanel() {
     const room = info.players < MAX_PLAYERS;
     panel.innerHTML = invitable.map((p) => `
       <li class="friend-row" style="${paintVar(p.color)}">
-        ${tankSVG(p.color)}
+        ${tankSVG({ color: p.color, pattern: p.pattern, patColors: p.patColors })}
         <span class="friend-name">${p.name}</span>
         <button class="btn btn-small" data-invite="${p.key}" ${room && !p.dnd ? "" : "disabled"}>
           ${!room ? "LOBBY FULL" : p.dnd ? "DND" : "INVITE"}
@@ -1020,7 +1135,7 @@ async function renderFriends() {
       const why = p.dnd ? " · Do Not Disturb" : "";
       return `
         <li class="friend-row" style="${paintVar(p.color)}">
-          ${tankSVG(p.color)}
+          ${tankSVG({ color: p.color, pattern: p.pattern, patColors: p.patColors })}
           <span class="friend-name">${p.name ?? p.key}
             <em class="status status-${cls}">● ${label}${why}</em></span>
           <button class="btn btn-small" data-ask="${p.key}" ${canAsk ? "" : "disabled"}>
@@ -1064,7 +1179,7 @@ async function renderRequests() {
       const name = p?.name ?? key;
       return `
         <li class="friend-row" style="${paintVar(p?.color)}">
-          ${tankSVG(p?.color)}
+          ${tankSVG({ color: p?.color, pattern: p?.pattern, patColors: p?.patColors })}
           <span class="friend-name">${name}</span>
           <button class="btn btn-small" data-req-yes="${key}">ACCEPT</button>
           <button class="btn btn-small" data-req-no="${key}">DECLINE</button>
@@ -1117,7 +1232,7 @@ async function searchPlayer() {
     const blockLabel = p.noRequests ? "REQUESTS OFF" : "DO NOT DISTURB";
     out.innerHTML = `
       <li class="friend-row" style="${paintVar(p.color)}">
-        ${tankSVG(p.color)}
+        ${tankSVG({ color: p.color, pattern: p.pattern, patColors: p.patColors })}
         <span class="friend-name">${p.name}</span>
         <button class="btn btn-small" id="friend-add-btn" ${already || blocked ? "disabled" : ""}>
           ${already ? "FRIENDS ✓" : blocked ? blockLabel : "ADD FRIEND"}
