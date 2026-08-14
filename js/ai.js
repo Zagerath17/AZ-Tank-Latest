@@ -166,50 +166,44 @@ function sense(t, B, world, P, now) {
   }
 
   // ---- enemies ------------------------------------------------------
+  // THIS IS A TOP-DOWN GAME WITH THE WHOLE ARENA ON SCREEN. The player
+  // can see every tank at every moment, walls or not — so gating a bot's
+  // KNOWLEDGE on line of sight was simply wrong, and it produced bots
+  // that wandered past an enemy two corridors away because they had no
+  // idea it existed. Position is always known, exactly as the player
+  // knows it.
+  //
+  // Line of sight still matters, but only for what it actually governs:
+  // whether there is a shot. `seen` therefore means "I can shoot them
+  // from here", not "I am aware of them".
+  //
+  // Skill lives in `lag` — how well a bot TRACKS a moving target for
+  // leading — not in whether it knows where the target is.
   for (const o of world.tanks) {
     if (o === t || o.dead || o.gone) continue;
     if (world.teams && world.teams[o.id] === world.teams[t.id]) continue;
-    const d = Math.hypot(o.x - t.x, o.y - t.y);
-    const visible = clearLine(world, t.x, t.y, o.x, o.y, world.bulletR ?? 3);
-    let bel = B.foes.get(o.id);
 
-    if (visible && noticed(B, "see" + o.id, now, P.react * 1000)) {
-      if (!bel) {
-        bel = { id: o.id, x: o.x, y: o.y, vx: 0, vy: 0, at: now - 16, ref: o };
-        B.foes.set(o.id, bel);
-      }
-      // The belief chases the truth at a rate set by the tier, so a
-      // weaker bot is always shooting where the target used to be.
-      const step = Math.max(0.001, (now - bel.at) / 1000);
-      const k = Math.min(1, step / Math.max(0.02, P.lag));
-      bel.vx += (((o.x - bel.x) / step) - bel.vx) * Math.min(1, k * 0.7);
-      bel.vy += (((o.y - bel.y) / step) - bel.vy) * Math.min(1, k * 0.7);
-      bel.x += (o.x - bel.x) * k;
-      bel.y += (o.y - bel.y) * k;
-      bel.at = now; bel.seen = true; bel.ref = o;
-    } else if (d < 3.4 * cell && noticed(B, "hear" + o.id, now, P.react * 1400)) {
-      // HEARING. A tank you cannot see is still a running engine two
-      // rooms away. Without it a bot has no idea anyone exists until it
-      // wanders into a clear line, which in a maze is mostly never.
-      // Deliberately rough: a direction to search, not a firing solution.
-      if (!bel) {
-        bel = { id: o.id,
-                x: o.x + (Math.random() - 0.5) * cell * 0.5,
-                y: o.y + (Math.random() - 0.5) * cell * 0.5,
-                vx: 0, vy: 0, at: now, ref: o };
-        B.foes.set(o.id, bel);
-      } else {
-        bel.x += (o.x - bel.x) * 0.04;
-        bel.y += (o.y - bel.y) * 0.04;
-        bel.at = now;
-      }
-      bel.seen = false;
-    } else if (bel) {
-      bel.seen = false;
+    let bel = B.foes.get(o.id);
+    if (!bel) {
+      bel = { id: o.id, x: o.x, y: o.y, vx: 0, vy: 0, at: now - 16, ref: o };
+      B.foes.set(o.id, bel);
     }
+    // Track continuously. The belief chases the truth at a rate set by
+    // the tier, so a weaker bot is always aiming a little behind a
+    // moving target — but it is never ignorant of where that target is.
+    const step = Math.max(0.001, (now - bel.at) / 1000);
+    const k = Math.min(1, step / Math.max(0.02, P.lag));
+    bel.vx += (((o.x - bel.x) / step) - bel.vx) * Math.min(1, k * 0.7);
+    bel.vy += (((o.y - bel.y) / step) - bel.vy) * Math.min(1, k * 0.7);
+    bel.x += (o.x - bel.x) * k;
+    bel.y += (o.y - bel.y) * k;
+    bel.at = now;
+    bel.ref = o;
+    // Can we actually put a round into them from where we stand?
+    bel.seen = clearLine(world, t.x, t.y, o.x, o.y, world.bulletR ?? 3);
   }
   for (const [id, f] of B.foes) {
-    if (f.ref?.dead || f.ref?.gone || now - f.at > 6000) B.foes.delete(id);
+    if (f.ref?.dead || f.ref?.gone) B.foes.delete(id);
   }
 
   // ---- incoming fire --------------------------------------------------
@@ -285,6 +279,8 @@ function sense(t, B, world, P, now) {
     }
     B.hx = t.x; B.hy = t.y; B.hAt = now;
   }
+
+
 }
 
 // March a projectile forward, reflecting off walls, returning each leg.
@@ -349,7 +345,7 @@ function assess(t, B, world, P, now) {
   for (const f of B.foes.values()) {
     const d = Math.hypot(f.x - t.x, f.y - t.y) / cell;
     let s = -d;
-    if (f.seen) s += 4;
+    if (f.seen) s += 4;      // a target we can actually shoot beats one we can't
     if ((f.ref?.hp ?? 10) <= 3) s += 3;                 // finish the wounded
     if (B.target && f.id === B.target.id) s += 1.2;     // stickiness
     if (s > bestScore) { bestScore = s; best = f; }
@@ -377,11 +373,16 @@ function decide(t, B, world, P, now) {
   B.gearPick = gear;
 
   const U = {
-    hunt: 1.0 + P.aggr * 0.5,
+    // Only relevant when there is genuinely nobody to fight — every
+    // living tank is known now, so a bot is never merely "looking" for
+    // one it could already see.
+    hunt: B.target ? -1 : 2.0,
     fight: B.target ? 2.2 + P.aggr * 1.5 - Math.max(0, B.tdist - B.gun.max) * 0.6 : -9,
     recover: (B.hp < 0.35 ? 2.8 : B.hp < 0.6 ? 1.1 : -9) + (B.ammo === 0 ? 1.2 : 0),
     collect: gear ? 1.5 + gear.value - gear.cost : -9,
-    flee: B.inZone ? 6 : B.zoneSoon ? 2.2 : -9,
+    // Being caught in the red is only worth enduring while there is
+    // something to gain from it; otherwise get out.
+    flee: B.inZone ? (6 - (B.zoneTol ?? 0) * 5) : B.zoneSoon ? 2.2 : -9,
   };
 
   // A healing enemy is stationary on a known point for six seconds.
@@ -404,7 +405,7 @@ function decide(t, B, world, P, now) {
     const cur = U[B.intent] ?? -Infinity;
     if (held < P.dwell && pv < cur + 1.2) pick = B.intent;
   }
-  if (pick !== B.intent) { B.intent = pick; B.intentAt = now; }
+  if (pick !== B.intent) { B.intent = pick; B.intentAt = now; B.bestGd = undefined; }
 
   if (B.intent === "flee") {
     B.goal = safeSpot(t, world);
@@ -427,7 +428,30 @@ function decide(t, B, world, P, now) {
 function standoffSpot(t, B, world) {
   const want = B.gun.best * world.cell;
   const a = Math.atan2(t.y - B.target.y, t.x - B.target.x);
-  return { x: B.target.x + Math.cos(a) * want, y: B.target.y + Math.sin(a) * want };
+  // The ideal firing position is a point on a circle around the target,
+  // and that point is very often INSIDE A WALL. Routing to a spot no
+  // tank can occupy fails, the bot falls back to a straight line it
+  // cannot drive, and it parks in a corridor doing nothing — which is
+  // exactly what the navigation tests were catching. Sweep around the
+  // ring for a stance that actually exists, preferring the natural one.
+  for (const off of [0, 0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 2.2, -2.2]) {
+    const p = { x: B.target.x + Math.cos(a + off) * want,
+                y: B.target.y + Math.sin(a + off) * want };
+    if (standable(world, p.x, p.y)) return p;
+  }
+  return { x: B.target.x, y: B.target.y };   // nowhere clean: just go to them
+}
+
+// Is there room for a tank here?
+function standable(world, x, y) {
+  const r = world.tankR * 0.7;
+  const w = (world.maze?.cols ?? 12) * world.cell;
+  const h = (world.maze?.rows ?? 9) * world.cell;
+  if (x < r || y < r || x > w - r || y > h - r) return false;
+  for (const rc of world.rects ?? []) {
+    if (x > rc.x - r && x < rc.x + rc.w + r && y > rc.y - r && y < rc.y + rc.h + r) return false;
+  }
+  return true;
 }
 
 function retreatSpot(t, B, world) {
@@ -645,11 +669,31 @@ function navigate(t, B, world, P, now) {
   }
   if (world.zoneDepthAt && P.zoneMath > 0) {
     const zl = world.zoneLevel ?? 0;
+    // HOW MUCH RED IS THIS WORTH? The zone charges 1 HP every 2 s per
+    // layer of depth, which makes "should I cut through it to reach
+    // them" arithmetic rather than a feeling. Crossing one layer for a
+    // few seconds costs a couple of HP — cheap if it finishes a wounded
+    // enemy, wasteful if it only repositions. Tolerance scales with what
+    // there is to gain and what we can afford to lose.
+    let tol = 0;
+    if (B.target) {
+      const theirHp = (B.target.ref?.hp ?? 10) / Math.max(1, world.maxHp ?? 10);
+      const finishing = Math.max(0, 1 - theirHp * 1.6);   // hurt enemy = go
+      const canAfford = Math.max(0, B.hp - 0.3);          // and we can take it
+      tol = Math.min(0.85, (finishing * 0.9 + P.aggr * 0.35) * canAfford * 1.4);
+      // Chasing them THROUGH the zone only makes sense if they are in or
+      // beyond it — never wade in after someone standing on safe ground.
+      const theirD = world.zoneDepthAt(B.target.x, B.target.y);
+      if (Number.isFinite(theirD) && Math.floor(theirD) > zl + 1) tol *= 0.25;
+    }
+    B.zoneTol = tol;
     const bad = (x, y) => {
       const d = world.zoneDepthAt(x, y);
       if (!Number.isFinite(d)) return 1;
       const L = Math.floor(d);
-      return L < zl ? 1 : L === (world.zoneWarn ?? -1) ? 0.5 : 0;
+      // Deeper red hurts proportionally more, and tolerance discounts it.
+      if (L < zl) return Math.min(1, (zl - L) * 0.7) * (1 - tol);
+      return L === (world.zoneWarn ?? -1) ? 0.5 * (1 - tol * 0.5) : 0;
     };
     const here = bad(t.x, t.y);
     for (let i = 0; i < DIRS; i++) {
@@ -723,11 +767,9 @@ function navigate(t, B, world, P, now) {
   const l = (bi + DIRS - 1) % DIRS, r = (bi + 1) % DIRS;
   const den = Math.abs(score[l]) + Math.abs(score[r]) + Math.abs(score[bi]) + 1e-3;
   const a = RAY[bi].a + ((score[r] - score[l]) / den) * (Math.PI / DIRS);
-  let mag = 0.95 * (0.6 + 0.4 * open[bi]);
-  if (B.goal) {
-    const gd = Math.hypot(B.goal.x - t.x, B.goal.y - t.y);
-    if (gd < R * 2.5) mag *= Math.max(0.15, gd / (R * 2.5));
-  }
+  // Move or don't. Arriving is handled by the intent layer picking a new
+  // goal, not by creeping the last few pixels.
+  const mag = 1;
   return { a, mag, forced: false };
 }
 
@@ -885,7 +927,7 @@ function act(t, B, world, P, now, dt, gun, acts) {
       wantA = Math.abs(off) > 1.45 ? t.a + Math.sign(off) * 1.45 : axis;
       wantM = 0.9;
     } else if (d < want * 0.55) {
-      wantA = axis + Math.PI; wantM = 0.45; wantBack = true;   // give ground, gun still on
+      wantA = axis + Math.PI; wantM = 1; wantBack = true;   // give ground, gun still on
     } else {
       wantA = axis; wantM = 0;                   // in the pocket: hold and shoot
     }
@@ -906,21 +948,48 @@ function act(t, B, world, P, now, dt, gun, acts) {
   // forward arc so the only way to go backwards is to mean it.
   if (!wantBack) {
     const off = angDiff(t.a, wantA);
-    const LIM = 1.4;                       // ~80 degrees, inside the flip
+    const LIM = 2.4;                       // ~137 degrees, inside the flip
     if (Math.abs(off) > LIM) wantA = t.a + Math.sign(off) * LIM;
   }
 
-  // Ease onto the heading — nothing ever snaps.
-  const rate = nav.forced ? 10 : 6;
+  // Track the wanted heading closely. The hull has its own rotational
+  // inertia (0.28 s to reach full turn rate), so it already cannot snap
+  // — smoothing here as well just meant the tank pivoted toward a stale
+  // heading and then had to correct, which is the double-filtering that
+  // made turns look late and vague.
+  const rate = nav.forced ? 24 : 18;
   B.driveA += angDiff(B.driveA, wantA) * Math.min(1, dt * rate);
-  B.driveM += (wantM - B.driveM) * Math.min(1, dt * 8);
+  // driveM is now just "do I want to be moving", not how fast.
+  B.driveM += ((wantM > 0.05 ? 1 : 0) - B.driveM) * Math.min(1, dt * 10);
 
-  if (B.driveM > 0.04) {
+  // THROTTLE IS BINARY: full, or pivot, or reverse. Nothing in between.
+  //
+  // Two problems this solves at once. Dribbling along at a fraction of
+  // throttle for no visible reason looked broken — and it was, since
+  // partial throttle came out of arbitrary openness and distance
+  // factors rather than any decision. And a tank that keeps driving
+  // while it swings onto a new heading turns WIDE: the hull needs
+  // 0.28 s to reach full turn rate, during which it is still travelling,
+  // so it arcs into the corner it was trying to round. Stopping to
+  // pivot removes the arc entirely — the tank rotates on the spot and
+  // then drives straight, which is both faster through tight geometry
+  // and what a person would do.
+  const PIVOT = 1.4;                   // ~34 degrees: past this, turn first
+  if (acts.moveAngle == null && B.driveM <= 0.04 && gun.want) {
+    // Stationary but still needs the gun brought round. moveAngle alone
+    // turns the hull; zero throttle keeps it planted.
+    acts.moveAngle = gun.bearing;
+    acts.moveMag = 0;
+  } else if (B.driveM > 0.04) {
     acts.moveAngle = B.driveA;
-    acts.moveMag = Math.max(0.2, Math.min(1, B.driveM));
+    // Deflection measured the way the engine measures it — behind the
+    // nose counts as reverse, not as a 180 degree turn.
+    let off = Math.abs(angDiff(t.a, B.driveA));
+    if (off > Math.PI / 2) off = Math.PI - off;
+    acts.moveMag = off > PIVOT ? 0 : 1;
   } else if (gun.want) {
-    acts.moveAngle = gun.bearing;      // still needs to bring the gun round
-    acts.moveMag = 0.18;
+    acts.moveAngle = gun.bearing;
+    acts.moveMag = 0;
   }
   if (gun.fire) {
     acts.shoot = true;

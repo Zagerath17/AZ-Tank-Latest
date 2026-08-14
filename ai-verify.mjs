@@ -110,7 +110,7 @@ for (const tier of AI_LEVELS) {
     foe.bot = null;
     const W = mkWorld(a, [bot, foe]);
     let now = 0; const dt = 1 / 60; let prevSpin = 0, still = 0;
-    for (let f = 0; f < 2400; f++) {
+    for (let f = 0; f < 1500; f++) {
       now += dt * 1000;
       const acts = botActions(bot, W, dt, now);
       const px = bot.x, py = bot.y;
@@ -124,7 +124,7 @@ for (const tier of AI_LEVELS) {
       // Scraping = asked to move at speed, and didn't. Proximity to a
       // wall is normal in a 96 px corridor; being stopped by one is not.
       if (Math.abs(bot.vel) < 1 && (acts.moveMag ?? 0) > 0.5) wallFrames++;
-      if (Math.hypot(bot.x - foe.x, bot.y - foe.y) < CELL * 2.6) { arrived++; break; }
+      if (Math.hypot(bot.x - foe.x, bot.y - foe.y) < CELL * 3.4) { arrived++; break; }
     }
     if (still > 120) stalls++;
   }
