@@ -1,97 +1,91 @@
 // ================================================================
-// ai.js — tank AI.
+// ai.js — tank AI
 //
-// Built the way a game AI normally is, as four separate stages that each
-// do one job and hand on to the next:
+// Built to the plan in AI-DESIGN.md. Four stages, run in order, each
+// doing one job:
 //
-//   SENSE    build a BELIEF about the world. Never reads the live state
-//            directly for decisions — everything arrives late, by an
-//            amount set by the tier, so nothing is ever reacted to
-//            instantly.
-//   PLAN     pick a behaviour by utility, then COMMIT to it for a
-//            minimum time. Re-deciding every frame is what makes bots
-//            twitch and dither.
-//   NAVIGATE context steering. Every direction is scored for openness,
-//            for how well it serves the goal, and for how much danger
-//            lies that way; the best is chosen and eased into. There is
-//            always at least one legal direction, so a bot can never
-//            argue itself into standing still against a wall.
-//   ACT      gunnery and abilities, each with its own discipline.
+//   SENSE   build a BELIEF about the world. Nothing downstream reads the
+//           live state, so reaction time is structural rather than a
+//           delay bolted on at the end.
+//   ASSESS  reduce that belief to a handful of judgements: am I safe,
+//           armed, winning, cornered, out-ranged?
+//   DECIDE  pick ONE intent by utility — then COMMIT to it. Re-deciding
+//           every frame is what makes a bot vibrate instead of act.
+//   ACT     turn the intent into steering, gunnery and abilities,
+//           honouring the tank's inertia.
 //
-// The one hard constraint that shapes all of this: the turret is welded
-// to the hull. Facing IS the direction of travel, so a tank cannot aim
-// one way and strafe another. Driving backwards keeps the nose on the
-// target (the game reverses when the stick points behind), which is the
-// only way to move while keeping a shot lined up. Everything in POSTURE
-// below exists to resolve that conflict deliberately, instead of
-// flip-flopping between advancing and retreating.
+// The constraint that shapes everything: the turret is welded to the
+// hull, so facing IS direction of travel. A tank cannot aim one way and
+// drive another. Reverse keeps the gun on target but runs at 69% speed,
+// so backing up is a deliberate trade and never a default.
 // ================================================================
 
 import { FLAME, MORTAR, SNIPER, ROCKET, MG } from "./weapons.js";
 
 export const AI_LEVELS = ["easy", "medium", "hard", "impossible"];
 
-// `speed` and `turn` multiply the HUMAN rates and never exceed 1 — a bot
-// is never physically faster than a player, only better informed and
-// better at choosing. Everything else is judgement.
+// Difficulty degrades PERCEPTION AND JUDGEMENT, never the hands. Speed
+// and turn stay at 1.0 for every tier: a weak bot should lose because it
+// reacted late and dodged one round instead of three, not because it
+// drives like it is in treacle.
 export const AI_PARAMS = {
   easy: {
-    speed: 0.84, turn: 0.90,
-    react: 0.46,       // s before a new stimulus can be acted on
-    lag: 0.30,         // s its picture of a moving target trails reality
-    plan: 420,         // ms between behaviour decisions
-    commit: 900,       // ms it sticks with a behaviour once chosen
-    aimErr: 0.13,      // rad of standing aim error
-    aimTol: 0.20,      // rad it must be within before pulling the trigger
-    settle: 0.34,      // s on a new target before it may fire
-    lead: 0.25,        // fraction of the intercept solution it applies
-    dodge: 0.30,       // how well it evades
-    look: 0.55,        // s of threat lookahead
-    sight: 6.5,        // cells
-    fireRange: 4.5,    // cells
-    ability: 0.30,     // ability judgement
-    aggression: 0.45,
-    standoff: 2.0,     // cells it likes to fight at
+    speed: 1, turn: 1,
+    react: 0.45,        // s a stimulus must persist before it can be acted on
+    lag: 0.30,          // s its picture of a moving target trails reality
+    threats: 1,         // how many projectiles it can weigh at once
+    bounces: 0,         // how far it follows a ricochet
+    aimErr: 0.115,      // rad of standing aim error
+    lead: 0.25,         // fraction of the intercept solution it applies
+    plan: 420,          // ms between intent decisions
+    dwell: 900,         // ms an intent is held before it may change
+    settle: 0.34,       // s on a new target before it may fire
+    abilitySee: 0.35,   // chance it reads an ability opportunity at all
+    phaseErr: 0.30,     // s of error in phase timing
+    zoneMath: 0,        // 0 = blind to the zone's cost, 1 = exact
+    trick: 0,           // willingness to take a bounce shot
+    aggr: 0.45,
   },
   medium: {
-    speed: 0.94, turn: 1.0,
-    react: 0.30, lag: 0.18, plan: 320, commit: 700,
-    aimErr: 0.055, aimTol: 0.14, settle: 0.20, lead: 0.55,
-    dodge: 0.60, look: 0.85, sight: 9, fireRange: 5.5,
-    ability: 0.60, aggression: 0.60, standoff: 2.2,
+    speed: 1, turn: 1,
+    react: 0.30, lag: 0.18, threats: 2, bounces: 1,
+    aimErr: 0.05, lead: 0.55, plan: 320, dwell: 700, settle: 0.20,
+    abilitySee: 0.6, phaseErr: 0.16, zoneMath: 0.4, trick: 0.15, aggr: 0.6,
   },
   hard: {
-    speed: 1.0, turn: 1.0,
-    react: 0.20, lag: 0.10, plan: 240, commit: 520,
-    aimErr: 0.018, aimTol: 0.10, settle: 0.12, lead: 0.85,
-    dodge: 0.85, look: 1.15, sight: 12, fireRange: 6.5,
-    ability: 0.85, aggression: 0.75, standoff: 2.3,
+    speed: 1, turn: 1,
+    react: 0.20, lag: 0.10, threats: 3, bounces: 1,
+    aimErr: 0.017, lead: 0.85, plan: 240, dwell: 520, settle: 0.12,
+    abilitySee: 0.85, phaseErr: 0.07, zoneMath: 0.8, trick: 0.4, aggr: 0.75,
   },
   impossible: {
-    speed: 1.0, turn: 1.0,
-    react: 0.13, lag: 0.05, plan: 180, commit: 380,
-    aimErr: 0.005, aimTol: 0.08, settle: 0.06, lead: 1.0,
-    dodge: 1.0, look: 1.5, sight: 99, fireRange: 7.5,
-    ability: 1.0, aggression: 0.9, standoff: 2.3,
+    speed: 1, turn: 1,
+    react: 0.13, lag: 0.05, threats: 99, bounces: 2,
+    // Deliberately NOT zero. A bot that never misses is no fun to play
+    // against; this is about a third of a tank's width at fighting
+    // range, so a good player still takes a fair share of duels.
+    aimErr: 0.006, lead: 1.0, plan: 180, dwell: 380, settle: 0.06,
+    abilitySee: 1, phaseErr: 0.03, zoneMath: 1, trick: 0.75, aggr: 0.9,
   },
 };
 
-// What each weapon actually is, so a bot can play it rather than just
-// pull the trigger. `hold` means a continuous trigger; `indirect` skips
-// the line-of-sight test because the shot arcs over walls.
+// What each gun IS, so a bot plays it rather than just pulling the
+// trigger. Ranges in cells.
 const GUNS = {
-  normal: { hold: false, indirect: false, minCells: 0,   bestCells: 2.4, maxCells: 7,   burst: false },
-  mg:     { hold: true,  indirect: false, minCells: 0,   bestCells: 2.0, maxCells: 5,   burst: true  },
-  laser:  { hold: false, indirect: false, minCells: 0,   bestCells: 3.0, maxCells: 8,   burst: false },
-  sniper: { hold: false, indirect: false, minCells: 1.5, bestCells: 4.0, maxCells: SNIPER.rangeCells, burst: false },
-  rocket: { hold: false, indirect: false, minCells: 1.0, bestCells: 3.2, maxCells: 7,   burst: false },
-  cannon: { hold: false, indirect: false, minCells: 1.2, bestCells: 2.8, maxCells: 6,   burst: false },
-  mortar: { hold: false, indirect: true,  minCells: MORTAR.minHalfCells * 0.5, bestCells: 3.0, maxCells: MORTAR.rangeCells, burst: false },
-  flame:  { hold: true,  indirect: false, minCells: 0,   bestCells: 0.6, maxCells: FLAME.reachCells, burst: true },
+  normal: { hold: false, indirect: false, min: 0,   best: 2.4, max: 7.0, dmg: 3 },
+  mg:     { hold: true,  indirect: false, min: 0,   best: 2.0, max: 5.0, dmg: 1 },
+  laser:  { hold: false, indirect: false, min: 0,   best: 3.0, max: 8.0, dmg: 7, wantsDirect: true },
+  sniper: { hold: false, indirect: false, min: 1.5, best: 4.0, max: SNIPER.rangeCells, dmg: 7 },
+  rocket: { hold: false, indirect: false, min: 1.0, best: 3.2, max: 7.0, dmg: 7 },
+  cannon: { hold: false, indirect: false, min: 1.2, best: 2.8, max: 6.0, dmg: 5, selfBlast: true },
+  mortar: { hold: false, indirect: true,  min: 1.0, best: 3.0, max: MORTAR.rangeCells, dmg: 5 },
+  flame:  { hold: true,  indirect: false, min: 0,   best: 0.6, max: FLAME.reachCells, dmg: 1 },
 };
 const gunOf = (w) => GUNS[w] || GUNS.normal;
 
-const DIRS = 24;                     // compass resolution for steering
+const UTILITY = new Set(["armour", "heal", "wall", "mud", "boost", "phase"]);
+
+const DIRS = 24;
 const RAY = [];
 for (let i = 0; i < DIRS; i++) {
   const a = (i / DIRS) * Math.PI * 2;
@@ -107,603 +101,610 @@ export function botActions(t, world, dt, now) {
   const B = brain(t, now);
   const acts = {
     up: false, down: false, left: false, right: false,
-    shoot: false, def: false, agi: false,
-    moveAngle: null, moveMag: 0,
+    shoot: false, def: false, agi: false, moveAngle: null, moveMag: 0,
   };
   if (t.dead || t.gone) return acts;
 
   sense(t, B, world, P, now);
+  assess(t, B, world, P, now);
   if (now >= B.planAt) {
     B.planAt = now + P.plan * (0.85 + Math.random() * 0.3);
-    plan(t, B, world, P, now);
+    decide(t, B, world, P, now);
   }
   const gun = gunnery(t, B, world, P, now);
-  const nav = navigate(t, B, world, P, now, gun);
-  posture(t, B, world, P, now, dt, nav, gun, acts);
+  act(t, B, world, P, now, dt, gun, acts);
   abilities(t, B, world, P, now, acts);
   return acts;
 }
 
-/* ================================================================
-   Per-tank brain
-   ================================================================ */
-
 function brain(t, now) {
   let B = t.ai;
-  if (!B || B.v !== 4) {
+  if (!B || B.v !== 5) {
     B = t.ai = {
-      v: 4,
-      first: new Map(),     // stimulus -> when it was first sensed
+      v: 5,
+      seen: new Map(),      // stimulus -> when first noticed (reaction gate)
       foes: new Map(),      // id -> lagged belief
       threats: [],
-      behaviour: "hunt",
-      behaviourAt: now,
-      target: null,         // belief object of the current enemy
-      goal: null,           // { x, y }
+      intent: "hunt",
+      intentAt: now,
+      target: null,
+      goal: null,
       planAt: 0,
-      driveA: t.a,          // smoothed heading actually being driven
-      driveM: 0,
-      lastDir: null,        // sticky steering slot
-      backing: false,       // committed to giving ground (hysteresis)
-      orbitDir: 1,          // which way round the target we're circling
-      orbitAt: 0,
-      dodgeKey: null,       // the shot currently being evaded
-      dodgeA: 0,            // the ONE escape committed to for it
-      dodgeUntil: 0,
+      path: null, pathAt: 0, pathKey: "",
+      driveA: t.a, driveM: 0,
+      lastDir: null,
       aimErr: 0, aimErrAt: -1e9,
-      lockId: null, lockAt: 0,
-      shotAt: 0,
+      lockId: null, lockAt: 0, shotAt: 0,
       abAt: 0, abSince: {}, abSaw: {},
-      histX: t.x, histY: t.y, histAt: now, stuckUntil: 0, stuckA: 0,
-      flameOn: 0,           // when the burn started, for trigger hysteresis
-      burnUntil: 0,         // trigger latch for held weapons
+      hx: t.x, hy: t.y, hAt: now, stuckUntil: 0, stuckA: 0,
       roamAt: 0,
-      path: null, pathAt: 0, pathTo: null,
+      visited: new Map(),   // cell key -> when we were last there
     };
   }
   return B;
 }
 
-// A stimulus only becomes actionable once it has been present for the
-// tier's reaction time. Anything brand new starts its clock and is NOT
-// yet actionable — this is what removes instant reactions everywhere.
-function reacted(B, key, now, delayMs) {
-  const t0 = B.first.get(key);
-  if (t0 === undefined) { B.first.set(key, now); return false; }
-  return now - t0 >= delayMs;
+// A stimulus is only actionable once it has persisted for the tier's
+// reaction time. This is what removes instant reactions everywhere,
+// rather than sprinkling delays through the behaviour.
+function noticed(B, key, now, ms) {
+  const t0 = B.seen.get(key);
+  if (t0 === undefined) { B.seen.set(key, now); return false; }
+  return now - t0 >= ms;
 }
 
 /* ================================================================
-   1. SENSE — build a belief, always a little behind reality
+   1. SENSE
    ================================================================ */
 
 function sense(t, B, world, P, now) {
   const cell = world.cell;
-  const sightPx = P.sight * cell;
-  const bulletR = world.bulletR ?? 3;
+  const R = world.tankR;
 
-  if (B.first.size > 512) {
-    for (const [k, v] of B.first) if (now - v > 6000) B.first.delete(k);
+  if (B.seen.size > 400) {
+    for (const [k, v] of B.seen) if (now - v > 5000) B.seen.delete(k);
   }
 
-  // --- enemies -----------------------------------------------------
+  // ---- enemies ------------------------------------------------------
   for (const o of world.tanks) {
     if (o === t || o.dead || o.gone) continue;
-    const dx = o.x - t.x, dy = o.y - t.y;
-    const d = Math.hypot(dx, dy);
+    if (world.teams && world.teams[o.id] === world.teams[t.id]) continue;
+    const d = Math.hypot(o.x - t.x, o.y - t.y);
+    const visible = clearLine(world, t.x, t.y, o.x, o.y, world.bulletR ?? 3);
     let bel = B.foes.get(o.id);
-    const visible = d <= sightPx && clearLine(world, t.x, t.y, o.x, o.y, bulletR);
 
-    if (!visible) {
-      // HEARING. A tank you cannot see is still a running engine two
-      // rooms away. Without this a bot has no idea anyone exists until
-      // it happens to wander into a clear line — which in a maze is
-      // mostly never, so it drifts around alone instead of hunting.
-      // The fix is deliberately rough: it gives a direction to search,
-      // not something to shoot at.
-      const hearPx = 3.4 * cell;
-      if (d <= hearPx && reacted(B, "hear:" + o.id, now, P.react * 1400)) {
-        let h = B.foes.get(o.id);
-        if (!h) {
-          const err = cell * 0.45;
-          h = { id: o.id, x: o.x + (Math.random() - 0.5) * err, y: o.y + (Math.random() - 0.5) * err,
-                vx: 0, vy: 0, at: now, visible: false, heard: true, ref: o };
-          B.foes.set(o.id, h);
-        } else {
-          // Converge slowly: you can tell roughly where, not exactly.
-          h.x += (o.x - h.x) * 0.04;
-          h.y += (o.y - h.y) * 0.04;
-          h.at = now;
-          h.visible = false;
-          h.heard = true;
-        }
-      } else if (bel) {
-        bel.visible = false;
+    if (visible && noticed(B, "see" + o.id, now, P.react * 1000)) {
+      if (!bel) {
+        bel = { id: o.id, x: o.x, y: o.y, vx: 0, vy: 0, at: now - 16, ref: o };
+        B.foes.set(o.id, bel);
       }
-      continue;
+      // The belief chases the truth at a rate set by the tier, so a
+      // weaker bot is always shooting where the target used to be.
+      const step = Math.max(0.001, (now - bel.at) / 1000);
+      const k = Math.min(1, step / Math.max(0.02, P.lag));
+      bel.vx += (((o.x - bel.x) / step) - bel.vx) * Math.min(1, k * 0.7);
+      bel.vy += (((o.y - bel.y) / step) - bel.vy) * Math.min(1, k * 0.7);
+      bel.x += (o.x - bel.x) * k;
+      bel.y += (o.y - bel.y) * k;
+      bel.at = now; bel.seen = true; bel.ref = o;
+    } else if (d < 3.4 * cell && noticed(B, "hear" + o.id, now, P.react * 1400)) {
+      // HEARING. A tank you cannot see is still a running engine two
+      // rooms away. Without it a bot has no idea anyone exists until it
+      // wanders into a clear line, which in a maze is mostly never.
+      // Deliberately rough: a direction to search, not a firing solution.
+      if (!bel) {
+        bel = { id: o.id,
+                x: o.x + (Math.random() - 0.5) * cell * 0.5,
+                y: o.y + (Math.random() - 0.5) * cell * 0.5,
+                vx: 0, vy: 0, at: now, ref: o };
+        B.foes.set(o.id, bel);
+      } else {
+        bel.x += (o.x - bel.x) * 0.04;
+        bel.y += (o.y - bel.y) * 0.04;
+        bel.at = now;
+      }
+      bel.seen = false;
+    } else if (bel) {
+      bel.seen = false;
     }
-    if (!reacted(B, "see:" + o.id, now, P.react * 1000)) continue;
-
-    if (!bel) {
-      bel = { id: o.id, x: o.x, y: o.y, vx: 0, vy: 0, at: now - 16, visible: true, ref: o };
-      B.foes.set(o.id, bel);
-    }
-    // The belief chases the truth at a rate set by the tier, so a weaker
-    // bot is always shooting at where the target used to be.
-    const step = Math.max(0.001, (now - bel.at) / 1000);
-    const k = Math.min(1, step / Math.max(0.02, P.lag));
-    const nvx = (o.x - bel.x) / step, nvy = (o.y - bel.y) / step;
-    bel.vx += (nvx - bel.vx) * Math.min(1, k * 0.7);
-    bel.vy += (nvy - bel.vy) * Math.min(1, k * 0.7);
-    bel.x += (o.x - bel.x) * k;
-    bel.y += (o.y - bel.y) * k;
-    bel.at = now;
-    bel.visible = true;
-    bel.heard = false;
-    bel.ref = o;
+  }
+  for (const [id, f] of B.foes) {
+    if (f.ref?.dead || f.ref?.gone || now - f.at > 6000) B.foes.delete(id);
   }
 
-  // --- incoming fire ------------------------------------------------
-  // Each threat is reduced to one thing the steering can use: how long
-  // until it arrives, and which way to step to make it miss.
+  // ---- incoming fire --------------------------------------------------
   B.threats = [];
-  const look = P.look;
-  const addShot = (s, key, r, horizon) => {
-    if (!reacted(B, key, now, P.react * 700)) return;
-    const hit = interceptsMe(t, s, world, horizon, r);
-    if (!hit) return;
-    B.threats.push({
-      kind: "shot", key, x: s.x, y: s.y,
-      vx: s.vx, vy: s.vy,
-      t: hit.t, side: hit.side,
-    });
+  const add = (src, key, r, weight) => {
+    if (!noticed(B, key, now, P.react * 700)) return;
+    // Follow the round through its bounces: a threat model that only
+    // looks at the current velocity walks the bot into a shot that is
+    // about to come off a wall. Each leg is its own threat.
+    const legs = traceShot(world, src, P.bounces, 1.6);
+    for (const leg of legs) {
+      const hit = closestApproach(t, leg, R + r);
+      if (!hit) continue;
+      B.threats.push({ t: hit.t + leg.t0, x: leg.x, y: leg.y,
+                       vx: leg.vx, vy: leg.vy, w: weight });
+      break;                         // the first leg that threatens is enough
+    }
   };
+
   for (const b of world.bullets ?? []) {
-    if (b.by === t.id) continue;
-    addShot(b, "b:" + b.by + ":" + b.born, b.r ?? world.bulletR ?? 3, look);
+    if (b.by === t.id && now - b.born < 200) continue;    // our own, just fired
+    add(b, "b" + b.by + b.born, b.r ?? world.bulletR ?? 3, 1);
   }
   for (const rk of world.rockets ?? []) {
     if (rk.by === t.id) continue;
-    // A rocket steers, so it is treated as arriving sooner than it looks.
-    addShot(rk, "r:" + rk.by + ":" + rk.born, rk.r ?? 6, look * 1.5);
+    add(rk, "r" + rk.by + rk.born, rk.r ?? 8, 1.4);       // it steers: worse
   }
-  // Beams land instantly. There is nothing to outrun — the only answer is
-  // to not be on the line, so they read as a line to step off.
+  // Beams land instantly — there is nothing to outrun, only a line to
+  // not be standing on.
   for (const L of [...(world.lasers ?? []), ...(world.snipes ?? [])]) {
     if (L.by === t.id) continue;
-    if (!reacted(B, "beam:" + L.by, now, P.react * 1000)) continue;
+    if (!noticed(B, "beam" + L.by, now, P.react * 1000)) continue;
     const p = nearestOnPath(t.x, t.y, L.pts);
-    if (p && p.d < world.tankR * 3.5) {
-      B.threats.push({ kind: "beam", key: "beam:" + L.by, x: p.x, y: p.y, t: 0, side: 0 });
+    if (p && p.d < R * 3.5) {
+      B.threats.push({ beam: true, t: 0, x: p.x, y: p.y, vx: 0, vy: 0, w: 2 });
     }
   }
   B.threats.sort((a, b) => a.t - b.t);
+  // Weaker tiers cannot hold every round in their head — which produces
+  // exactly the human failure of dodging the obvious one and walking
+  // into the other.
+  if (B.threats.length > P.threats) B.threats.length = P.threats;
   B.soonest = B.threats.length ? B.threats[0].t : Infinity;
+  if (B.threats.length) B.lastThreatAt = now;
+  // Anything hostile in the air nearby counts as being under fire, even
+  // if this particular round is going to miss — standing on a healing
+  // pad for six seconds during a firefight is how a bot dies on it.
+  for (const b of world.bullets ?? []) {
+    if (b.by === t.id) continue;
+    if (Math.hypot(b.x - t.x, b.y - t.y) < cell * 3) { B.lastThreatAt = now; break; }
+  }
 
-  // --- stuck detector ------------------------------------------------
-  // Steering can, rarely, argue itself into a corner. Rather than trust
-  // it never happens, watch actual displacement: if the bot has been
-  // asking to move and hasn't, force a committed break-out.
-  // Checked over a short window and against what was actually ASKED
-  // for: a bot at full throttle that has travelled a fraction of a hull
-  // length is grinding on something, whatever the steering believes.
-  // Checked more often: at 380 ms a bot could sit against a wall for
-  // over a third of a second before anything noticed, which is long
-  // enough to look broken.
-  const window = 220;
-  if (now - B.histAt > window) {
-    const moved = Math.hypot(t.x - B.histX, t.y - B.histY);
-    const expect = (world.moveSpeed ?? 130) * P.speed * (window / 1000) * B.driveM;
-    if (B.driveM > 0.25 && moved < Math.min(world.tankR * 0.45, expect * 0.3) &&
-        now > B.stuckUntil) {
-      // Back out the way we came — that direction is known to be open,
-      // because we just drove down it.
-      B.stuckUntil = now + 520;
-      B.stuckA = bestOpening(t, world, B.driveA + Math.PI);
-      // Give up on the cached route as well. Backing out of a jam and
-      // then following the very same path straight back into it is why
-      // bots got stuck in the same corner again and again.
-      B.path = null;
+  // Coverage memory: note the cell we are standing in. Searching is
+  // hopeless without it — a bot that picks random destinations can
+  // re-walk the same three rooms for a minute while the enemy sits two
+  // corridors away.
+  {
+    const c = Math.floor(t.x / cell), r = Math.floor(t.y / cell);
+    B.visited.set(r * 1000 + c, now);
+    if (B.visited.size > 600) {
+      for (const [k, v] of B.visited) if (now - v > 30000) B.visited.delete(k);
     }
-    B.histX = t.x; B.histY = t.y; B.histAt = now;
+  }
+
+  // ---- stuck watchdog -------------------------------------------------
+  // Steering is a local method and will occasionally trap itself. Watch
+  // real displacement rather than trusting that it never happens.
+  if (now - B.hAt > 700) {
+    const moved = Math.hypot(t.x - B.hx, t.y - B.hy);
+    if (moved < R * 0.5 && B.driveM > 0.25 && now > B.stuckUntil) {
+      B.stuckUntil = now + 700;
+      B.stuckA = mostOpen(t, world, B.driveA + Math.PI);
+    }
+    B.hx = t.x; B.hy = t.y; B.hAt = now;
   }
 }
 
-// Closest approach of a projectile, in its own frame. Returns when it
-// arrives and which way to step off the line (+1/-1 across its path).
-// Will this shot reach me, and when? Closest approach along the round's
-// current heading, clamped to the lookahead.
-//
-// MEASURED AND REJECTED: walking the round forward through the arena
-// instead, reflecting off walls, so that ricochets were predicted
-// exactly and rounds blocked by a wall were ignored. It is the more
-// correct model and it lost — 75 hits per 100 rounds became 78 with one
-// bounce modelled and 79 with none. The reason is that this loose test
-// is already catching most ricochets by accident: a round heading for a
-// wall near us has a near closest-approach on its CURRENT heading too,
-// so it registers as danger early, while the exact version only saw it
-// after the bounce, leaving no time to move. Being approximately right
-// a long way out beats being exactly right too late.
-function interceptsMe(t, s, world, horizon, r) {
-  const rx = t.x - s.x, ry = t.y - s.y;
-  const vx = -(s.vx ?? 0), vy = -(s.vy ?? 0);
+// March a projectile forward, reflecting off walls, returning each leg.
+function traceShot(world, src, bounces, seconds) {
+  const legs = [];
+  let x = src.x, y = src.y, vx = src.vx ?? 0, vy = src.vy ?? 0;
+  const sp = Math.hypot(vx, vy);
+  if (sp < 1) return legs;
+  let t0 = 0, left = seconds;
+  for (let b = 0; b <= bounces; b++) {
+    const hit = rayWalls(world, x, y, vx / sp, vy / sp, sp * left);
+    const legT = hit ? hit.d / sp : left;
+    legs.push({ x, y, vx, vy, t0, dur: legT });
+    if (!hit || b === bounces) break;
+    x = x + (vx / sp) * hit.d + hit.nx * 0.5;
+    y = y + (vy / sp) * hit.d + hit.ny * 0.5;
+    const dot = vx * hit.nx + vy * hit.ny;
+    vx -= 2 * dot * hit.nx;
+    vy -= 2 * dot * hit.ny;
+    t0 += legT; left -= legT;
+    if (left <= 0) break;
+  }
+  return legs;
+}
+
+// Closest approach of one leg to the tank.
+function closestApproach(t, leg, radius) {
+  const rx = t.x - leg.x, ry = t.y - leg.y;
+  const vx = -leg.vx, vy = -leg.vy;
   const vv = vx * vx + vy * vy;
   if (vv < 1e-6) return null;
   const tca = -(rx * vx + ry * vy) / vv;
-  if (tca < 0 || tca > horizon) return null;
+  if (tca < 0 || tca > leg.dur) return null;
   const mx = rx + vx * tca, my = ry + vy * tca;
-  const miss = Math.hypot(mx, my);
-  const rad = world.tankR + (r ?? 3);
-  if (miss > rad * 1.35) return null;
-  // Which side of the shot's path we sit on: step that way and the miss
-  // distance grows fastest.
-  const cross = (s.vx ?? 0) * (t.y - s.y) - (s.vy ?? 0) * (t.x - s.x);
-  return { t: tca, side: cross >= 0 ? 1 : -1 };
+  if (Math.hypot(mx, my) > radius * 1.4) return null;
+  return { t: tca };
 }
 
 /* ================================================================
-   2. PLAN — choose a behaviour, then stay with it
+   2. ASSESS
    ================================================================ */
 
-function plan(t, B, world, P, now) {
+function assess(t, B, world, P, now) {
   const cell = world.cell;
-  const hp = t.hp / Math.max(1, world.maxHp ?? 10);
+  B.hp = t.hp / Math.max(1, world.maxHp ?? 10);
+  B.armed = !!t.weapon && t.weapon !== "normal";
+  B.gun = gunOf(t.weapon || "normal");
 
-  // Pick the enemy worth fighting: visible ones first, then nearest.
+  // Rounds in flight are rounds you do not have, and with 3.5 s regen
+  // each, the last one is worth keeping for a defensive shot.
+  let live = 0;
+  for (const b of world.bullets ?? []) if (b.by === t.id) live++;
+  B.ammo = Math.max(0, (world.magSize ?? 3) - live);
+
+  const depth = world.zoneDepthAt ? world.zoneDepthAt(t.x, t.y) : Infinity;
+  B.zoneDepth = depth;
+  B.inZone = Number.isFinite(depth) && Math.floor(depth) < (world.zoneLevel ?? 0);
+  B.zoneSoon = Number.isFinite(depth) && Math.floor(depth) <= (world.zoneWarn ?? -1);
+
+  // Pick the enemy worth thinking about.
   let best = null, bestScore = -Infinity;
   for (const f of B.foes.values()) {
-    if (f.ref?.dead || f.ref?.gone) continue;
-    const d = Math.hypot(f.x - t.x, f.y - t.y);
-    if (!f.visible && now - f.at > 2500) continue;
-    let s = -d / cell;
-    if (f.visible) s += 4;
-    if ((f.ref?.hp ?? 10) <= 2) s += 2.5;          // finish the wounded
-    if (B.target && f.id === B.target.id) s += 1.2; // stickiness
+    const d = Math.hypot(f.x - t.x, f.y - t.y) / cell;
+    let s = -d;
+    if (f.seen) s += 4;
+    if ((f.ref?.hp ?? 10) <= 3) s += 3;                 // finish the wounded
+    if (B.target && f.id === B.target.id) s += 1.2;     // stickiness
     if (s > bestScore) { bestScore = s; best = f; }
   }
   B.target = best;
+  B.tdist = best ? Math.hypot(best.x - t.x, best.y - t.y) / cell : Infinity;
 
-  const gearPick = pickGear(t, B, world, P);
-  B.gear = gearPick;
-
-  // Utility. Deliberately coarse — a handful of clear reasons beats a
-  // pile of tuned weights nobody can reason about.
-  const dist = best ? Math.hypot(best.x - t.x, best.y - t.y) / cell : Infinity;
-  const armed = (t.weapon && t.weapon !== "normal") || false;
-  const U = {
-    hunt: 1.0 + P.aggression * 0.6,
-    fight: best ? (2.2 + P.aggression * 1.5 - Math.max(0, dist - P.fireRange) * 0.5) : -9,
-    collect: gearPick ? (1.6 + (armed ? 0 : 1.4) - gearPick.d / (cell * 5)) : -9,
-    retreat: (hp < 0.35 ? 2.6 : hp < 0.6 ? 1.2 : -9) + (best ? 0.5 : -1),
-  };
-  let pick = "hunt", pv = -Infinity;
-  for (const k in U) if (U[k] > pv) { pv = U[k]; pick = k; }
-
-  // Commitment: only switch if the new option is clearly better, or the
-  // current one has run its course. This is what stops the dithering.
-  if (pick !== B.behaviour) {
-    const held = now - B.behaviourAt;
-    const cur = U[B.behaviour] ?? -Infinity;
-    if (held < P.commit && pv < cur + 1.2) pick = B.behaviour;
-  }
-  if (pick !== B.behaviour) { B.behaviour = pick; B.behaviourAt = now; }
-
-  // Turn the behaviour into somewhere to be.
-  if (B.behaviour === "fight" && best) {
-    if (!best.visible) {
-      // Can't see them: holding a standoff range is pointless when a
-      // wall is in the way. Close until there's a line.
-      B.goal = { x: best.x, y: best.y };
-    } else {
-      // Stand off at the range this weapon actually wants.
-      const g = gunOf(t.weapon || "normal");
-      const want = Math.min(P.standoff, g.bestCells) * cell;
-      const a = Math.atan2(t.y - best.y, t.x - best.x);
-
-      // ARC ROUND, don't push straight out.
-      //
-      // The standoff point used to sit directly outward from the target
-      // through the tank. Any time the bot was closer than its preferred
-      // range — which, in a maze of 96px cells with a 2.3-cell standoff,
-      // is most of a fight — that point lay BEHIND it, and "drive to the
-      // goal" became "reverse in a straight line". Nearly two thirds of
-      // all the reversing these bots did came from this one line, and it
-      // is exactly the trundling-backwards that reads as stupid.
-      //
-      // Offsetting the goal around the circle turns the same correction
-      // into a sidestep: the bot still ends up at the range it wants,
-      // but it gets there by circling, which keeps it moving across its
-      // opponent's aim instead of straight down it. How far round to
-      // aim eases off when the range is badly wrong, so closing a big
-      // gap is still mostly direct.
-      const cur = Math.hypot(t.x - best.x, t.y - best.y);
-      const radiusErr = Math.min(1, Math.abs(cur - want) / Math.max(1, want));
-      if (!B.orbitAt || now > B.orbitAt) {
-        B.orbitAt = now + 2200 + Math.random() * 2400;
-        B.orbitDir = Math.random() < 0.5 ? -1 : 1;
-      }
-      const step = (0.55 + 0.35 * P.aggression) * Math.max(0.2, 1 - radiusErr);
-      const arc = a + (B.orbitDir ?? 1) * step;
-      B.goal = { x: best.x + Math.cos(arc) * want, y: best.y + Math.sin(arc) * want };
-    }
-  } else if (B.behaviour === "collect" && gearPick) {
-    B.goal = { x: gearPick.x, y: gearPick.y };
-  } else if (B.behaviour === "retreat") {
-    const from = best ?? { x: t.x, y: t.y };
-    const a = Math.atan2(t.y - from.y, t.x - from.x);
-    B.goal = { x: t.x + Math.cos(a) * cell * 3, y: t.y + Math.sin(a) * cell * 3 };
-  } else {
-    if (!B.goal || now > B.roamAt || Math.hypot(B.goal.x - t.x, B.goal.y - t.y) < cell * 0.7) {
-      B.roamAt = now + 6000 + Math.random() * 3000;
-      // Search toward the last place anyone was seen rather than
-      // wandering at random — a bot that has heard a fight goes to it.
-      let seek = best;
-      if (!seek) {
-        let recent = null, rt = -Infinity;
-        for (const f of B.foes.values()) if (f.at > rt) { rt = f.at; recent = f; }
-        seek = recent;
-      }
-      if (seek) {
-        B.goal = { x: seek.x, y: seek.y };
-      } else {
-        // Patrol properly: commit to a cell well away from here and go
-        // there. Drifting to a random point a couple of cells off just
-        // jitters on the spot, and two bots doing that never meet.
-        const maze = world.maze;
-        let pick = null;
-        for (let tries = 0; tries < 24 && !pick; tries++) {
-          const c = Math.floor(Math.random() * (maze?.cols ?? 8));
-          const r = Math.floor(Math.random() * (maze?.rows ?? 6));
-          if (maze?.inside && !maze.inside[r][c]) continue;
-          const x = (c + 0.5) * cell, y = (r + 0.5) * cell;
-          if (Math.hypot(x - t.x, y - t.y) < cell * 2.5) continue;
-          pick = { x, y };
-        }
-        B.goal = pick ?? { x: t.x + (Math.random() - 0.5) * cell * 4,
-                           y: t.y + (Math.random() - 0.5) * cell * 4 };
-      }
-    }
-  }
-  if (B.goal) {
-    B.goal.x = Math.max(world.tankR, Math.min((world.maze?.cols ?? 12) * cell - world.tankR, B.goal.x));
-    B.goal.y = Math.max(world.tankR, Math.min((world.maze?.rows ?? 12) * cell - world.tankR, B.goal.y));
-  }
-}
-
-// Only chase a crate that's actually worth having. A tank already
-// carrying a gun gains nothing from another, and going for it is what
-// makes a bot orbit a pickup it can't use — it arrives, can't take it,
-// and the goal never clears. Utility drops are always worth taking.
-const UTILITY_GEAR = new Set(["armour", "heal", "wall", "mud", "boost", "phase"]);
-
-function pickGear(t, B, world, P) {
-  const armed = !!t.weapon && t.weapon !== "normal";
-  const dryFlame = t.weapon === "flame" && (t.flameFuel ?? 1e9) < 500;
-  let best = null, bd = Infinity;
-  for (const g of world.gear ?? []) {
-    const utility = UTILITY_GEAR.has(g.type);
-    // Already armed? A replacement gun isn't worth crossing the map for.
-    if (!utility && armed && !dryFlame) continue;
-    // And don't chase a utility drop we already have equipped.
-    if (utility && (t.defense === g.type || t.agility === g.type)) continue;
-    const d = Math.hypot(g.x - t.x, g.y - t.y);
-    if (d > P.sight * world.cell) continue;
-    if (d < bd) { bd = d; best = g; }
-  }
-  return best ? { x: best.x, y: best.y, d: bd, type: best.type } : null;
+  // Read the opponent. Playing around their kit is most of what makes
+  // this feel intelligent.
+  const foe = best?.ref ?? null;
+  B.foePhasing = !!foe && now < (foe.phaseUntil ?? 0);
+  B.foeArmoured = !!foe && (foe.armour ?? 0) > 0;
+  B.foeHealing = !!foe && (foe.healInMs ?? 0) > 0;
+  B.foeHeavy = !!foe && ["sniper", "cannon", "rocket"].includes(foe.weapon);
+  B.foeFlame = !!foe && foe.weapon === "flame";
 }
 
 /* ================================================================
-   3. NAVIGATE — context steering
+   3. DECIDE — one intent, then commit
    ================================================================ */
 
-function navigate(t, B, world, P, now, gun) {
+function decide(t, B, world, P, now) {
+  const cell = world.cell;
+  const gear = pickGear(t, B, world, P);
+  B.gearPick = gear;
+
+  const U = {
+    hunt: 1.0 + P.aggr * 0.5,
+    fight: B.target ? 2.2 + P.aggr * 1.5 - Math.max(0, B.tdist - B.gun.max) * 0.6 : -9,
+    recover: (B.hp < 0.35 ? 2.8 : B.hp < 0.6 ? 1.1 : -9) + (B.ammo === 0 ? 1.2 : 0),
+    collect: gear ? 1.5 + gear.value - gear.cost : -9,
+    flee: B.inZone ? 6 : B.zoneSoon ? 2.2 : -9,
+  };
+
+  // A healing enemy is stationary on a known point for six seconds.
+  // That is the best attack window in the game, and denying ~7 HP is
+  // worth more than landing a hit — so it outranks nearly everything.
+  if (B.foeHealing && B.target) U.fight += 3.5;
+  // An armoured enemy has +6 HP: the trade maths just changed.
+  if (B.foeArmoured) U.fight -= 1.2;
+  // Never brawl a flamethrower — its whole threat is a one-cell cone.
+  if (B.foeFlame && B.tdist < 1.6) U.fight -= 2.5;
+
+  let pick = "hunt", pv = -Infinity;
+  for (const k in U) if (U[k] > pv) { pv = U[k]; pick = k; }
+
+  // COMMITMENT. Only switch if the new option is clearly better, or the
+  // current one has run its dwell. This is the difference between a tank
+  // with a plan and one that vibrates.
+  if (pick !== B.intent) {
+    const held = now - B.intentAt;
+    const cur = U[B.intent] ?? -Infinity;
+    if (held < P.dwell && pv < cur + 1.2) pick = B.intent;
+  }
+  if (pick !== B.intent) { B.intent = pick; B.intentAt = now; }
+
+  if (B.intent === "flee") {
+    B.goal = safeSpot(t, world);
+  } else if (B.intent === "fight" && B.target) {
+    B.goal = B.target.seen ? standoffSpot(t, B, world) : { x: B.target.x, y: B.target.y };
+  } else if (B.intent === "collect" && gear) {
+    B.goal = { x: gear.x, y: gear.y };
+  } else if (B.intent === "recover") {
+    B.goal = retreatSpot(t, B, world);
+  } else if (!B.goal || now > B.roamAt ||
+             Math.hypot(B.goal.x - t.x, B.goal.y - t.y) < cell * 0.8) {
+    B.roamAt = now + 6000 + Math.random() * 3000;
+    B.goal = B.target ? { x: B.target.x, y: B.target.y } : patrolSpot(t, world, B, now);
+  }
+}
+
+// Stand off at the range THIS weapon wants. Fighting at the wrong range
+// is a common way for a bot to look stupid while doing everything else
+// right — a flamethrower needs 0.6 cells, a sniper wants 4.
+function standoffSpot(t, B, world) {
+  const want = B.gun.best * world.cell;
+  const a = Math.atan2(t.y - B.target.y, t.x - B.target.x);
+  return { x: B.target.x + Math.cos(a) * want, y: B.target.y + Math.sin(a) * want };
+}
+
+function retreatSpot(t, B, world) {
+  const from = B.target ?? { x: t.x, y: t.y };
+  const a = Math.atan2(t.y - from.y, t.x - from.x);
+  return clampToArena({ x: t.x + Math.cos(a) * world.cell * 3.5,
+                        y: t.y + Math.sin(a) * world.cell * 3.5 }, world);
+}
+
+function patrolSpot(t, world, B, nowMs) {
+  const mz = world.maze, cell = world.cell;
+  const cols = mz?.cols ?? 8, rows = mz?.rows ?? 6;
+  const midX = cols * cell * 0.5, midY = rows * cell * 0.5;
+  // Weighted toward the middle rather than uniformly random. Two bots
+  // patrolling at random can cross a maze for a minute without ever
+  // meeting; the centre is where the zone drives everyone eventually,
+  // where the sightlines are, and where crates tend to matter — so
+  // heading that way finds a fight instead of hoping for one.
+  let best = null, bv = -Infinity;
+  for (let i = 0; i < 30; i++) {
+    const c = Math.floor(Math.random() * cols);
+    const r = Math.floor(Math.random() * rows);
+    if (mz?.inside && !mz.inside[r][c]) continue;
+    const x = (c + 0.5) * cell, y = (r + 0.5) * cell;
+    const away = Math.hypot(x - t.x, y - t.y);
+    if (away < cell * 2.5) continue;
+    if (world.zoneDepthAt &&
+        Math.floor(world.zoneDepthAt(x, y)) < (world.zoneLevel ?? 0) + 1) continue;
+    // Prefer somewhere we have NOT been recently, lean central, and
+    // prefer not to trek the whole map for it. Coverage is what turns
+    // aimless wandering into an actual search pattern.
+    const last = B.visited?.get(r * 1000 + c) ?? -1e9;
+    const fresh = Math.min(1, (nowMs - last) / 20000);      // 0 = just here
+    const v = fresh * 3.0
+            - Math.hypot(x - midX, y - midY) / cell * 0.45
+            - away / cell * 0.30;
+    if (v > bv) { bv = v; best = { x, y }; }
+  }
+  return best ?? { x: t.x, y: t.y };
+}
+
+// The nearest ground that is safe NOW and still safe a layer deeper, so
+// the bot doesn't flee into cells that die next.
+function safeSpot(t, world) {
+  const mz = world.maze, cell = world.cell;
+  if (!mz || !world.zoneDepthAt) return { x: t.x, y: t.y };
+  const need = (world.zoneLevel ?? 0) + 2;
+  let best = null, bd = Infinity;
+  for (let r = 0; r < mz.rows; r++) {
+    for (let c = 0; c < mz.cols; c++) {
+      if (mz.inside && !mz.inside[r][c]) continue;
+      const x = (c + 0.5) * cell, y = (r + 0.5) * cell;
+      const d = world.zoneDepthAt(x, y);
+      if (!Number.isFinite(d) || Math.floor(d) < need) continue;
+      const dist = Math.hypot(x - t.x, y - t.y);
+      if (dist < bd) { bd = dist; best = { x, y }; }
+    }
+  }
+  return best ?? { x: t.x, y: t.y };
+}
+
+// Score a crate: value minus what it costs to reach.
+function pickGear(t, B, world, P) {
+  const cell = world.cell;
+  let best = null, bv = -Infinity;
+  for (const g of world.gear ?? []) {
+    const utility = UTILITY.has(g.type);
+    // Another gun when already armed is worth almost nothing — chasing
+    // one is what made bots orbit a crate they could not use.
+    const dryFlame = t.weapon === "flame" && (t.flameFuel ?? 1e9) < 500;
+    if (!utility && B.armed && !dryFlame) continue;
+    if (utility && (t.defense === g.type || t.agility === g.type)) continue;
+
+    let value = utility ? 1.4 : 2.2;
+    if (g.type === "armour" && B.hp < 0.7) value += 1.6;   // +6 HP beats most guns
+    if (g.type === "heal" && B.hp < 0.6) value += 1.8;
+    if (!B.armed && !utility) value += 1.4;
+
+    const d = Math.hypot(g.x - t.x, g.y - t.y);
+    let cost = d / (cell * 4);
+    if (world.zoneDepthAt) {
+      const gd = world.zoneDepthAt(g.x, g.y);
+      if (!Number.isFinite(gd) || Math.floor(gd) < (world.zoneLevel ?? 0)) continue;
+    }
+    // Contested: arriving second AND being shot on the way is a bad deal.
+    if (B.target) {
+      const theirs = Math.hypot(g.x - B.target.x, g.y - B.target.y);
+      if (theirs < d * 0.8) cost += 1.5;
+      if (clearLine(world, g.x, g.y, B.target.x, B.target.y, 6)) cost += 0.6;
+    }
+    const s = value - cost;
+    if (s > bv) { bv = s; best = { x: g.x, y: g.y, d, type: g.type, value, cost }; }
+  }
+  return best;
+}
+
+/* ================================================================
+   4a. NAVIGATION
+   ================================================================ */
+
+function routeHeading(t, B, world, goal, now) {
   const R = world.tankR;
+  const HALF = R * 0.66;                       // the hull's true half-width
+  if (clearLine(world, t.x, t.y, goal.x, goal.y, HALF)) { B.path = null; return null; }
+  const mz = world.maze;
+  if (!mz?.H || !mz?.V) return null;
+  const cell = world.cell;
+  const to = { c: cIdx(goal.x, cell, mz.cols), r: cIdx(goal.y, cell, mz.rows) };
+  const from = { c: cIdx(t.x, cell, mz.cols), r: cIdx(t.y, cell, mz.rows) };
+  const key = to.c + "," + to.r;
+  // Re-planning mid-junction is what made bots pirouette: a fresh route
+  // can pick a different exit each time it runs.
+  if (!B.path || B.pathKey !== key || now - B.pathAt > 2200) {
+    B.path = bfs(mz, from, to);
+    B.pathAt = now; B.pathKey = key;
+  }
+  if (!B.path || B.path.length < 2) return null;
+  const cx = (n) => (n.c + 0.5) * cell, cy = (n) => (n.r + 0.5) * cell;
+  // String-pull: head for the furthest waypoint on a clear line, so the
+  // tank cuts corners instead of touring cell centres.
+  let pick = 1;
+  for (let i = B.path.length - 1; i >= 1; i--) {
+    if (clearLine(world, t.x, t.y, cx(B.path[i]), cy(B.path[i]), HALF)) { pick = i; break; }
+  }
+  while (B.path.length > 2 &&
+         Math.hypot(cx(B.path[1]) - t.x, cy(B.path[1]) - t.y) < cell * 0.55) {
+    B.path.splice(1, 1); if (pick > 1) pick--;
+  }
+  return Math.atan2(cy(B.path[pick]) - t.y, cx(B.path[pick]) - t.x);
+}
+
+function bfs(mz, from, to) {
+  const { cols, rows } = mz;
+  const ok = (c, r) => c >= 0 && c < cols && r >= 0 && r < rows &&
+                       (!mz.inside || mz.inside[r][c]);
+  if (!ok(from.c, from.r) || !ok(to.c, to.r)) return null;
+  const key = (c, r) => r * cols + c;
+  const prev = new Map(), seen = new Set([key(from.c, from.r)]);
+  let frontier = [[from.c, from.r]], found = false;
+  while (frontier.length && !found) {
+    const next = [];
+    for (const [c, r] of frontier) {
+      if (c === to.c && r === to.r) { found = true; break; }
+      const steps = [];
+      if (!mz.H[r][c] && ok(c, r - 1)) steps.push([c, r - 1]);
+      if (!mz.H[r + 1][c] && ok(c, r + 1)) steps.push([c, r + 1]);
+      if (!mz.V[r][c] && ok(c - 1, r)) steps.push([c - 1, r]);
+      if (!mz.V[r][c + 1] && ok(c + 1, r)) steps.push([c + 1, r]);
+      for (const [nc, nr] of steps) {
+        const k = key(nc, nr);
+        if (seen.has(k)) continue;
+        seen.add(k); prev.set(k, [c, r]); next.push([nc, nr]);
+      }
+    }
+    frontier = next;
+  }
+  if (!seen.has(key(to.c, to.r))) return null;
+  const path = []; let cur = [to.c, to.r];
+  while (cur) {
+    path.push({ c: cur[0], r: cur[1] });
+    const p = prev.get(key(cur[0], cur[1]));
+    if (!p) break;
+    cur = p;
+  }
+  return path.reverse();
+}
+
+function navigate(t, B, world, P, now) {
+  const R = world.tankR;
+  const HALF = R * 0.66;
   const score = new Array(DIRS).fill(0);
   const open = new Array(DIRS).fill(1);
 
-  // --- how far can we actually go each way? --------------------------
-  // TWO probes, because "will I fit" and "can I get through" are
-  // different questions.
-  //
-  // HALF is the hull's true half-width, and it answers the first: probe
-  // any fatter and every maze corridor reads as shut and the bot creeps
-  // everywhere.
-  //
-  // But a tank is a RECTANGLE that turns. Steering is continuously
-  // easing onto new headings, so it is always rotating a little, and
-  // rotating needs the half-DIAGONAL — the full bounding radius, half
-  // as much again as the half-width. A gap between those two figures
-  // looks passable to the thin probe and jams the tank solid. That is
-  // exactly the gap a dropped wall leaves beside a maze wall, which is
-  // why bots kept driving into them.
-  //
-  // So SQUEEZE probes with the width the tank needs in order to turn,
-  // and anywhere the two disagree is a constriction it should not
-  // commit to. Nothing is vetoed outright — a bot that must reverse out
-  // of a dead end still can.
-  const HALF = R * 0.66;                  // true hull half-width
-  const SQUEEZE = R * 0.95;               // width needed to turn in
-  // Look further ahead. A short probe only sees a wall once the nose is
-  // nearly on it, which at speed means the bot is already committed and
-  // scrapes along the masonry before it can turn out.
+  // Look far enough ahead that the turn starts before contact. A short
+  // probe only sees the wall once the nose is on it, by which point the
+  // tank is committed and scrapes along the masonry.
   const probe = R * 4.2;
-  const squeeze = new Array(DIRS).fill(1);
-  for (let i = 0; i < DIRS; i++) {
-    const d = clearance(t, world, RAY[i], probe, HALF);
-    open[i] = d / probe;                       // 0 = blocked at the nose
-    const dS = clearance(t, world, RAY[i], probe, SQUEEZE);
-    squeeze[i] = dS / probe;
-  }
+  for (let i = 0; i < DIRS; i++) open[i] = clearance(t, world, RAY[i], probe, HALF) / probe;
 
-  // --- interest: toward the goal -------------------------------------
   let goalA = null;
-  if (B.goal) goalA = routeHeading(t, B, world, B.goal, now);
-
-  for (let i = 0; i < DIRS; i++) {
-    if (goalA != null) {
-      const al = Math.cos(angDiff(RAY[i].a, goalA));
-      score[i] += Math.max(0, al) * 1.6;
-    }
-    // What a heading COSTS is the turning it takes to get on it — and
-    // the game reverses automatically when the stick points behind, so
-    // straight back is as cheap as straight ahead. The expensive
-    // direction is SIDEWAYS: that is the one needing a full 90° swing.
-    //
-    // This term used to be a plain cosine, which scored reverse at −0.9
-    // — actively punishing the free option. A bot that wanted to go
-    // backwards therefore span the whole tank round to face that way
-    // instead of simply reversing into it. That spin, repeated as the
-    // situation kept changing, is the "dance" this used to do under
-    // fire. Magnitude is what matters; the small extra term keeps a mild
-    // preference for leading with the nose.
-    // Reversing costs no turning, so for a while this scored forward and
-    // back as equals. Mechanically true, but it meant roughly half of
-    // all movement was backwards — a tank trundling away in a straight
-    // line, which is both the most readable thing it can do and the
-    // easiest to shoot. Reverse is still cheap enough to use when the
-    // way out really is behind; it is no longer the default.
-    const along = Math.cos(angDiff(RAY[i].a, t.a));
-    // Widened further: bots were still choosing to trundle backwards at
-    // the enemy, which is both the most readable thing they can do and
-    // the easiest thing to shoot. Reverse stays available for a genuine
-    // break-off; it is no longer competitive for an approach.
-    // Reverse is for backing out of somewhere, not for getting places.
-    // Leaving it even mildly competitive produced the shuffle: a bot
-    // creeps back, the forward score wins again, it creeps forward, and
-    // it repeats — travelling almost nowhere. Backwards headings now
-    // score near zero unless there is genuinely nothing ahead.
-    score[i] += Math.max(0, along) * 2.4 - Math.max(0, -along) * 0.9;
-    // Openness is a MULTIPLIER on desire, not a veto: a direction that
-    // is merely tight stays available, one that is solid stops being
-    // attractive. This is what keeps a bot off walls without ever
-    // leaving it with nowhere legal to go.
-    score[i] *= 0.25 + 0.75 * open[i];
-    // And treat a closing direction as genuinely bad well before it is
-    // blocked, so the turn starts early rather than at the last moment.
-    if (open[i] < 0.45) score[i] -= (0.45 - open[i]) * 14;
-    // A way that is open to a thin probe but shut to a turning one is a
-    // slot too tight to use. Weighted by how INVITING it looks, because
-    // the trap is specifically a direction that reads wide open and
-    // isn't — brushing past a wall on a route that continues fine
-    // scores a small difference and is left alone. In open ground both
-    // probes agree and this costs nothing at all.
-    const pinch = Math.max(0, open[i] - squeeze[i]) * open[i];
-    if (pinch > 0.10) score[i] -= (pinch - 0.10) * 6;
+  if (B.goal) {
+    goalA = routeHeading(t, B, world, B.goal, now) ??
+            Math.atan2(B.goal.y - t.y, B.goal.x - t.x);
   }
 
-  // --- keep out of each other ----------------------------------------
+  for (let i = 0; i < DIRS; i++) {
+    if (goalA != null) score[i] += Math.max(0, Math.cos(angDiff(RAY[i].a, goalA))) * 2.0;
+    // Reverse is 69% speed, so a backwards heading has to be genuinely
+    // better on the merits — otherwise bots trundle around backwards.
+    const along = Math.cos(angDiff(RAY[i].a, t.a));
+    score[i] += Math.max(0, along) * 2.4 - Math.max(0, -along) * 0.9;
+    score[i] *= 0.3 + 0.7 * open[i];
+    if (open[i] < 0.45) score[i] -= (0.45 - open[i]) * 14;
+  }
+
   for (const o of world.tanks) {
     if (o === t || o.dead || o.gone) continue;
-    const dx = o.x - t.x, dy = o.y - t.y;
-    const d = Math.hypot(dx, dy);
-    const near = R * 3;
-    if (d > near || d < 1e-3) continue;
-    const a = Math.atan2(dy, dx);
-    const push = (1 - d / near) * 2.2;
+    const dx = o.x - t.x, dy = o.y - t.y, d = Math.hypot(dx, dy);
+    if (d > R * 3 || d < 1e-3) continue;
+    const a = Math.atan2(dy, dx), push = (1 - d / (R * 3)) * 2.2;
     for (let i = 0; i < DIRS; i++) {
       const c = Math.cos(angDiff(RAY[i].a, a));
       if (c > 0) score[i] -= c * push;
     }
   }
-
-  // --- the closing zone ------------------------------------------------
-  // Red ground kills, and ground that is about to turn red will kill
-  // shortly. Both are scored as danger so a bot leaves under its own
-  // steam instead of standing in it, and the pull scales with how bad
-  // the cell is — already lethal outweighs merely doomed.
-  if (world.zoneDist) {
-    const cellPx = world.cell;
-    const zl = world.zoneLevel ?? 0, zw = world.zoneWarn ?? -1;
-    // Prefer the exact polygon depth the game itself damages by; the
-    // per-cell grid is only a fallback for older callers.
-    const layerAt = world.zoneDepthAt
-      ? (x, y) => {
-          const d = world.zoneDepthAt(x, y);
-          return d === Infinity ? Infinity : Math.floor(d);
-        }
-      : (x, y) => {
-          const c = Math.floor(x / cellPx), rr2 = Math.floor(y / cellPx);
-          const row = world.zoneDist[rr2];
-          return row ? (row[c] ?? Infinity) : Infinity;
-        };
-    const badness = (L) => (L === Infinity ? 0 : L < zl ? 1 : L === zw ? 0.6 : L === zl ? 0.3 : 0);
-    const here = badness(layerAt(t.x, t.y));
-    for (let i = 0; i < DIRS; i++) {
-      // Sample a little way along each heading: is that better or worse?
-      const px2 = t.x + RAY[i].cx * cellPx * 1.15;
-      const py2 = t.y + RAY[i].cy * cellPx * 1.15;
-      const there = badness(layerAt(px2, py2));
-      score[i] -= there * 9;
-      if (here > 0) score[i] += (here - there) * 11;   // any way out is good
-    }
-  }
-
-  // --- mud is slow, not deadly ---------------------------------------
   for (const m of world.mud ?? []) {
-    const dx = m.x - t.x, dy = m.y - t.y;
-    const d = Math.hypot(dx, dy);
+    const dx = m.x - t.x, dy = m.y - t.y, d = Math.hypot(dx, dy);
     const reach = (m.r ?? R * 2) + R;
     if (d > reach || d < 1e-3) continue;
     const a = Math.atan2(dy, dx);
     for (let i = 0; i < DIRS; i++) {
       const c = Math.cos(angDiff(RAY[i].a, a));
-      if (c > 0) score[i] -= c * (1 - d / reach) * 0.8;
+      if (c > 0) score[i] -= c * (1 - d / reach) * 0.9;
     }
   }
-
-  // --- evasion: ONE committed weave ------------------------------------
-  //
-  // The old version re-scored all 24 directions against every incoming
-  // shot on every think tick. Two problems, and together they produced
-  // the dance:
-  //
-  //   1. Stepping left and stepping right across a line of fire are
-  //      almost exactly as good as each other. Whichever was fractionally
-  //      ahead flipped from tick to tick as the bullet closed, so the bot
-  //      alternated — a shimmy, on the spot, instead of an evasion.
-  //   2. It assumed any heading could be taken instantly. A tank has to
-  //      SWING onto a sideways heading first, so the dodge it scored
-  //      highest was often one it could not physically complete in time.
-  //
-  // Both are fixed by deciding ONCE and then doing it. A weave is picked
-  // when a shot first becomes a threat — the cheaper of the two ways off
-  // its line, judged on room and on how much turning it needs — and then
-  // held until that shot is gone. Committing is what makes it read as
-  // dodging rather than as flinching.
-  if (B.threats.length) {
-    // STAY ON ONE DODGE. Seeing more of the danger — ricochets included
-    // — means several rounds are often live at once, and whichever is
-    // "soonest" can swap from tick to tick as they close. Re-deciding on
-    // each swap threw away the commitment that stops the shimmy, and the
-    // bot thrashed between two half-dodges and got hit by both. So the
-    // chosen threat is followed until it is gone or the window runs out,
-    // even if another briefly looks nearer.
-    let th = B.threats.find((x) => x.key === B.dodgeKey);
-    if (!th || now > B.dodgeUntil) {
-      th = B.threats[0];                        // the one arriving first
-      B.dodgeKey = th.key;
-      B.dodgeUntil = now + 520;
-      B.dodgeA = pickWeave(t, world, P, th, open, squeeze, B.dodgeA, B.dodgeKey != null, B.threats);
-    }
-    const urgency = 1 - Math.min(1, th.t / Math.max(0.15, P.look));
-    const w = 3.6 * P.dodge * (0.55 + urgency);
+  if (world.zoneDepthAt && P.zoneMath > 0) {
+    const zl = world.zoneLevel ?? 0;
+    const bad = (x, y) => {
+      const d = world.zoneDepthAt(x, y);
+      if (!Number.isFinite(d)) return 1;
+      const L = Math.floor(d);
+      return L < zl ? 1 : L === (world.zoneWarn ?? -1) ? 0.5 : 0;
+    };
+    const here = bad(t.x, t.y);
     for (let i = 0; i < DIRS; i++) {
-      const c = Math.cos(angDiff(RAY[i].a, B.dodgeA));
-      if (c > 0) score[i] += c * c * open[i] * w;
+      const there = bad(t.x + RAY[i].cx * world.cell * 1.15,
+                        t.y + RAY[i].cy * world.cell * 1.15);
+      // GATED BY REACHABILITY. Unmultiplied, this term is large enough
+      // to overwhelm the wall penalty, so a bot in a corner would drive
+      // straight at the masonry because the ground beyond it is safer —
+      // and wedge there. Safety is only worth anything down a direction
+      // the tank can actually travel; getting AROUND the wall is the
+      // route planner's job, not the steering's.
+      score[i] -= there * 5 * P.zoneMath * open[i];
+      if (here > 0) score[i] += (here - there) * 6 * P.zoneMath * open[i];
     }
-  } else {
-    B.dodgeKey = null;
   }
 
-  // --- sticky choice ---------------------------------------------------
-  // Near-ties between neighbouring directions used to flip every frame,
-  // which reads as a bot vibrating. Carrying on costs nothing; turning
-  // has to be worth it.
-  // A junction is the worst case for this: three or four ways out score
-  // almost identically, the pick flips between them every frame, and the
-  // bot pirouettes on the spot instead of taking one. Carrying on has to
-  // be worth appreciably more than turning, and the bonus reaches wider.
+  // ---- evasion: WORST CASE across every live round --------------------
+  // Scoring each threat independently and adding lets a heading that
+  // dodges one shot beautifully while driving into another come out on
+  // top. A direction is only as good as the round it handles worst.
+  // "A path between active projectiles" is then simply the direction
+  // whose worst-case miss is still positive.
+  if (B.threats.length) {
+    const spd = world.moveSpeed ?? 121;
+    const worst = new Array(DIRS).fill(1);
+    let urgency = 0;
+    for (const th of B.threats) {
+      const u = th.beam ? 1 : 1 - Math.min(1, th.t / 0.9);
+      if (u > urgency) urgency = u;
+      for (let i = 0; i < DIRS; i++) {
+        let safe;
+        if (th.beam) {
+          safe = Math.max(0, Math.cos(angDiff(RAY[i].a,
+                   Math.atan2(t.y - th.y, t.x - th.x))));
+        } else {
+          const lead = Math.min(0.9, Math.max(0.12, th.t));
+          // A dodge is only worth taking if the tank can actually get
+          // there: 0.5 s to accelerate and 0.28 s to turn are real.
+          const reach = spd * lead * Math.max(0.25, Math.cos(angDiff(RAY[i].a, t.a)));
+          const fx = t.x + RAY[i].cx * reach, fy = t.y + RAY[i].cy * reach;
+          const miss = segDist(fx, fy, th.x, th.y,
+                               th.x + th.vx * lead, th.y + th.vy * lead);
+          safe = Math.min(1, miss / (R * 3));
+        }
+        if (safe < worst[i]) worst[i] = safe;
+      }
+    }
+    for (let i = 0; i < DIRS; i++) {
+      score[i] += worst[i] * open[i] * 6 * (0.4 + urgency);
+      if (worst[i] < 0.35) score[i] -= (0.35 - worst[i]) * 8 * urgency;
+    }
+  }
+
+  // Sticky choice — near-ties between neighbours used to flip every
+  // frame, which reads as a bot vibrating on the spot.
   if (B.lastDir != null) {
     for (let i = 0; i < DIRS; i++) {
       const off = Math.min(Math.abs(i - B.lastDir), DIRS - Math.abs(i - B.lastDir));
@@ -714,383 +715,118 @@ function navigate(t, B, world, P, now, gun) {
     }
   }
 
-  // --- break-out overrides everything ---------------------------------
-  if (now < B.stuckUntil) {
-    return { a: B.stuckA, mag: 1, forced: true };
-  }
+  if (now < B.stuckUntil) return { a: B.stuckA, mag: 1, forced: true };
 
   let bi = 0;
   for (let i = 1; i < DIRS; i++) if (score[i] > score[bi]) bi = i;
   B.lastDir = bi;
-
-  // Sub-slot lean, so headings aren't quantised to 15° steps.
   const l = (bi + DIRS - 1) % DIRS, r = (bi + 1) % DIRS;
-  const denom = Math.abs(score[l]) + Math.abs(score[r]) + Math.abs(score[bi]) + 1e-3;
-  const a = RAY[bi].a + ((score[r] - score[l]) / denom) * (Math.PI / DIRS);
-
-  // Throttle eases off as the way ahead closes up.
-  //
-  // MEASURED: dropping the floor further than this backfires. At 0.12 a
-  // bot facing a wall barely moves, which does cut the time it spends
-  // jammed — but it then creeps everywhere, covering 12 cells where it
-  // used to cover 22 and spending far MORE of its life in contact with
-  // stone. Half throttle into clutter came out best on both counts.
-  let mag = 0.95 * (0.5 + 0.5 * open[bi]);
+  const den = Math.abs(score[l]) + Math.abs(score[r]) + Math.abs(score[bi]) + 1e-3;
+  const a = RAY[bi].a + ((score[r] - score[l]) / den) * (Math.PI / DIRS);
+  let mag = 0.95 * (0.6 + 0.4 * open[bi]);
   if (B.goal) {
     const gd = Math.hypot(B.goal.x - t.x, B.goal.y - t.y);
     if (gd < R * 2.5) mag *= Math.max(0.15, gd / (R * 2.5));
   }
-  B.mapScore = score;
   return { a, mag, forced: false };
 }
 
-// Which way to step off a line of fire. Called ONCE per threat; the
-// answer is then committed to, which is what stops the shimmy.
-//
-// The two candidates are the perpendiculars to the shot's path, because
-// lateral movement buys the most miss distance per metre travelled —
-// running away down the line barely helps, since the bullet is faster.
-// Between them, what decides it is:
-//
-//   • room, using the turning-width probe, so a bot never commits to a
-//     dodge into a slot it cannot enter;
-//   • TURN COST — sideways is the one direction a tank cannot take
-//     without a 90° swing, so the perpendicular nearer to the hull's
-//     current axis (forwards OR backwards, since reverse is free) gets
-//     there sooner and is worth more;
-//   • which side of the line we are already on, because continuing off
-//     that way is a shorter trip than crossing in front of the shot.
-function pickWeave(t, world, P, th, open, squeeze, prevA, hadPrev, all) {
-  const slotOf = (a) => {
-    const n = ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-    return Math.round(n / (Math.PI * 2) * DIRS) % DIRS;
-  };
-
-  // A beam has no travel time — the only answer is to be off the line,
-  // so the candidates are the two ways directly away from it.
-  const base = th.kind === "beam"
-    ? Math.atan2(t.y - th.y, t.x - th.x)
-    : Math.atan2(th.vy, th.vx) + Math.PI / 2;
-  // Straight across the line of fire buys the most miss distance, but
-  // it is also the one heading a tank cannot take without a full 90°
-  // swing — so a bot that only ever considered the two perpendiculars
-  // spent the whole dodge turning and got hit mid-pivot. Offering the
-  // diagonals as well lets it slide across AND along at once: less
-  // sideways gain per metre, but it actually gets there, which is the
-  // difference between jinking and pirouetting.
-  const cands = [
-    base, base + Math.PI,
-    base + 0.7, base - 0.7,
-    base + Math.PI + 0.7, base + Math.PI - 0.7,
-  ];
-
-  let best = base, bv = -Infinity;
-  for (let k = 0; k < cands.length; k++) {
-    const a = cands[k];
-    const i = slotOf(a);
-    // Reverse is free, so the cost of a heading is how far it is from
-    // the hull's AXIS, not from its nose.
-    const turnCost = 1 - Math.abs(Math.cos(angDiff(a, t.a)));
-    const side = (k % 2 === 0) ? 1 : -1;
-    // Keep sliding the SAME way if it's still working. Shots from one
-    // place arrive one after another, and picking a fresh side for each
-    // turns a slide into an alternation — which is the dance again, just
-    // at a slower tempo. A sustained run across the line is both harder
-    // to lead and what a person would actually do.
-    const carry = hadPrev ? Math.max(0, Math.cos(angDiff(a, prevA))) * 1.1 : 0;
-    // WORST CASE across everything in the air. Scoring only the round
-    // being dodged is what fell apart when there was more than one: the
-    // bot would pick a heading that slipped this shot perfectly and put
-    // itself straight in front of the next. A heading is only as good as
-    // the round it handles worst.
-    let worst = 1;
-    if (all && all.length > 1) {
-      const spd = (world.moveSpeed ?? 130) * P.speed;
-      const R = world.tankR;
-      for (const o of all) {
-        if (o.kind === "beam") {
-          worst = Math.min(worst, Math.max(0, Math.cos(angDiff(a,
-            Math.atan2(t.y - o.y, t.x - o.x)))));
-          continue;
-        }
-        const lead = Math.min(P.look, Math.max(0.12, o.t));
-        const fx = t.x + Math.cos(a) * spd * lead;
-        const fy = t.y + Math.sin(a) * spd * lead;
-        const miss = segDist(fx, fy, o.x, o.y, o.x + o.vx * lead, o.y + o.vy * lead);
-        worst = Math.min(worst, Math.min(1, miss / (R * 3)));
-      }
-    }
-    const v = open[i] * 2.4
-            + squeeze[i] * 1.2                 // must be usable, not just open
-            - turnCost * 1.6
-            + carry
-            + worst * 3.4 * P.dodge            // clear of EVERY round, not one
-            + (th.side === side ? 0.5 : 0);    // carry on off the side we're on
-    if (v > bv) { bv = v; best = a; }
-  }
-  return best;
-}
-
-// Distance we can travel a given way before something solid stops us.
-function clearance(t, world, ray, maxD, halfW) {
-  let d = maxD;
-  const x2 = t.x + ray.cx * maxD, y2 = t.y + ray.cy * maxD;
-  for (const r of world.rects ?? []) {
-    const hit = raySlab(t.x, t.y, ray.cx, ray.cy, maxD,
-      r.x - halfW, r.y - halfW, r.x + r.w + halfW, r.y + r.h + halfW);
-    if (hit != null && hit < d) d = hit;
-  }
-  for (const w of world.walls ?? []) {
-    if ((w.hp ?? 1) <= 0) continue;
-    const f = segHitsBox(t.x, t.y, x2, y2, w, halfW);
-    if (f != null) {
-      const dd = f * maxD;          // exact entry distance, not a guess
-      if (dd < d) d = dd;
-    }
-  }
-  // Boundary slabs are solid to everything else in the game; they are
-  // solid to the steering compass now as well.
-  for (const sl of world.diag ?? []) {
-    const f = segHitsBox(t.x, t.y, x2, y2, sl, halfW);
-    if (f != null) {
-      const dd = f * maxD;
-      if (dd < d) d = dd;
-    }
-  }
-  return Math.max(0, d);
-}
-
-// Most open direction, biased toward a preferred bearing. Used to break
-// out of a corner.
-function bestOpening(t, world, prefer) {
-  let bi = 0, bv = -Infinity;
-  for (let i = 0; i < DIRS; i++) {
-    // The turning width, not the hull width: an escape route the tank
-    // cannot rotate along is how it got stuck in the first place.
-    const c = clearance(t, world, RAY[i], world.tankR * 3, world.tankR * 0.95);
-    const v = c + Math.cos(angDiff(RAY[i].a, prefer)) * world.tankR;
-    if (v > bv) { bv = v; bi = i; }
-  }
-  return RAY[bi].a;
-}
-
-
 /* ================================================================
-   Routing — grid path first, steering for the last few metres
-   ================================================================ */
-
-// Context steering alone is a LOCAL method: it cannot see round a
-// corner, so on its own it walks into concave geometry and sits there.
-// A breadth-first route over the maze grid supplies the long-range
-// answer ("which way out of this room"), and the steering below handles
-// everything within sight. That split is the standard arrangement and
-// it's what stops bots getting hung up on walls.
-function cellIdx(v, cell, n) {
-  return Math.max(0, Math.min(n - 1, Math.floor(v / cell)));
-}
-
-function bfsRoute(maze, from, to) {
-  const { cols, rows } = maze;
-  const inside = (c, r) =>
-    c >= 0 && c < cols && r >= 0 && r < rows && (!maze.inside || maze.inside[r][c]);
-  if (!inside(from.c, from.r) || !inside(to.c, to.r)) return null;
-  const key = (c, r) => r * cols + c;
-  const prev = new Map();
-  const seen = new Set([key(from.c, from.r)]);
-  let frontier = [[from.c, from.r]];
-  let found = false;
-  while (frontier.length && !found) {
-    const next = [];
-    for (const [c, r] of frontier) {
-      if (c === to.c && r === to.r) { found = true; break; }
-      const steps = [];
-      if (maze.H && !maze.H[r][c] && inside(c, r - 1)) steps.push([c, r - 1]);
-      if (maze.H && !maze.H[r + 1][c] && inside(c, r + 1)) steps.push([c, r + 1]);
-      if (maze.V && !maze.V[r][c] && inside(c - 1, r)) steps.push([c - 1, r]);
-      if (maze.V && !maze.V[r][c + 1] && inside(c + 1, r)) steps.push([c + 1, r]);
-      for (const [nc, nr] of steps) {
-        const k = key(nc, nr);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        prev.set(k, [c, r]);
-        next.push([nc, nr]);
-      }
-    }
-    frontier = next;
-  }
-  if (!seen.has(key(to.c, to.r))) return null;
-  const path = [];
-  let cur = [to.c, to.r];
-  while (cur) {
-    path.push({ c: cur[0], r: cur[1] });
-    const p = prev.get(key(cur[0], cur[1]));
-    if (!p) break;
-    cur = p;
-  }
-  path.reverse();
-  return path;
-}
-
-// Bearing to aim the steering at: straight at the goal when the way is
-// open, otherwise at the furthest waypoint we can actually see.
-function routeHeading(t, B, world, goal, now) {
-  const R = world.tankR;
-  // ROUTE CLEARANCE. This asked whether a line was clear for a circle of
-  // 0.62 R — narrower than the hull's own half-width of 0.658 R, let
-  // alone the 0.95 R it needs while it is still turning. So the planner
-  // was allowed to answer "straight there" for gaps the tank physically
-  // cannot enter, point the bot at the wall, and leave the steering to
-  // grind against it. That is the bots driving into walls.
-  //
-  // Everywhere else in this file already probes with SQUEEZE (0.95 R)
-  // before committing to a way through; the router simply wasn't.
-  const ROUTE_W = R * 0.95;
-  if (clearLine(world, t.x, t.y, goal.x, goal.y, ROUTE_W)) {
-    B.path = null;
-    return Math.atan2(goal.y - t.y, goal.x - t.x);
-  }
-  const maze = world.maze;
-  if (!maze || !maze.H || !maze.V) {
-    return Math.atan2(goal.y - t.y, goal.x - t.x);
-  }
-  const cell = world.cell;
-  const to = { c: cellIdx(goal.x, cell, maze.cols), r: cellIdx(goal.y, cell, maze.rows) };
-  const from = { c: cellIdx(t.x, cell, maze.cols), r: cellIdx(t.y, cell, maze.rows) };
-
-  // Re-planning while standing in a junction is the other half of the
-  // spin: a fresh route can pick a different exit each time it is run.
-  // Hold a route long enough to actually leave the intersection.
-  const stale = !B.path || now - B.pathAt > 2200 ||
-    !B.pathTo || B.pathTo.c !== to.c || B.pathTo.r !== to.r;
-  if (stale) {
-    B.path = bfsRoute(maze, from, to);
-    B.pathAt = now;
-    B.pathTo = to;
-  }
-  if (!B.path || B.path.length < 2) {
-    return Math.atan2(goal.y - t.y, goal.x - t.x);
-  }
-  // String-pull: head for the furthest waypoint on a clear line, so the
-  // bot cuts corners smoothly instead of touring cell centres.
-  const cx = (n) => (n.c + 0.5) * cell;
-  const cy = (n) => (n.r + 0.5) * cell;
-  let pick = 1;
-  for (let i = B.path.length - 1; i >= 1; i--) {
-    if (clearLine(world, t.x, t.y, cx(B.path[i]), cy(B.path[i]), ROUTE_W)) { pick = i; break; }
-  }
-  // Drop waypoints already behind us so the path is consumed.
-  while (B.path.length > 2 &&
-         Math.hypot(cx(B.path[1]) - t.x, cy(B.path[1]) - t.y) < cell * 0.55) {
-    B.path.splice(1, 1);
-    if (pick > 1) pick--;
-  }
-  return Math.atan2(cy(B.path[pick]) - t.y, cx(B.path[pick]) - t.x);
-}
-
-/* ================================================================
-   4a. GUNNERY
+   4b. GUNNERY
    ================================================================ */
 
 function gunnery(t, B, world, P, now) {
-  const out = { want: false, aim: t.a, dist: Infinity, canFire: false, hold: false, dry: false };
+  const out = { want: false, aim: t.a, bearing: t.a, fire: false, hold: false };
   const target = B.target;
-  if (!target || !target.visible) { B.lockId = null; return out; }
+  if (!target || !target.seen) { B.lockId = null; return out; }
+  const g = B.gun;
+  if (B.tdist > Math.min(g.max, 8) || B.tdist < g.min) return out;
 
-  const cell = world.cell;
-  const g = gunOf(t.weapon || "normal");
-  const dist = Math.hypot(target.x - t.x, target.y - t.y);
-  out.dist = dist;
-  const cells = dist / cell;
-  if (cells > Math.min(P.fireRange, g.maxCells)) return out;
-  if (cells < g.minCells) return out;                   // too close to arm
-
-  // Lead the target by as much of the intercept solution as this tier
-  // can work out.
   const speed = shotSpeed(t.weapon, world);
-  // Solve the intercept PROPERLY, then blend toward the target's
-  // current position by the tier's skill. Scaling the velocity before
-  // solving (what this used to do) is not a weaker version of the same
-  // answer — the solution is non-linear in velocity, so a half-speed
-  // target gives a systematically wrong bearing rather than a partly
-  // corrected one. Solving first and easing off afterwards means a
-  // weaker bot under-leads honestly and a strong one is exact.
-  const full = intercept(t.x, t.y, target.x, target.y, target.vx, target.vy, speed);
-  const sol = {
-    x: target.x + (full.x - target.x) * P.lead,
-    y: target.y + (full.y - target.y) * P.lead,
-  };
-  if (now - B.aimErrAt > 500) {
+  const sol = intercept(t.x, t.y, target.x, target.y,
+                        target.vx * P.lead, target.vy * P.lead, speed);
+  if (now - B.aimErrAt > 450) {
     B.aimErrAt = now;
     B.aimErr = (Math.random() - 0.5) * 2 * P.aimErr;
   }
-  const bearing = Math.atan2(sol.y - t.y, sol.x - t.x);
-  out.aim = bearing + B.aimErr;
-  out.bearing = bearing;
+  // The wobble is a GUNNERY error, so it belongs on the shot and not on
+  // the steering — driving along a noisy vector makes the hull chase a
+  // heading that jumps every time the wobble is re-rolled.
+  out.bearing = Math.atan2(sol.y - t.y, sol.x - t.x);
+  out.aim = out.bearing + B.aimErr;
   out.want = true;
 
-  // Settle: a target just acquired can't be snapped onto and fired at.
   if (B.lockId !== target.id) { B.lockId = target.id; B.lockAt = now; }
   if (now - B.lockAt < P.settle * 1000) return out;
 
-  // A phasing tank cannot be hit at all; anyone competent waits it out.
-  if (P.ability > 0.35 && target.ref && now < (target.ref.phaseUntil ?? 0)) return out;
+  // A phasing tank cannot be hit at all. Emptying a magazine into a
+  // ghost is the most obviously-dumb thing a bot can do.
+  if (B.foePhasing && Math.random() < P.abilitySee) return out;
+  if (Math.abs(angDiff(t.a, out.aim)) > 0.10 + P.aimErr) return out;
 
-  // How square the hull has to be depends on the WEAPON, not just the
-  // tier. A shell is a point and needs the tier's precision. The
-  // flamethrower is a cone about 20° wide at the tip — gating it on the
-  // same few degrees meant a bot only had the trigger down in the
-  // instants it happened to be perfectly lined up, so it stuttered the
-  // flame on and off instead of holding a burn on someone. Anywhere
-  // inside the cone is a hit, so anywhere inside the cone is good enough
-  // to fire.
-  let tol = P.aimTol;
-  if (g.hold && t.weapon === "flame") {
-    const cone = Math.atan2((world.tankR ?? 22) * 1.9, Math.max(1, dist));
-    tol = Math.max(P.aimTol, Math.min(0.34, cone));
-    // Hysteresis: once it is burning, keep burning while the target
-    // drifts about in the cone rather than chopping at the boundary.
-    if (B.flameOn && now - B.flameOn < 400) tol *= 1.35;
-  }
-  if (Math.abs(angDiff(t.a, out.aim)) > tol) return out;
+  const mz = world.muzzle ?? world.tankR;
+  const mx = t.x + Math.cos(t.a) * mz, my = t.y + Math.sin(t.a) * mz;
 
-  // Line of fire: no walls, no team-mates. Mortars arc over everything.
-  if (!g.indirect) {
-    const mz = world.muzzle ?? world.tankR;
-    const mx = t.x + Math.cos(t.a) * mz, my = t.y + Math.sin(t.a) * mz;
-    if (!clearLine(world, mx, my, target.x, target.y, world.bulletR ?? 3)) return out;
-  }
+  if (!g.indirect) {                      // mortars arc over everything
+    let clear = clearLine(world, mx, my, target.x, target.y, world.bulletR ?? 3);
+    // Bank shots. The maths supports them, but only a confident tier
+    // takes one, and only when the direct line is genuinely blocked.
+    // The laser is excluded: its damage falls 7 -> 1 with bounces.
+    if (!clear && P.trick > 0 && !g.wantsDirect && Math.random() < P.trick) {
+      clear = bankShotHits(world, mx, my, out.bearing, target, P.bounces);
+    }
+    if (!clear) return out;
 
-  // Ammo in flight is ammo you don't have.
-  if (!g.indirect && !g.hold) {
-    let live = 0;
-    for (const b of world.bullets ?? []) if (b.by === t.id) live++;
-    // `dry` means the gun is the thing stopping us, not the aim — which
-    // makes this the moment to be somewhere else.
-    if (live >= (world.magSize ?? 3)) { out.dry = true; return out; }
-    if (now - B.shotAt < (world.magGap ?? 500) * 0.9) { out.dry = true; return out; }
+    // Never fire into a wall at point-blank: our own rounds are lethal
+    // after 75 ms and they bounce straight back.
+    const nose = rayWalls(world, mx, my, Math.cos(t.a), Math.sin(t.a), world.tankR * 2.2);
+    if (nose && B.tdist * world.cell > nose.d + world.tankR) return out;
   }
-  // Flame runs on fuel and only reaches so far.
-  if (t.weapon === "flame") {
-    if ((t.flameFuel ?? FLAME.durationMs) <= 60) return out;
-    if (dist > FLAME.reachCells * cell * 0.92) return out;
+  // The cannon's own shrapnel reaches us if we fire it in our lap.
+  if (g.selfBlast && B.tdist < 1.2) return out;
+
+  // Ammo economy: with 3.5 s per round, keep one back unless the kill is
+  // on. Hold-trigger guns run on their own fuel instead.
+  if (!g.hold && !g.indirect) {
+    if (B.ammo <= 0) return out;
+    const killShot = (target.ref?.hp ?? 10) <= g.dmg;
+    if (B.ammo <= 1 && !killShot && B.threats.length) return out;
+    if (now - B.shotAt < (world.magGap ?? 500) * 0.9) return out;
+  }
+  if (t.weapon === "flame" &&
+      ((t.flameFuel ?? FLAME.durationMs) <= 60 || B.tdist > FLAME.reachCells * 0.92)) {
+    return out;
   }
 
-  out.canFire = true;
+  out.fire = true;
   out.hold = g.hold;
   return out;
 }
 
-function shotSpeed(w, world) {
-  const base = world.bulletSpeed ?? 420;
-  if (w === "sniper") return base * (SNIPER.speed ?? 2.1);
-  if (w === "rocket") return base * (ROCKET.speed ?? 0.72);
-  if (w === "cannon") return base * (CANNON_SPEED);
-  if (w === "mg") return base * (MG.speed ?? 1.05);
-  if (w === "laser") return 9999;              // effectively instant
-  if (w === "mortar") return base * 0.9;
-  return base;
+// Does a bounce off the nearby geometry put the round on them?
+function bankShotHits(world, x, y, a, target, bounces) {
+  if (bounces < 1) return false;
+  const legs = traceShot(world,
+    { x, y, vx: Math.cos(a) * 400, vy: Math.sin(a) * 400 }, Math.min(2, bounces), 1.4);
+  for (let i = 1; i < legs.length; i++) {      // skip the direct leg
+    const leg = legs[i];
+    const d = segDist(target.x, target.y, leg.x, leg.y,
+                      leg.x + leg.vx * leg.dur, leg.y + leg.vy * leg.dur);
+    if (d < world.tankR) return true;
+  }
+  return false;
 }
-const CANNON_SPEED = 0.74;
+
+function shotSpeed(w, world) {
+  const b = world.bulletSpeed ?? 184;
+  if (w === "sniper") return b * (SNIPER.speed ?? 2.1);
+  if (w === "rocket") return b * (ROCKET.speed ?? 0.72);
+  if (w === "cannon") return b * 0.74;
+  if (w === "mg") return b * (MG.speed ?? 1.05);
+  if (w === "laser") return 1e5;                   // instant
+  if (w === "mortar") return b * 0.9;
+  return b;
+}
 
 function intercept(px, py, tx, ty, tvx, tvy, speed) {
   const dx = tx - px, dy = ty - py;
@@ -1098,223 +834,157 @@ function intercept(px, py, tx, ty, tvx, tvy, speed) {
   const a = tvx * tvx + tvy * tvy - speed * speed;
   const b = 2 * (dx * tvx + dy * tvy);
   const c = dx * dx + dy * dy;
-  let tHit = 0;
+  let hit = 0;
   if (Math.abs(a) < 1e-6) {
-    if (Math.abs(b) > 1e-6) tHit = -c / b;
+    if (Math.abs(b) > 1e-6) hit = -c / b;
   } else {
     const disc = b * b - 4 * a * c;
     if (disc >= 0) {
       const s = Math.sqrt(disc);
-      const t1 = (-b + s) / (2 * a), t2 = (-b - s) / (2 * a);
-      tHit = Math.min(...[t1, t2].filter((v) => v > 0), 3);
+      const cands = [(-b + s) / (2 * a), (-b - s) / (2 * a)].filter((v) => v > 0);
+      hit = cands.length ? Math.min(...cands, 3) : 0;
     }
   }
-  if (!isFinite(tHit) || tHit < 0) tHit = 0;
-  return { x: tx + tvx * tHit, y: ty + tvy * tHit };
+  if (!isFinite(hit) || hit < 0) hit = 0;
+  return { x: tx + tvx * hit, y: ty + tvy * hit };
 }
 
 /* ================================================================
-   4b. POSTURE — the movement/aim conflict, resolved on purpose
+   4c. ACT — resolve intent into movement
    ================================================================ */
 
-function posture(t, B, world, P, now, dt, nav, gun, acts) {
+function act(t, B, world, P, now, dt, gun, acts) {
   const R = world.tankR;
-  const cell = world.cell;
+  const nav = navigate(t, B, world, P, now);
 
-  // Is something about to hit us? If so, moving matters more than
-  // shooting, and the better the bot the earlier it makes that call.
-  const urgent = B.soonest < 0.22 + 0.34 * P.dodge;   // seconds to impact
-  const evading = B.threats.length > 0 && urgent;
-
+  // HARD INTERRUPTS. A round about to land, or the ground dying under
+  // us, outranks whatever we were doing.
+  const urgent = B.soonest < 0.30 || B.inZone;
   let wantA = nav.a, wantM = nav.mag;
-  const firing = gun.want && !evading && !nav.forced;
+  let wantBack = false;   // set only where backing up is the intent
 
-  if (firing) {
-    // Firing posture. The hull has to point at the target, so movement is
-    // restricted to the target axis — and which way we go along it is
-    // decided by RANGE, not by a score that can flip frame to frame.
-    // That is the whole reason these bots used to shuffle back and forth.
-    const g = gunOf(t.weapon || "normal");
-    const want = Math.min(P.standoff, g.bestCells) * cell;
-    const axis = gun.bearing ?? gun.aim;
-    // The old close-range band started at 55% of the preferred range,
-    // which in a 96px-cell maze meant anything inside about three tank
-    // lengths — most of a fight. The bot spent it reversing. Give ground
-    // only when genuinely crowded, and gently.
-    // The close-range band gets a SCHMITT TRIGGER, not a threshold.
-    //
-    // Backing off commands `axis + PI` while holding the line commands
-    // `axis` — a 180° difference. With a single threshold, a target
-    // drifting either side of it flipped the commanded heading by half
-    // a turn on alternate frames, and because a bot with a shot on
-    // commands its firing heading UNSMOOTHED, that flip went straight
-    // to the hull. The game picks forward or reverse from that heading,
-    // so the tank switched between driving and reversing several times
-    // a second: measured at 4.9 crossings per second with the average
-    // spell in reverse lasting 84 ms. Not a manoeuvre — a twitch, and
-    // exactly what reads as a bot getting stuck and confused.
-    //
-    // Separating the two edges means backing off starts when genuinely
-    // crowded and continues until there is real daylight, so the
-    // manoeuvre runs to completion instead of cancelling itself.
-    const nearIn = want * 0.34, nearOut = want * 0.62, far = want * 1.35;
-    if (B.backing) { if (gun.dist > nearOut) B.backing = false; }
-    else if (gun.dist < nearIn) B.backing = true;
+  // The stuck break-out is the other case that genuinely needs reverse:
+  // it exists precisely to back out of somewhere, so it must not be
+  // clamped into the forward arc.
+  if (nav.forced) wantBack = true;
+  if (urgent && B.threats.length) wantBack = true;   // any way out will do
 
-    if (gun.dist > far && !B.backing) {
-      // Close the gap NOSE FIRST. Commanding the raw bearing when the
-      // hull happens to point away makes the game reverse rather than
-      // turn — the nose stays put and the tank drives backwards — and
-      // since the nose never comes round it reverses the entire way in.
-      // Clamping the command inside the forward arc forces a proper
-      // turn-and-drive.
+  if (gun.want && !urgent && !nav.forced) {
+    // Firing posture. The hull has to point at the target, so travel is
+    // restricted to the target axis — and which way along it is decided
+    // by RANGE, not a score that can flip frame to frame. That flipping
+    // was the old shuffle.
+    const want = B.gun.best * world.cell;
+    const axis = gun.bearing;
+    const d = B.tdist * world.cell;
+    if (d > want * 1.35) {
+      // Close NOSE FIRST: commanding the raw bearing when the hull points
+      // away makes the game reverse instead of turning, and the tank
+      // trundles the whole way in backwards.
       const off = angDiff(t.a, axis);
-      const LIM = 1.45;                                // ~83°, inside reverse
-      wantA = Math.abs(off) > LIM ? t.a + Math.sign(off) * LIM : axis;
-      wantM = 0.9;                                     // close the gap
-    } else if (B.backing) {
-      wantA = axis + Math.PI; wantM = 0.40;            // ease off, nose still on
+      wantA = Math.abs(off) > 1.45 ? t.a + Math.sign(off) * 1.45 : axis;
+      wantM = 0.9;
+    } else if (d < want * 0.55) {
+      wantA = axis + Math.PI; wantM = 0.45; wantBack = true;   // give ground, gun still on
     } else {
-      // In the pocket: hold the line, just enough throttle to keep the
-      // hull swinging onto the shot.
-      //
-      // TRIED AND REJECTED: breaking sideways during the reload window,
-      // to spend less time sitting on the axis the enemy is aiming down.
-      // It measured badly — the hull has to swing ~65° off target and
-      // then swing back before the next shot, and at this turn rate it
-      // never finishes either move. Stalling tripled and the fire rate
-      // fell by a third. With the gun welded to the hull, holding the
-      // line IS the right play; the movement has to come from choosing
-      // better ground, not from fidgeting on the spot.
-      // Hold the pocket. A token 0.22 throttle used to be harmless when
-      // speed was instant, but against real inertia it is a permanent
-      // near-stationary creep — the tank shuffles on the spot while the
-      // hull swings, which is exactly the wiggle. Either commit to a
-      // reposition or genuinely sit still and shoot.
-      wantA = axis; wantM = 0;
+      wantA = axis; wantM = 0;                   // in the pocket: hold and shoot
     }
     // Never drive into something just to keep a shot.
-    const slot = Math.round(((wantA % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * DIRS) % DIRS;
-    const room = clearance(t, world, RAY[slot], R * 2.2, R * 0.66) / (R * 2.2);
-    if (room < 0.3) { wantA = nav.a; wantM = nav.mag; }
+    const two = Math.PI * 2;
+    const slot = Math.round((((wantA % two) + two) % two) / two * DIRS) % DIRS;
+    if (clearance(t, world, RAY[slot], R * 2.2, R * 0.66) / (R * 2.2) < 0.3) {
+      wantA = nav.a; wantM = nav.mag;
+    }
   }
 
-  // Ease onto the heading. Nothing ever snaps while NAVIGATING — a bot
-  // that teleports its steering looks like it is correcting a mistake
-  // every frame.
-  //
-  // But aiming is not navigating. This tank aims by pointing its whole
-  // hull, and the trigger only releases once the hull is within a few
-  // degrees of the target. Feeding the hull a heading that has itself
-  // been smoothed toward the bearing puts TWO lags in series: the
-  // smoothed heading trails the target, and the hull trails the
-  // smoothed heading. Against anything that moves, the gun then never
-  // quite arrives — which is why these bots circled a fight at a
-  // hundred degrees a second and fired about a quarter as often as
-  // their magazine allowed. When there is a shot on, the exact bearing
-  // is commanded and the hull converges on it.
-  // A sidestep that eases on over half a second is not a sidestep. When
-  // something is incoming, get onto the escape heading quickly; when
-  // merely navigating, keep the smooth steering that stops bots looking
-  // twitchy.
-  const rate = nav.forced ? 10 : evading ? 12 + 6 * P.dodge : 4.5 + 5 * P.dodge;
+  // REVERSE IS OPT-IN. The engine reverses whenever the commanded
+  // heading sits more than 90 degrees behind the nose, so a steering
+  // solution that happens to point backwards silently turns into
+  // moonwalking — and because the forward bias then rewards the nose's
+  // direction, the tank oscillates instead of turning around. Unless we
+  // deliberately asked to give ground, clamp the command into the
+  // forward arc so the only way to go backwards is to mean it.
+  if (!wantBack) {
+    const off = angDiff(t.a, wantA);
+    const LIM = 1.4;                       // ~80 degrees, inside the flip
+    if (Math.abs(off) > LIM) wantA = t.a + Math.sign(off) * LIM;
+  }
+
+  // Ease onto the heading — nothing ever snaps.
+  const rate = nav.forced ? 10 : 6;
   B.driveA += angDiff(B.driveA, wantA) * Math.min(1, dt * rate);
-  B.driveM += (wantM - B.driveM) * Math.min(1, dt * 7);
+  B.driveM += (wantM - B.driveM) * Math.min(1, dt * 8);
 
   if (B.driveM > 0.04) {
-    acts.moveAngle = firing ? wantA : B.driveA;
-    // Creeping forever also costs shots: it keeps changing the geometry
-    // the gun is solving for. Lined up and in the pocket, plant and
-    // shoot instead of shuffling.
-    acts.moveMag = Math.max(firing ? 0.04 : 0.2, Math.min(1, B.driveM));
+    acts.moveAngle = B.driveA;
+    acts.moveMag = Math.max(0.2, Math.min(1, B.driveM));
   } else if (gun.want) {
-    // Standing but still needs to bring the gun round.
-    acts.moveAngle = gun.bearing ?? gun.aim;
-    acts.moveMag = 0.06;
+    acts.moveAngle = gun.bearing;      // still needs to bring the gun round
+    acts.moveMag = 0.18;
   }
-  // Keep the smoothed heading honest while firing, so the moment the
-  // shot is over navigation resumes from where the hull actually is
-  // rather than snapping back to a stale heading.
-  if (firing) B.driveA = wantA;
-
-  // A HELD weapon gets a held trigger.
-  //
-  // Firing was re-decided from scratch every single frame, so the
-  // flamethrower came on and off again as the target drifted a degree or
-  // the range estimate wobbled — 176 separate presses averaging 27 ms
-  // each, which is a stutter, not a burn. A player pulls the trigger and
-  // keeps it down. Once a burn starts it is latched for a beat and only
-  // released when the fuel runs out or there is nothing in front any
-  // more, which is also what makes the fuel and the damage ticks behave
-  // the way they were designed to.
-  const holdWeapon = t.weapon === "flame";
-  if (gun.canFire) {
+  if (gun.fire) {
     acts.shoot = true;
     if (!gun.hold) B.shotAt = now;
-    if (gun.hold) { B.flameOn = now; B.burnUntil = now + 750; }
-  } else if (holdWeapon && now < (B.burnUntil ?? 0)
-             && (t.flameFuel ?? 1e9) > 60
-             && B.target && B.target.visible) {
-    acts.shoot = true;
-  } else if (B.flameOn && now - B.flameOn > 400) {
-    B.flameOn = 0;
-    B.burnUntil = 0;
   }
 }
 
 /* ================================================================
-   4c. ABILITIES — what each one is FOR
+   4d. ABILITIES
    ================================================================ */
 
 // A trigger has to hold for a reaction time before it is acted on, and
-// whether this tier reads the situation at all is decided once, when the
-// opportunity appears — not re-rolled until it happens to come up true.
+// whether this tier even reads the opportunity is decided ONCE when it
+// appears — not re-rolled every tick until it happens to come up true.
 function ready(B, key, cond, now, P) {
   if (!cond) { B.abSince[key] = 0; return false; }
   if (!B.abSince[key]) {
     B.abSince[key] = now;
-    B.abSaw[key] = Math.random() < 0.4 + 0.6 * P.ability;
+    B.abSaw[key] = Math.random() < P.abilitySee;
     return false;
   }
   if (!B.abSaw[key]) return false;
-  return now - B.abSince[key] >= P.react * 1000 * (1.4 - 0.5 * P.ability);
+  return now - B.abSince[key] >= P.react * 1000;
 }
 
 function abilities(t, B, world, P, now, acts) {
   if (now - B.abAt < 250) return;
   const cell = world.cell;
-  const target = B.target;
-  const dist = target ? Math.hypot(target.x - t.x, target.y - t.y) : Infinity;
-  const hp = t.hp / Math.max(1, world.maxHp ?? 10);
-  const underFire = B.threats.length > 0;
-  const beam = B.threats.some((x) => x.kind === "beam");
-  const foe = target?.ref ?? null;
-  const heavy = foe && (foe.weapon === "sniper" || foe.weapon === "cannon" || foe.weapon === "rocket");
+  const beam = B.threats.some((x) => x.beam);
+  const d = B.tdist;
 
-  // ---- defence -------------------------------------------------------
+  // ---- defence --------------------------------------------------------
   if (t.defense) {
     let cond = false;
     switch (t.defense) {
       case "armour":
-        // 6 extra HP for 20 s. Worth putting on BEFORE the exchange, and
-        // wasted if refreshed while it's still up.
+        // +6 HP is worth more than most weapons deal. Prevention, so it
+        // goes on BEFORE the exchange — and never while it is still up.
         cond = (t.armour ?? 0) <= 0 &&
-               (underFire || (target && dist < cell * 4) || (heavy && target));
+               (B.threats.length > 0 || (B.target && d < 4) ||
+                (B.foeHeavy && B.target && d < 6));
         break;
       case "heal":
-        // A pad you have to stand on for several seconds — only when
-        // there's time to use it.
-        cond = hp < 0.6 && !underFire && (!target || dist > cell * 3.5);
+        // ~7 HP, but it needs six seconds of standing on a small pad.
+        // Dropping it while being shot just makes us a stationary target
+        // on a known point.
+        // Six seconds standing on a small pad, so it needs a real lull —
+        // not the half-second gap between two incoming rounds. Track
+        // when we were last threatened and require that to be a while
+        // ago, or the bot heals mid-firefight and dies on the pad.
+        cond = B.hp < 0.6 && !B.inZone &&
+               (now - (B.lastThreatAt ?? -1e9)) > 1800 &&
+               (!B.target || !B.target.seen || d > 3.5);
         break;
       case "wall":
-        // Breaks the line of fire. Best against exactly the things that
-        // need a line: beams and slow heavy shots.
-        cond = beam || (underFire && hp < 0.8) || (target && dist < cell * 2 && hp < 0.5);
+        // Breaks a line of fire — best against the things that need one.
+        cond = beam || (B.threats.length > 0 && B.hp < 0.8) ||
+               (B.target && d < 2 && B.hp < 0.5);
         break;
       case "mud":
-        // Dropped behind you to slow a chaser.
-        cond = !!target && dist < cell * 2.5 &&
-               (B.behaviour === "retreat" || hp < 0.5);
+        // Laid behind us as we break away, or on ground they must cross.
+        // Never on ground we need ourselves.
+        cond = !!B.target && d < 2.5 && !B.inZone &&
+               (B.intent === "recover" || B.hp < 0.5);
         break;
     }
     if (ready(B, "def", cond, now, P)) {
@@ -1322,23 +992,26 @@ function abilities(t, B, world, P, now, acts) {
     }
   }
 
-  // ---- agility -------------------------------------------------------
+  // ---- agility ---------------------------------------------------------
   if (t.agility) {
     let cond = false;
     switch (t.agility) {
-      case "phase":
-        // One second of intangibility. Spent too early it lapses before
-        // the shot lands, so it is timed late — and finer the better the
-        // bot is.
-        cond = beam || B.soonest < 0.16 + 0.28 * P.ability;
+      case "phase": {
+        // One second of intangibility, and the sharpest skill expression
+        // in the kit: spent 0.8 s early it lapses before the shot lands.
+        // Fire it late, with a tier-scaled timing error.
+        const err = (Math.random() - 0.5) * 2 * P.phaseErr;
+        cond = beam || B.soonest < 0.22 + err;
         break;
+      }
       case "boost":
-        // 40% speed for 6 s: closing, breaking contact, racing for gear,
-        // or simply outrunning something when there's no phase.
-        cond = (B.behaviour === "retreat") ||
-               (B.behaviour === "collect" && (B.gear?.d ?? 0) > cell * 2.5) ||
-               (B.behaviour === "fight" && dist > cell * 5) ||
-               (underFire && B.soonest < 0.45 && P.ability > 0.5);
+        // 1.4x for six seconds: closing, escaping, racing for a crate,
+        // outrunning the zone. NOT a dodge — half a second to accelerate
+        // is far too slow to beat a bullet.
+        cond = (B.intent === "flee") ||
+               (B.intent === "recover" && B.target && d < 3) ||
+               (B.intent === "collect" && (B.gearPick?.d ?? 0) > cell * 2.5) ||
+               (B.intent === "fight" && d > B.gun.max * 1.2);
         break;
     }
     if (ready(B, "agi", cond, now, P)) {
@@ -1358,9 +1031,17 @@ function angDiff(from, to) {
   return d;
 }
 
+function cIdx(v, cell, n) { return Math.max(0, Math.min(n - 1, Math.floor(v / cell))); }
+
+function clampToArena(p, world) {
+  const w = (world.maze?.cols ?? 12) * world.cell;
+  const h = (world.maze?.rows ?? 9) * world.cell;
+  return { x: Math.max(world.tankR, Math.min(w - world.tankR, p.x)),
+           y: Math.max(world.tankR, Math.min(h - world.tankR, p.y)) };
+}
+
 function segDist(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1, dy = y2 - y1;
-  const L = dx * dx + dy * dy;
+  const dx = x2 - x1, dy = y2 - y1, L = dx * dx + dy * dy;
   let s = L > 1e-9 ? ((px - x1) * dx + (py - y1) * dy) / L : 0;
   s = Math.max(0, Math.min(1, s));
   return Math.hypot(px - (x1 + dx * s), py - (y1 + dy * s));
@@ -1371,8 +1052,7 @@ function nearestOnPath(x, y, pts) {
   let bd = Infinity, bx = 0, by = 0;
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1], b = pts[i];
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const L = dx * dx + dy * dy;
+    const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy;
     let s = L > 1e-9 ? ((x - a.x) * dx + (y - a.y) * dy) / L : 0;
     s = Math.max(0, Math.min(1, s));
     const px = a.x + dx * s, py = a.y + dy * s;
@@ -1382,37 +1062,75 @@ function nearestOnPath(x, y, pts) {
   return { d: bd, x: bx, y: by };
 }
 
-// Distance along a ray to an axis-aligned box, or null.
+// Distance along a ray to the nearest wall, with the surface normal, so
+// a projectile can be reflected off it.
+function rayWalls(world, ox, oy, dx, dy, maxD) {
+  let best = null;
+  for (const r of world.rects ?? []) {
+    const h = raySlab(ox, oy, dx, dy, maxD, r.x, r.y, r.x + r.w, r.y + r.h);
+    if (h && (!best || h.d < best.d)) best = h;
+  }
+  for (const w of world.walls ?? []) {
+    if ((w.hp ?? 1) <= 0) continue;
+    const c = Math.cos(-w.a), s = Math.sin(-w.a);
+    const lx = (ox - w.x) * c - (oy - w.y) * s;
+    const ly = (ox - w.x) * s + (oy - w.y) * c;
+    const ldx = dx * c - dy * s, ldy = dx * s + dy * c;
+    const h = raySlab(lx, ly, ldx, ldy, maxD, -w.hx, -w.hy, w.hx, w.hy);
+    if (h && (!best || h.d < best.d)) {
+      best = { d: h.d,
+               nx: h.nx * Math.cos(w.a) - h.ny * Math.sin(w.a),
+               ny: h.nx * Math.sin(w.a) + h.ny * Math.cos(w.a) };
+    }
+  }
+  return best;
+}
+
 function raySlab(ox, oy, dx, dy, maxD, x1, y1, x2, y2) {
-  let tmin = 0, tmax = maxD;
-  for (const [o, d, lo, hi] of [[ox, dx, x1, x2], [oy, dy, y1, y2]]) {
+  let tmin = 0, tmax = maxD, nx = 0, ny = 0;
+  const axes = [[ox, dx, x1, x2, 0], [oy, dy, y1, y2, 1]];
+  for (const [o, d, lo, hi, ax] of axes) {
     if (Math.abs(d) < 1e-9) { if (o < lo || o > hi) return null; continue; }
-    let t1 = (lo - o) / d, t2 = (hi - o) / d;
-    if (t1 > t2) { const s = t1; t1 = t2; t2 = s; }
-    if (t1 > tmin) tmin = t1;
+    let t1 = (lo - o) / d, t2 = (hi - o) / d, sign = -1;
+    if (t1 > t2) { const s = t1; t1 = t2; t2 = s; sign = 1; }
+    if (t1 > tmin) { tmin = t1; nx = ax === 0 ? sign : 0; ny = ax === 1 ? sign : 0; }
     if (t2 < tmax) tmax = t2;
     if (tmin > tmax) return null;
   }
-  return tmin;
+  if (tmin <= 0 || tmin > maxD) return null;
+  return { d: tmin, nx, ny };
 }
 
-// Segment vs an oriented box (a wall someone placed): rotate into the
-// box's frame and it becomes segment-vs-AABB.
-// Where along the segment a padded slab is first touched, as a
-// fraction 0..1, or null if it is missed entirely. Liang–Barsky in the
-// slab's own frame.
-//
-// This used to return only a boolean, and clearance() then guessed the
-// distance from the slab's centre minus its LARGEST half-extent. For a
-// wall — long and thin — that guess is wrong by most of its length in
-// one direction and pessimistic in the other, so bots both walked into
-// walls they thought were far away and refused gaps that were open.
-// The exact entry point was already being computed here; it was simply
-// discarded.
+function clearance(t, world, ray, maxD, halfW) {
+  let d = maxD;
+  for (const r of world.rects ?? []) {
+    const h = raySlab(t.x, t.y, ray.cx, ray.cy, maxD,
+                      r.x - halfW, r.y - halfW, r.x + r.w + halfW, r.y + r.h + halfW);
+    if (h && h.d < d) d = h.d;
+  }
+  for (const w of world.walls ?? []) {
+    if ((w.hp ?? 1) <= 0) continue;
+    if (segHitsBox(t.x, t.y, t.x + ray.cx * maxD, t.y + ray.cy * maxD, w, halfW)) {
+      const dd = Math.max(0, Math.hypot(w.x - t.x, w.y - t.y) - Math.max(w.hx, w.hy) - halfW);
+      if (dd < d) d = dd;
+    }
+  }
+  return Math.max(0, d);
+}
+
+function mostOpen(t, world, prefer) {
+  let bi = 0, bv = -Infinity;
+  for (let i = 0; i < DIRS; i++) {
+    const c = clearance(t, world, RAY[i], world.tankR * 3, world.tankR * 0.66);
+    const v = c + Math.cos(angDiff(RAY[i].a, prefer)) * world.tankR;
+    if (v > bv) { bv = v; bi = i; }
+  }
+  return RAY[bi].a;
+}
+
 function segHitsBox(x1, y1, x2, y2, w, pad) {
   const c = Math.cos(-w.a), s = Math.sin(-w.a);
-  const ax = x1 - w.x, ay = y1 - w.y;
-  const bx = x2 - w.x, by = y2 - w.y;
+  const ax = x1 - w.x, ay = y1 - w.y, bx = x2 - w.x, by = y2 - w.y;
   const p1x = ax * c - ay * s, p1y = ax * s + ay * c;
   const p2x = bx * c - by * s, p2y = bx * s + by * c;
   const hx = w.hx + pad, hy = w.hy + pad;
@@ -1425,12 +1143,10 @@ function segHitsBox(x1, y1, x2, y2, w, pad) {
     else { if (r < t0) return false; if (r < t1) t1 = r; }
     return true;
   };
-  const hit = clip(-dx, p1x + hx) && clip(dx, hx - p1x) &&
-              clip(-dy, p1y + hy) && clip(dy, hy - p1y);
-  return hit ? t0 : null;
+  return clip(-dx, p1x + hx) && clip(dx, hx - p1x) &&
+         clip(-dy, p1y + hy) && clip(dy, hy - p1y);
 }
 
-// Is the straight run between two points free of maze AND placed walls?
 function clearLine(world, x1, y1, x2, y2, r) {
   for (const rc of world.rects ?? []) {
     if (segHitsRect(x1, y1, x2, y2, rc, r)) return false;
@@ -1439,24 +1155,15 @@ function clearLine(world, x1, y1, x2, y2, r) {
     if ((w.hp ?? 1) <= 0) continue;
     if (segHitsBox(x1, y1, x2, y2, w, r)) return false;
   }
-  // The ANGLED BOUNDARY of a shaped arena. Every round, laser and tank
-  // in the game collides with these slabs — and the bots were the only
-  // things that could not see them. The data was being handed to them
-  // and never read, so on any arena that isn't a plain rectangle they
-  // planned straight lines through the perimeter and drove into it.
-  // That is the walking-into-walls.
-  for (const sl of world.diag ?? []) {
-    if (segHitsBox(x1, y1, x2, y2, sl, r)) return false;
-  }
   return true;
 }
 
 function segHitsRect(x1, y1, x2, y2, rc, r) {
-  const lo1 = rc.x - r, lo2 = rc.y - r;
-  const hi1 = rc.x + rc.w + r, hi2 = rc.y + rc.h + r;
-  const dx = x2 - x1, dy = y2 - y1;
-  const L = Math.hypot(dx, dy);
-  if (L < 1e-9) return x1 >= lo1 && x1 <= hi1 && y1 >= lo2 && y1 <= hi2;
-  const hit = raySlab(x1, y1, dx / L, dy / L, L, lo1, lo2, hi1, hi2);
-  return hit != null && hit <= L;
+  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy);
+  if (L < 1e-9) {
+    return x1 >= rc.x - r && x1 <= rc.x + rc.w + r &&
+           y1 >= rc.y - r && y1 <= rc.y + rc.h + r;
+  }
+  return !!raySlab(x1, y1, dx / L, dy / L, L,
+                   rc.x - r, rc.y - r, rc.x + rc.w + r, rc.y + rc.h + r);
 }

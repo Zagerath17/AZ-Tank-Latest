@@ -787,7 +787,20 @@ function startRound(seed) {
   // this works for every shape, not just rectangles.
   const rd = ringDistance(S.maze);
   S.zoneDist = rd.dist;        // per-cell layer from the boundary
+  // Derive the deepest layer from the SAME geometry the zone is drawn
+  // and damaged by. The BFS ring count and the polygon inset don't
+  // necessarily close at the same level — on a triangle the polygon runs
+  // out a layer earlier — and when they disagreed the final ring drew as
+  // fully dead while the game still thought a safe pocket existed, so
+  // nothing took damage at all.
   S.zoneMaxLayer = rd.maxLayer;
+  {
+    let last = 0;
+    for (let L = 1; L <= rd.maxLayer + 2; L++) {
+      if (zonePolyAt(L)) last = L; else break;
+    }
+    S.zoneMaxLayer = last;
+  }
   S.zoneLevel = 0;             // layers currently permanently red
   S.zoneWarnLevel = -1;        // layer currently blinking (‑1 = none)
   // A matchmade 1v1 always closes on the default cadence. Custom
@@ -4609,7 +4622,9 @@ function draw(now) {
 
   // Walls: stone brick, markedly darker than the floor, with the shadow
   // the sun casts from them laid down first.
-  drawWallLayer(ctx, scene);
+  drawWallLayer(ctx, scene, {
+    x: -ox / s, y: -oy / s, w: cw / s, h: ch / s,
+  });
 
   // Shaped arena: just lift the silhouette clip. The angled border used
   // to be painted here as a flat grey stroke, which is why it was the

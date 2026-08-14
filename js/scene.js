@@ -775,7 +775,12 @@ export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = nu
   // thing the profile shows eating ~half of all raster time. Quantising
   // to 1/16 keeps it from re-baking on every sub-pixel camera change
   // while staying close enough that the draw is a straight copy.
-  let d = Math.max(0.5, Math.min(2.5, Math.round(viewScale * 16) / 16));
+  // EXACTLY the view scale — no quantising. Any mismatch at all sends
+  // the blit down Skia's filtered-resample path, and the profile shows
+  // that path is still where the time goes. Re-baking on a camera change
+  // is rare (the view only changes on resize), so paying for an exact
+  // match is far cheaper than filtering every pixel every frame.
+  let d = Math.max(0.5, Math.min(2.5, viewScale));
   // Enough surround to cover the letterbox on any sensible aspect; the
   // flat backstop underneath catches anything beyond it.
   const pad = Math.round(Math.max(worldW, worldH) * 0.30);
@@ -873,8 +878,33 @@ export function drawGround(ctx, scene, view) {
   }
 }
 
-export function drawWallLayer(ctx, scene) {
+export function drawWallLayer(ctx, scene, view) {
   if (!scene) return;
-  blitNative(ctx, scene.shadow.cv, -scene.shadow.pad, -scene.shadow.pad);
-  blitNative(ctx, scene.walls, 0, 0);
+  // Same treatment as the ground: copy only what the camera can see.
+  blitWindow(ctx, scene.shadow.cv, -scene.shadow.pad, -scene.shadow.pad, view);
+  blitWindow(ctx, scene.walls, 0, 0, view);
+}
+
+// Blit the visible part of a bitmap, 1:1 in device space.
+function blitWindow(ctx, cv, ox, oy, view) {
+  const u = wu(cv);
+  const d = (cv.width / Math.max(1, u.w)) || 1;
+  if (!view) { blitNative(ctx, cv, ox, oy); return; }
+  const x0 = Math.max(ox, view.x), y0 = Math.max(oy, view.y);
+  const x1 = Math.min(ox + u.w, view.x + view.w);
+  const y1 = Math.min(oy + u.h, view.y + view.h);
+  if (x1 <= x0 || y1 <= y0) return;
+  const m = ctx.getTransform ? ctx.getTransform() : null;
+  const sx = (x0 - ox) * d, sy = (y0 - oy) * d;
+  const sw = (x1 - x0) * d, sh = (y1 - y0) * d;
+  if (m && Math.abs(m.a / d - 1) < 0.01) {
+    const dx = m.a * x0 + m.c * y0 + m.e;
+    const dy = m.b * x0 + m.d * y0 + m.f;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(cv, sx, sy, sw, sh, Math.round(dx), Math.round(dy), sw, sh);
+    ctx.restore();
+  } else {
+    ctx.drawImage(cv, sx, sy, sw, sh, x0, y0, x1 - x0, y1 - y0);
+  }
 }
