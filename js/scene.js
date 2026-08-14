@@ -769,7 +769,13 @@ export function buildScene(worldW, worldH, rects, seed, viewScale = 1, maze = nu
   // Round UP to the next half step: rounding to nearest can land below
   // what the display actually needs and leave the detail soft, which is
   // the whole thing being fixed here.
-  let d = Math.max(1, Math.min(2, Math.ceil(viewScale * 2) / 2));
+  // Bake at EXACTLY the density the arena is drawn at. Rounding to a
+  // half-step meant the blit ratio was never 1 (0.8, 1.19, …), and any
+  // ratio other than 1 sends Skia down its filtered-resample path — the
+  // thing the profile shows eating ~half of all raster time. Quantising
+  // to 1/16 keeps it from re-baking on every sub-pixel camera change
+  // while staying close enough that the draw is a straight copy.
+  let d = Math.max(0.5, Math.min(2.5, Math.round(viewScale * 16) / 16));
   // Enough surround to cover the letterbox on any sensible aspect; the
   // flat backstop underneath catches anything beyond it.
   const pad = Math.round(Math.max(worldW, worldH) * 0.30);
@@ -808,14 +814,31 @@ const wu = (cv) => cv.__wu ?? { w: cv.width, h: cv.height };
 // Scaling the transform by 1/density and drawing 1:1 means the blit is
 // a straight copy instead of a filtered resample, which is the single
 // biggest win available in the renderer.
-function blitNative(ctx, cv, x, y) {
+// Blit a baked bitmap with NO resampling.
+//
+// The canvas transform in play already carries the camera scale, so
+// "drawing at native size" underneath it still hands Skia a scale
+// factor. The only way to get a straight copy is to drop to the device
+// transform for the blit itself: then one bitmap pixel is one device
+// pixel, and the copy is a memcpy rather than a filtered resample.
+function blitNative(ctx, cv, x, y, view) {
   const u = wu(cv);
   const d = (cv.width / Math.max(1, u.w)) || 1;
-  if (Math.abs(d - 1) < 0.001) { ctx.drawImage(cv, x, y); return; }
+  const m = ctx.getTransform ? ctx.getTransform() : null;
+  if (!m) { ctx.drawImage(cv, x, y, u.w, u.h); return; }
+  // Where the bitmap's top-left lands, in device pixels.
+  const dx = m.a * x + m.c * y + m.e;
+  const dy = m.b * x + m.d * y + m.f;
+  const ratio = m.a / d;                       // device px per bitmap px
   ctx.save();
-  ctx.translate(x, y);
-  ctx.scale(1 / d, 1 / d);
-  ctx.drawImage(cv, 0, 0);          // 1:1 — no resample
+  if (Math.abs(ratio - 1) < 0.02) {
+    // Exactly 1:1 — the fast path we want almost always.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(cv, Math.round(dx), Math.round(dy));
+  } else {
+    ctx.setTransform(ratio, 0, 0, ratio, dx, dy);
+    ctx.drawImage(cv, 0, 0);
+  }
   ctx.restore();
 }
 
@@ -836,7 +859,18 @@ export function drawGround(ctx, scene, view) {
   if (x1 <= x0 || y1 <= y0) return;
   const sx = (x0 + scene.pad) * d, sy = (y0 + scene.pad) * d;
   const sw = (x1 - x0) * d, sh2 = (y1 - y0) * d;
-  ctx.drawImage(cv, sx, sy, sw, sh2, x0, y0, x1 - x0, y1 - y0);
+  const m = ctx.getTransform ? ctx.getTransform() : null;
+  if (m && Math.abs(m.a / d - 1) < 0.02) {
+    // 1:1 in device space — a straight copy of just the visible window.
+    const ddx = m.a * x0 + m.c * y0 + m.e;
+    const ddy = m.b * x0 + m.d * y0 + m.f;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(cv, sx, sy, sw, sh2, Math.round(ddx), Math.round(ddy), sw, sh2);
+    ctx.restore();
+  } else {
+    ctx.drawImage(cv, sx, sy, sw, sh2, x0, y0, x1 - x0, y1 - y0);
+  }
 }
 
 export function drawWallLayer(ctx, scene) {

@@ -95,7 +95,17 @@ const sat = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 // The BRDF is evaluated in LINEAR light; skipping this is the usual
 // reason hand-tuned shading comes out chalky.
 const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
-const toSRGB = (c) => (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
+// Linear -> sRGB, via a lookup table. This runs three times for every
+// pixel of every baked tile, and Math.pow is expensive enough that the
+// profile showed it as a measurable slice of raster time all on its own.
+// 1024 entries is far finer than the 8-bit output can express.
+const SRGB_N = 1024;
+const SRGB_LUT = new Float32Array(SRGB_N + 1);
+for (let i = 0; i <= SRGB_N; i++) {
+  const c = i / SRGB_N;
+  SRGB_LUT[i] = c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+}
+const toSRGB = (c) => SRGB_LUT[(c <= 0 ? 0 : c >= 1 ? SRGB_N : (c * SRGB_N) | 0)];
 
 function hexToLinear(hex) {
   const n = parseInt(String(hex).slice(1), 16) || 0;

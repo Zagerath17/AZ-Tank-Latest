@@ -615,11 +615,18 @@ function navigate(t, B, world, P, now, gun) {
   if (world.zoneDist) {
     const cellPx = world.cell;
     const zl = world.zoneLevel ?? 0, zw = world.zoneWarn ?? -1;
-    const layerAt = (x, y) => {
-      const c = Math.floor(x / cellPx), rr2 = Math.floor(y / cellPx);
-      const row = world.zoneDist[rr2];
-      return row ? (row[c] ?? Infinity) : Infinity;
-    };
+    // Prefer the exact polygon depth the game itself damages by; the
+    // per-cell grid is only a fallback for older callers.
+    const layerAt = world.zoneDepthAt
+      ? (x, y) => {
+          const d = world.zoneDepthAt(x, y);
+          return d === Infinity ? Infinity : Math.floor(d);
+        }
+      : (x, y) => {
+          const c = Math.floor(x / cellPx), rr2 = Math.floor(y / cellPx);
+          const row = world.zoneDist[rr2];
+          return row ? (row[c] ?? Infinity) : Infinity;
+        };
     const badness = (L) => (L === Infinity ? 0 : L < zl ? 1 : L === zw ? 0.6 : L === zl ? 0.3 : 0);
     const here = badness(layerAt(t.x, t.y));
     for (let i = 0; i < DIRS; i++) {

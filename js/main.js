@@ -127,7 +127,14 @@ export function hydrateTankIcons(root, px = 34) {
       patColors: el.dataset.tankPc ? el.dataset.tankPc.split(",") : [],
     };
     try {
-      el.appendChild(tankSpriteCanvas(look, px, el.dataset.tank));
+      // Size the sprite to the box CSS actually gave it, rather than a
+      // fixed 34 px. Everything here is a canvas, so a stylesheet change
+      // alone could never make these bigger — the bitmap kept its own
+      // hardcoded size and simply sat inside a larger element. Falling
+      // back to `px` keeps every other icon exactly as it was.
+      const box = el.getBoundingClientRect?.();
+      const want = Math.round(Math.max(box?.width ?? 0, box?.height ?? 0)) || px;
+      el.appendChild(tankSpriteCanvas(look, want, el.dataset.tank));
     } catch (e) {
       // Canvas unavailable: fall back to a flat swatch rather than a gap.
       el.style.background = PALETTE[look.color] ?? PALETTE[DEFAULT_SKIN];

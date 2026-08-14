@@ -1282,7 +1282,11 @@ function stepTanks(now, dt) {
             mudSlow: MUD.slow,
           // The closing zone. Bots were completely blind to it and would
           // sit in a red cell taking ticks until they died.
+          // Give the bots the SAME polygon truth the damage uses, not
+          // the old per-cell grid — otherwise they would flee a square
+          // staircase that no longer matches where the zone actually is.
           zoneDist: S.zoneActive ? S.zoneDist : null,
+          zoneDepthAt: S.zoneActive ? zoneDepthAt : null,
           zoneLevel: S.zoneLevel ?? 0,
           zoneWarn: S.zoneWarnLevel ?? -1,
             tanks: S.tanks,
@@ -2657,6 +2661,136 @@ function stepGear(now) {
 // The safe box under the current shrink level: [c0..c1] × [r0..r1].
 // The map never physically shrinks now, so the "safe box" is simply
 // the full playable grid — tanks may drive anywhere, red zone or not.
+/* ---------- zone geometry ----------
+   The shrinking zone is the arena's OWN outline, stepped inwards one
+   cell at a time. It used to be built out of whole grid cells, so on a
+   triangular or hexagonal map the boundary came out as a staircase of
+   squares that had nothing to do with the arena's actual edges. Insetting
+   the polygon instead gives a triangle inside a triangle, with straight
+   edges — and because the same polygon drives the damage test, what you
+   see is exactly what hurts you.
+*/
+
+// Offset a convex polygon inward by `d`, by pushing every edge along its
+// inward normal and re-intersecting neighbouring edges. Straight edges
+// stay straight and corners stay sharp.
+function insetPoly(poly, d) {
+  const n = poly.length;
+  if (n < 3) return null;
+  // Signed area tells us the winding, so the normal points the right way.
+  let area = 0;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    area += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+  }
+  const sign = area >= 0 ? 1 : -1;
+  const lines = [];
+  for (let i = 0; i < n; i++) {
+    const [x1, y1] = poly[i];
+    const [x2, y2] = poly[(i + 1) % n];
+    const ex = x2 - x1, ey = y2 - y1;
+    const len = Math.hypot(ex, ey) || 1;
+    // Inward normal for this winding.
+    const nx = (ey / len) * -sign, ny = (-ex / len) * -sign;
+    lines.push([x1 + nx * d, y1 + ny * d, x2 + nx * d, y2 + ny * d]);
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const A = lines[(i + n - 1) % n], B = lines[i];
+    const p = lineHit(A, B);
+    if (!p) return null;               // collapsed — nothing left inside
+    out.push(p);
+  }
+  return out;
+}
+
+function lineHit(A, B) {
+  const [ax1, ay1, ax2, ay2] = A, [bx1, by1, bx2, by2] = B;
+  const dax = ax2 - ax1, day = ay2 - ay1;
+  const dbx = bx2 - bx1, dby = by2 - by1;
+  const den = dax * dby - day * dbx;
+  if (Math.abs(den) < 1e-9) return null;   // parallel
+  const t = ((bx1 - ax1) * dby - (by1 - ay1) * dbx) / den;
+  return [ax1 + dax * t, ay1 + day * t];
+}
+
+function signedArea(poly) {
+  let a = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    a += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+  }
+  return a / 2;
+}
+
+function polyArea(poly) {
+  let a = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    a += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+  }
+  return Math.abs(a) / 2;
+}
+
+function pointInPolyWorld(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > py) !== (yj > py) &&
+        px < ((xj - xi) * (py - yi)) / ((yj - yi) || 1e-9) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// The safe region at a given layer: the arena outline pulled in by that
+// many cells. For a rectangular arena the "polygon" is the box itself,
+// so the same code covers every map.
+function zonePolyAt(level) {
+  const base = S.polyWorld ?? [
+    [0, 0], [S.worldW, 0], [S.worldW, S.worldH], [0, S.worldH],
+  ];
+  if (!level) return base;
+  const inset = insetPoly(base, level * CELL);
+  if (!inset) return null;
+  // An inset past the shape's inradius turns itself inside out and the
+  // area starts GROWING again — a triangle inset too far comes back as a
+  // triangle pointing the other way. Catch that by checking the winding
+  // is unchanged as well as the area, or the zone would reopen into a
+  // bogus safe patch at the deepest layers.
+  if (polyArea(inset) < CELL * CELL * 0.25) return null;            // closed
+  if (signedArea(inset) * signedArea(base) < 0) return null;        // flipped
+  // A shape inset past its inradius folds through itself and the area
+  // starts GROWING again, so "smaller than the arena" is not enough —
+  // each level must also be smaller than the one before it. Once a level
+  // closes, everything deeper is closed too.
+  if (polyArea(inset) >= polyArea(base)) return null;
+  const prev = level > 1 ? insetPoly(base, (level - 1) * CELL) : base;
+  if (prev && polyArea(inset) >= polyArea(prev)) return null;
+  return inset;
+}
+
+// How deep into the closing zone a point is, in cells: 0 = still safe,
+// higher = further into the dead ground. Measured against the polygon,
+// so it is exact on a diagonal edge rather than rounded to a cell.
+function zoneDepthAt(x, y) {
+  const base = S.polyWorld ?? [
+    [0, 0], [S.worldW, 0], [S.worldW, S.worldH], [0, S.worldH],
+  ];
+  if (!pointInPolyWorld(x, y, base)) return Infinity;   // outside the arena
+  // Distance to the nearest edge, in cells.
+  let best = Infinity;
+  for (let i = 0, j = base.length - 1; i < base.length; j = i++) {
+    const d = ptSegDist(x, y, base[j][0], base[j][1], base[i][0], base[i][1]);
+    if (d < best) best = d;
+  }
+  return best / CELL;
+}
+
+function ptSegDist(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const L = dx * dx + dy * dy;
+  let t = L > 1e-9 ? ((px - x1) * dx + (py - y1) * dy) / L : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + dx * t), py - (y1 + dy * t));
+}
+
 function safeBox() {
   return { c0: 0, r0: 0, c1: S.maze.cols - 1, r1: S.maze.rows - 1 };
 }
@@ -2664,11 +2798,13 @@ function safeBox() {
 // Which zone layer a world point sits in (its cell's ring-distance),
 // or Infinity if it's outside the shape / off-grid.
 function cellLayerAt(x, y) {
-  if (!S.zoneDist) return Infinity;
-  const c = Math.floor(x / CELL);
-  const r = Math.floor(y / CELL);
-  if (r < 0 || r >= S.maze.rows || c < 0 || c >= S.maze.cols) return Infinity;
-  return S.zoneDist[r][c];
+  if (!S.zoneActive && !S.zoneDist) return Infinity;
+  // Measured against the arena POLYGON rather than looked up per cell, so
+  // the boundary is exact on a diagonal edge instead of being rounded out
+  // to the nearest square. This is the same geometry the zone is drawn
+  // from, which is what keeps the damage honest: if it looks safe, it is.
+  const d = zoneDepthAt(x, y);
+  return d === Infinity ? Infinity : Math.floor(d);
 }
 
 // Is the cell containing (x,y) permanently red? (layer < zoneLevel)
@@ -4430,61 +4566,39 @@ function draw(now) {
     // through a corner-cutting pass turns the staircase into a flowing
     // boundary that follows the arena's shape — including the outside of
     // a non-rectangular map, where per-cell rounding looked worst.
-    // Smooth boundary WITHOUT tracing outlines. Edge-chaining kept
-    // producing broken loops (an outline that fails to close draws
-    // nothing at all, which is worse than a jagged one), so instead the
-    // region is rasterised into an offscreen mask at low resolution and
-    // blurred — thresholding a blurred mask rounds every corner and
-    // follows the arena's shape for free, with no topology to get wrong.
-    const zoneMask = (want) => {
-      const SS = 4;                                  // px per cell in the mask
-      const mw = cols * SS, mh = rows * SS;
-      let cv = S._zoneCv;
-      if (!cv || cv.width !== mw || cv.height !== mh) {
-        cv = S._zoneCv = document.createElement("canvas");
-        cv.width = mw; cv.height = mh;
+    // The zone as REAL GEOMETRY: the arena's own outline, stepped inward
+    // one cell per layer. On a triangular map the dead ground is the
+    // triangle minus a smaller triangle — straight edges, sharp corners,
+    // no staircase of squares and no blur. Drawn even-odd so the safe
+    // interior is punched cleanly out of the dead region.
+    const drawRing = (outer, inner, style) => {
+      if (!outer) return;
+      ctx.fillStyle = style;
+      ctx.beginPath();
+      ctx.moveTo(outer[0][0], outer[0][1]);
+      for (let i2 = 1; i2 < outer.length; i2++) ctx.lineTo(outer[i2][0], outer[i2][1]);
+      ctx.closePath();
+      if (inner) {
+        ctx.moveTo(inner[0][0], inner[0][1]);
+        for (let i2 = 1; i2 < inner.length; i2++) ctx.lineTo(inner[i2][0], inner[i2][1]);
+        ctx.closePath();
       }
-      const g = cv.getContext("2d");
-      g.setTransform(1, 0, 0, 1, 0, 0);
-      g.clearRect(0, 0, mw, mh);
-      g.fillStyle = "#fff";
-      let any = false;
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          if (cellState[r][c] !== want) continue;
-          any = true;
-          g.fillRect(c * SS, r * SS, SS, SS);
-        }
-      }
-      return any ? cv : null;
+      ctx.fill("evenodd");
     };
-    // A tinted silhouette, not the white mask: stamp the mask into a
-    // scratch layer, tint it, then blit. Simple and always closed.
-    const tintLayer = (want, css) => {
-      const mask = zoneMask(want);
-      if (!mask) return;
-      let lay = S._zoneLay;
-      const lw = cols * CELL, lh = rows * CELL;
-      if (!lay || lay.width !== lw || lay.height !== lh) {
-        lay = S._zoneLay = document.createElement("canvas");
-        lay.width = lw; lay.height = lh;
-      }
-      const lg = lay.getContext("2d");
-      lg.setTransform(1, 0, 0, 1, 0, 0);
-      lg.clearRect(0, 0, lw, lh);
-      lg.filter = "blur(" + (CELL * 0.16).toFixed(1) + "px)";
-      lg.drawImage(mask, 0, 0, lw, lh);
-      lg.filter = "none";
-      // Harden the blurred edge a little so it reads as a boundary
-      // rather than a haze, then tint the whole silhouette.
-      lg.globalCompositeOperation = "source-in";
-      lg.fillStyle = css;
-      lg.fillRect(0, 0, lw, lh);
-      lg.globalCompositeOperation = "source-over";
-      ctx.drawImage(lay, 0, 0);
-    };
-    tintLayer(2, "rgba(200, 32, 30, 0.42)");
-    tintLayer(1, `rgba(255, 45, 40, ${0.22 + 0.28 * blink})`);
+
+    const arena = zonePolyAt(0);
+    const deadEdge = zonePolyAt(S.zoneLevel ?? 0);      // inside this is not yet dead
+    // Everything already fallen: from the arena edge in to the current level.
+    drawRing(arena, deadEdge, "rgba(200, 32, 30, 0.42)");
+
+    // The layer that is currently blinking its warning, one cell deeper.
+    if ((S.zoneWarnLevel ?? -1) >= 0 && deadEdge) {
+      const warnInner = zonePolyAt((S.zoneWarnLevel ?? 0) + 1);
+      const a0 = ctx.globalAlpha;
+      ctx.globalAlpha = a0 * (0.22 + 0.28 * blink);
+      drawRing(deadEdge, warnInner, "rgb(255, 45, 40)");
+      ctx.globalAlpha = a0;
+    }
   }
 
   // Mud is a puddle ON THE GROUND, so it goes down before the masonry.
@@ -4582,11 +4696,22 @@ function draw(now) {
     }
   }
 
+  for (const g of S.gear) drawGear(ctx, g, TANK_R, pulse, now);
+
+  for (const t of S.tanks) if (t.dead && !t.gone) drawWreck(t);
+  for (const L of S.laserPaths ?? []) drawLaserPreview(L);
+  for (const A of S.sniperAims ?? []) drawSniperAim(A);
+  drawTankShadows(now);   // all shadows first, so none lands on a hull
+  for (const t of S.tanks) if (!t.dead && !t.gone) drawTank(t, now);
+
   // Placed walls throw the same shadow the permanent masonry does —
   // same height, same sun, same swept shape — so a dropped wall sits in
   // the scene rather than floating on top of it.
   if (S.walls.length) {
-    const WH = 20;                                  // matches scene.js
+    // A dropped barricade is a lower thing than the arena's masonry, so
+    // it throws a correspondingly shorter shadow (permanent walls use 20
+    // in scene.js).
+    const WH = 13;
     const ox = SHADOW.dx * WH, oy = SHADOW.dy * WH;
     ctx.save();
     ctx.fillStyle = "rgba(20,22,25,0.34)";
@@ -4609,14 +4734,9 @@ function draw(now) {
     ctx.restore();
   }
 
+  // The barricade itself, on top of the shade it casts.
   for (const w of S.walls) drawWall(w, now);
-  for (const g of S.gear) drawGear(ctx, g, TANK_R, pulse, now);
 
-  for (const t of S.tanks) if (t.dead && !t.gone) drawWreck(t);
-  for (const L of S.laserPaths ?? []) drawLaserPreview(L);
-  for (const A of S.sniperAims ?? []) drawSniperAim(A);
-  drawTankShadows(now);   // all shadows first, so none lands on a hull
-  for (const t of S.tanks) if (!t.dead && !t.gone) drawTank(t, now);
   // Walls throw their shadows across the tanks too, not just the floor.
   castWallShadowsOnTanks(scene);
 
@@ -5625,11 +5745,15 @@ function drawTank(t, now) {
     // Clip to the hull rectangle so neither the material nor the
     // pattern ever spills onto the treads.
     ctx.beginPath();
-    // Clip to the FULL hull footprint, treads included. It used to clip
-    // to the narrower body box while the material tile behind it is a
-    // square — so as the tank turned, the tile's corners showed past the
-    // clip as a pale rectangle sliding under the hull.
-    rrPath(-R * 0.98, -R * 0.86, R * 1.96, R * 1.72, R * 0.26);
+    // Clip to the BODY between the treads — never over them.
+    //
+    // The treads are painted just above (bands from ±0.83 R in to
+    // ±0.41 R), so widening this clip to the full hull, as it briefly
+    // was, let the material and pattern paint straight over them and the
+    // tank lost its tracks entirely. The body box is the correct extent;
+    // the pale-rectangle artefact this was meant to cure is handled by
+    // the material tile being drawn to fit rather than overhanging.
+    rrPath(-R * 0.9, -R * 0.4, R * 1.8, R * 0.8, R * 0.2);
     ctx.clip();
     if (bodyIsMaterial) fillMaterial(bodyColor, R, baseHexOv, t.a);
     else { ctx.fillStyle = hullPaint(bodyColor, R, baseHexOv, t.a); ctx.fillRect(-R * 1.2, -R * 1.2, R * 2.4, R * 2.4); }
